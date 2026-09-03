@@ -1,0 +1,25 @@
+[tools]
+"ubi:rust-cross/cargo-zigbuild" = "0.23.4"
+node = "latest"
+zig = "0.16.0"
+
+[tasks.check]
+description = "fmt, clippy (deny warnings), tests"
+run = """
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+"""
+
+[tasks.install]
+description = "Build the release binary and install it to ~/.cargo/bin"
+run = "cargo install --path . --locked --force"
+
+[tasks.demo]
+description = "Open the bundled demo presentation"
+run = "cargo run -- demo"
+
+[tasks."assets:update"]
+description = "Bump the embedded browser libraries to their latest versions"
+dir = "assets"
+run = "npm update --save && npm install --ignore-scripts --no-audit --no-fund"

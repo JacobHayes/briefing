@@ -1,0 +1,56 @@
+{
+  "title": "Briefing demo",
+  "mode": "decision",
+  "goal": "Understand the interaction and choose whether this pacing feels useful",
+  "chunks": [
+    {
+      "title": "One idea at a time",
+      "purpose": "Start with the core interaction rather than the entire design.",
+      "mainPoint": "A briefing presents one meaningful concept at a time while keeping the goal and prior context available.",
+      "keyPoints": [
+        "Use Next and Back to control pace.",
+        "View all is always available when sequential reading is too slow.",
+        "Nothing advances automatically."
+      ],
+      "details": "Rich content can clarify a chunk without changing the authoring model.\n\n| Content | Useful when |\n|---|---|\n| Tables | Evidence or tradeoffs are easier to compare in rows |\n| Mermaid | A flow, architecture, or state transition is easier to see than read |\n| Vega-Lite | A compact chart explains relative magnitude or trend |\n\n```mermaid\nflowchart LR\n  agent[Agent reasoning] --> briefing[Browser briefing]\n  briefing --> feedback[Notes and decisions]\n  feedback --> agent\n```",
+      "remember": ["The interface controls presentation; the agent still does the research and reasoning."],
+      "checkpoint": "What feels different from reading a normal long chat response?"
+    },
+    {
+      "title": "Return only useful signal",
+      "purpose": "Avoid making the briefing itself create more information overload.",
+      "mainPoint": "The agent receives your decisions, notes, inline comments, checkpoint answers, and sections flagged for follow-up - not a noisy transcript of every click.",
+      "details": "Draft state stays in browser-local storage while the page is open. The server binds to a single Tailscale 100.x address when available, otherwise 127.0.0.1, and uses an unguessable URL for each presentation.\n\n```vega-lite\n{\n  \"$schema\": \"https://vega.github.io/schema/vega-lite/v5.json\",\n  \"data\": { \"values\": [\n    { \"signal\": \"notes\", \"count\": 2 },\n    { \"signal\": \"decisions\", \"count\": 1 },\n    { \"signal\": \"comments\", \"count\": 3 }\n  ] },\n  \"mark\": \"bar\",\n  \"encoding\": {\n    \"x\": { \"field\": \"signal\", \"type\": \"nominal\" },\n    \"y\": { \"field\": \"count\", \"type\": \"quantitative\" }\n  }\n}\n```",
+      "remember": ["Notes are optional.", "Flagging a section gives the agent explicit follow-up direction."],
+      "checkpoint": "Is there anything else the agent should receive from the interface?"
+    }
+  ],
+  "tray": {
+    "keyContext": [
+      "The same tool runs inside Pi, Claude Code, and Codex.",
+      "The browser is the presentation layer; the agent remains in the terminal."
+    ],
+    "runningSummary": "Briefing = paced semantic cards + persistent context + structured decisions.",
+    "openQuestions": ["When should the agent invoke it proactively?"]
+  },
+  "decisions": [
+    {
+      "question": "How should briefing be triggered by default?",
+      "context": "This only affects when the agent opens the browser presentation; normal concise answers remain available.",
+      "options": [
+        {
+          "label": "Always proactive",
+          "description": "Let the agent open a briefing whenever an answer crosses a complexity threshold.",
+          "tradeoffs": ["More consistent pacing", "Higher interruption risk"],
+          "recommended": true
+        },
+        {
+          "label": "Explicit or clearly complex requests",
+          "description": "Reserve proactive invocation for only the clearest complex cases, otherwise ask for it.",
+          "tradeoffs": ["Lower surprise", "Some useful cases may remain in normal chat"]
+        }
+      ]
+    }
+  ],
+  "completionPrompt": "Does this interaction work for you?"
+}

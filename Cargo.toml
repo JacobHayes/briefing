@@ -1,0 +1,33 @@
+[package]
+name = "briefing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8"
+base64 = "0.23.1"
+clap = { version = "4.6.6", features = ["derive", "env"] }
+pulldown-cmark = "0.13.4"
+rand = "0.10.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rmcp = { version = "3.2.0", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+schemars = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-roots", "webpki-tokio"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "blocking"] }
+tempfile = "3.27.0"

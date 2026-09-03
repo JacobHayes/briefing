@@ -1,0 +1,80 @@
+on:
+  cli:
+    init:
+      commit-sha: ${{ event.git.sha }}
+      branch: ${{ event.git.branch }}
+  github:
+    push:
+      if: ${{ event.git.tag == '' }}
+      init:
+        commit-sha: ${{ event.git.sha }}
+        branch: ${{ event.git.branch }}
+
+# A newer push to the same branch supersedes a running CI run.
+concurrency-pools:
+  - id: JacobHayes/briefing:ci-${{ init.branch }}
+    capacity: 1
+    on-overflow: cancel-running
+
+base:
+  image: ubuntu:24.04
+  config: rwx/base 1.2.0
+
+tasks:
+  - key: code
+    call: git/clone 2.1.0
+    with:
+      repository: https://github.com/JacobHayes/briefing.git
+      ref: ${{ init.commit-sha }}
+      github-token: ${{ github.token }}
+
+  # Rust + mise tools (node for the asset embed, zig + cargo-zigbuild for cross builds).
+  - key: tools
+    use: [code]
+    run: |
+      curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy,rustfmt
+      export PATH="$HOME/.cargo/bin:$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
+      rustup target add aarch64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+      curl https://mise.run | sh
+      mise trust mise.toml && MISE_YES=1 mise install
+      echo "$HOME/.cargo/bin:$HOME/.local/share/mise/shims:$HOME/.local/bin" > "$RWX_ENV/PATH"
+    filter:
+      - mise.toml
+      - rust-toolchain.toml
+
+  - key: deps
+    use: [tools]
+    run: |
+      cargo fetch --locked
+      (cd assets && npm ci --ignore-scripts --no-audit --no-fund)
+    # cargo needs the target files to parse the manifest and mise needs its config; keep the
+    # rest out of the cache key.
+    filter:
+      - mise.toml
+      - rust-toolchain.toml
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - src/lib.rs
+      - src/main.rs
+      - assets/package.json
+      - assets/package-lock.json
+
+  - key: check
+    use: [deps]
+    run: |
+      cargo fmt --all -- --check
+      cargo clippy --all-targets --locked -- -D warnings
+      cargo test --locked
+
+  - key: build
+    use: [deps]
+    parallel:
+      matrix:
+        target: [aarch64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl]
+    run: |
+      cargo zigbuild --release --locked --target "$TARGET"
+      mkdir -p "$RWX_ARTIFACTS/briefing-$TARGET"
+      cp "target/$TARGET/release/briefing" "$RWX_ARTIFACTS/briefing-$TARGET/"
+    env:
+      TARGET: ${{ parallel.target }}

@@ -1,0 +1,1625 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Briefing</title>
+  <style nonce="{{NONCE}}">
+    :root {
+      --bg: #f7f5f0;
+      --surface: #ffffff;
+      --text: #232120;
+      --muted: #706b63;
+      --line: #e8e3d9;
+      --line-strong: #d8d2c6;
+      --accent: #2f665c;
+      --accent-soft: #e6efec;
+      --danger: #8a4b24;
+      --danger-soft: #f4e6da;
+      --focus: color-mix(in srgb, var(--accent) 34%, transparent);
+      --radius: 14px;
+      --content: 640px;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #17191a;
+        --surface: #202324;
+        --text: #ecebe6;
+        --muted: #a8a39a;
+        --line: #33363a;
+        --line-strong: #43474b;
+        --accent: #8ac7bb;
+        --accent-soft: #26332f;
+        --danger: #e6a878;
+        --danger-soft: #3d2c22;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); min-height: 100vh; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+    button, textarea, input { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    a { color: var(--accent); }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
+
+    /* Header */
+    .header { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+    .header-inner { max-width: var(--content); margin: 0 auto; padding: 12px clamp(16px, 5vw, 28px); }
+    .header-row { display: flex; align-items: center; gap: 12px; }
+    .wordmark { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -.01em; font-size: .95rem; }
+    .wordmark .mark { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; background: var(--accent); color: var(--bg); font-size: .85rem; }
+    .header-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+    .ghost { border: 0; background: transparent; color: var(--muted); padding: 6px 10px; border-radius: 8px; font-size: .85rem; font-weight: 550; }
+    .ghost:hover { color: var(--text); background: var(--line); }
+    .progress-line { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+    .progress { flex: 1; height: 4px; border-radius: 99px; background: var(--line-strong); overflow: hidden; }
+    .progress-fill { height: 100%; background: var(--accent); border-radius: 99px; transition: width .25s ease; }
+    .progress-step { color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+    /* Context disclosure */
+    .context { max-width: var(--content); margin: 0 auto; padding: 0 clamp(16px, 5vw, 28px); }
+    .context-panel { margin-top: 10px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+    .context-block + .context-block { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .context-label { font-size: .72rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); font-weight: 650; margin-bottom: 6px; }
+    .context-goal { font-size: .98rem; font-weight: 550; }
+    .context-list { margin: 0; padding-left: 1.15rem; color: var(--muted); }
+    .context-list li + li { margin-top: 5px; }
+    .context-summary { margin: 0; color: var(--muted); white-space: pre-wrap; }
+
+    /* Main */
+    main { max-width: var(--content); margin: 0 auto; padding: clamp(24px, 5vw, 40px) clamp(16px, 5vw, 28px) 120px; }
+    .tag { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: .72rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+    h1.title { margin: 14px 0 0; font-size: clamp(1.5rem, 4vw, 2rem); line-height: 1.2; letter-spacing: -.02em; font-weight: 680; outline: none; }
+    .purpose { margin: 8px 0 0; color: var(--muted); font-size: 1rem; }
+    .lede { margin: 22px 0 0; font-size: 1.12rem; line-height: 1.55; white-space: pre-wrap; }
+    .detail { margin: 20px 0 0; padding-top: 18px; border-top: 1px solid var(--line); }
+    .points { margin: 20px 0 0; padding-left: 1.2rem; }
+    .points li { margin-top: 8px; }
+    .points li::marker { color: var(--accent); }
+
+    /* Quiet inline anchors */
+    .anchors { margin: 22px 0 0; padding: 12px 16px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 10px 10px 0; }
+    .anchors .context-label { color: var(--accent); }
+    .anchors ul { margin: 0; padding-left: 1.05rem; }
+    .anchors li + li { margin-top: 4px; }
+    .anchors p { margin: 0; }
+
+    /* Disclosures */
+    details.disclose { margin: 18px 0 0; }
+    details.disclose > summary { list-style: none; display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-weight: 550; font-size: .92rem; cursor: pointer; padding: 4px 0; }
+    details.disclose > summary::-webkit-details-marker { display: none; }
+    details.disclose > summary::before { content: "›"; display: inline-block; transition: transform .15s ease; font-size: 1.1em; }
+    details.disclose[open] > summary::before { transform: rotate(90deg); }
+    .disclose-body { margin-top: 12px; color: var(--text); white-space: pre-wrap; }
+    .source-list { margin: 10px 0 0; padding-left: 1.15rem; color: var(--muted); }
+    .source-list li { margin-top: 4px; }
+
+    /* Rich Markdown */
+    .markdown { white-space: normal; overflow-wrap: anywhere; }
+    .markdown > :first-child { margin-top: 0; }
+    .markdown > :last-child { margin-bottom: 0; }
+    .markdown p { margin: .75em 0 0; white-space: pre-wrap; }
+    .markdown ul, .markdown ol { margin: .75em 0 0; padding-left: 1.2rem; }
+    .markdown li { white-space: normal; }
+    .markdown li + li { margin-top: .35em; }
+    .markdown blockquote { margin: .85em 0 0; padding-left: 14px; border-left: 3px solid var(--line-strong); color: var(--muted); }
+    .markdown hr { margin: 1.1em 0; border: 0; border-top: 1px solid var(--line); }
+    .markdown strong { font-weight: 700; }
+    .markdown em { font-style: italic; }
+    .markdown a { overflow-wrap: anywhere; }
+    .markdown table { width: 100%; margin: 1em 0 0; border-collapse: collapse; font-size: .94rem; display: block; overflow-x: auto; }
+    .markdown th, .markdown td { padding: 8px 10px; border: 1px solid var(--line); vertical-align: top; }
+    .markdown th { background: var(--accent-soft); color: var(--text); font-weight: 650; text-align: left; }
+    .markdown tr:nth-child(even) td { background: color-mix(in srgb, var(--surface) 72%, var(--line)); }
+    .markdown code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: .92em; background: var(--line); border-radius: 5px; padding: .1em .35em; }
+    .markdown pre { margin: .85em 0 0; padding: 12px 14px; overflow-x: auto; background: color-mix(in srgb, var(--surface) 72%, var(--line)); border: 1px solid var(--line); border-radius: 10px; line-height: 1.45; }
+    .markdown pre code { display: block; padding: 0; background: transparent; border-radius: 0; white-space: pre; }
+    .markdown .hljs-keyword, .markdown .hljs-selector-tag, .markdown .hljs-title.function_ { color: #6f42c1; }
+    .markdown .hljs-string, .markdown .hljs-attr, .markdown .hljs-symbol { color: #0a6b44; }
+    .markdown .hljs-number, .markdown .hljs-literal { color: #9a4f00; }
+    .markdown .hljs-comment { color: var(--muted); font-style: italic; }
+    .markdown kbd { padding: .1em .4em; border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface); font-family: inherit; font-size: .86em; }
+    .render-error { margin: .9em 0 0; padding: 12px 14px; border: 1px solid var(--danger); border-radius: 10px; background: var(--danger-soft); color: var(--danger); }
+    .render-error-title { font-weight: 700; }
+    .render-error-message { margin-top: 4px; white-space: pre-wrap; }
+    .render-error details { margin-top: 8px; }
+    .render-error pre { max-height: 220px; margin: 8px 0 0; background: color-mix(in srgb, var(--surface) 70%, var(--danger-soft)); }
+    .rich-block { margin: 1.05em 0 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+    .rich-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .rich-title { color: var(--muted); font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; font-weight: 650; }
+    .rich-actions { margin-left: auto; display: flex; gap: 4px; }
+    .rich-comment { border: 1px solid var(--line-strong); background: transparent; color: var(--muted); border-radius: 8px; padding: 4px 9px; font-size: .8rem; font-weight: 600; }
+    .rich-comment:hover { color: var(--accent); border-color: var(--accent); }
+    .rich-body { overflow-x: auto; }
+    .rich-body svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+    .rich-vega-lite .rich-body, .rich-vega-lite .vega-embed { width: 100%; }
+    .rich-targetable { cursor: pointer; }
+    .rich-targetable:hover, .rich-targetable.rich-has-comments { filter: drop-shadow(0 0 4px var(--accent)); }
+    .rich-comment.has-comments { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+    .vega-embed details { display: none; }
+
+    /* Respond */
+    .respond .disclose-body { white-space: normal; }
+    .prompt { margin: 0 0 10px; color: var(--muted); }
+    textarea { width: 100%; min-height: 84px; resize: vertical; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); line-height: 1.5; }
+    textarea:focus { outline: 3px solid var(--focus); outline-offset: 1px; border-color: var(--accent); }
+    .flag { display: flex; align-items: center; gap: 9px; margin-top: 12px; color: var(--muted); cursor: pointer; }
+    .flag input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+
+    /* Decisions */
+    .options { margin: 22px 0 0; display: grid; gap: 10px; }
+    .option { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 15px 16px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); cursor: pointer; }
+    .option:hover { border-color: var(--accent); }
+    .option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+    .option input { margin-top: 3px; width: 17px; height: 17px; accent-color: var(--accent); }
+    .option-title { font-weight: 620; }
+    .recommended { margin-left: 8px; color: var(--accent); font-size: .68rem; letter-spacing: .05em; text-transform: uppercase; font-weight: 650; }
+    .option-desc { margin-top: 4px; color: var(--muted); font-size: .95rem; }
+    .tradeoffs { margin: 8px 0 0; padding-left: 1.05rem; color: var(--muted); font-size: .9rem; }
+    .tradeoffs li + li { margin-top: 3px; }
+
+    .error { display: none; margin-top: 16px; padding: 11px 14px; color: var(--danger); background: var(--danger-soft); border-radius: 10px; font-size: .92rem; }
+    .error.visible { display: block; }
+
+    /* Review */
+    .review { margin: 20px 0 0; display: grid; gap: 10px; }
+    .review-item { padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+    .review-item strong { display: block; margin-bottom: 4px; }
+    .review-item p { margin: 0; color: var(--muted); white-space: pre-wrap; font-size: .95rem; }
+    .review-item .markdown { color: var(--muted); font-size: .95rem; }
+    .review-item .markdown p + p, .review-item .markdown p + ul, .review-item .markdown ul + p, .review-item .markdown pre + p { margin-top: .75em; }
+    .target-meta { margin: -2px 0 6px; color: var(--muted); font-size: .78rem; }
+    .review-empty { margin: 20px 0 0; color: var(--muted); }
+
+    /* Navigation */
+    .nav { position: sticky; bottom: 0; margin-top: 32px; padding: 14px 0; display: flex; align-items: center; gap: 10px; background: linear-gradient(to top, var(--bg) 62%, transparent); }
+    .btn { border: 1px solid var(--line-strong); border-radius: 10px; padding: 10px 18px; background: var(--surface); font-weight: 600; }
+    .btn:hover:not(:disabled) { border-color: var(--accent); }
+    .btn.primary { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+    .btn.primary:hover { filter: brightness(1.05); }
+    .btn:disabled { opacity: .4; cursor: default; }
+    .nav .spacer { flex: 1; }
+    .link-danger { border: 0; background: transparent; color: var(--muted); font-size: .85rem; padding: 8px; border-radius: 8px; }
+    .link-danger:hover { color: var(--danger); }
+    .link-danger.armed { color: var(--danger); background: var(--danger-soft); }
+    .review-actions { display: flex; gap: 2px; margin-top: 6px; }
+    .link-edit { border: 0; background: transparent; color: var(--muted); font-size: .85rem; padding: 8px; border-radius: 8px; }
+    .link-edit:hover { color: var(--accent); }
+
+    /* Overview */
+    .overview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+    .overview-item { padding: 26px 0; border-bottom: 1px solid var(--line); }
+    .overview-item:last-child { border-bottom: 0; }
+
+    /* Done */
+    .done { min-height: 70vh; display: grid; place-items: center; text-align: center; padding: 24px; }
+    .done-card { max-width: 460px; }
+    .done-icon { width: 52px; height: 52px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 50%; color: var(--bg); background: var(--accent); font-size: 1.5rem; }
+    .done h1 { margin: 0 0 10px; font-size: 1.5rem; }
+    .done p { margin: 0; color: var(--muted); }
+
+    /* Inline annotation highlights */
+    .comment-quote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); white-space: pre-wrap; font-style: italic; }
+    .anno-mark { background: var(--accent-soft); border-bottom: 1px solid var(--accent); border-radius: 2px; padding: 0 1px; color: inherit; cursor: help; }
+    .anno-mark:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+    /* Saved-comment popover sits below the selection Comment action and composer
+       (z-index 40/41) so a live text selection can never be covered by it. */
+    .anno-tip { position: fixed; z-index: 30; max-width: min(320px, calc(100vw - 24px)); max-height: calc(100vh - 16px); overflow: auto; background: var(--surface); color: var(--text); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.22); padding: 10px 12px; font-size: .9rem; line-height: 1.45; }
+    .anno-tip[hidden] { display: none; }
+    .anno-tip.pinned { border-color: var(--accent); box-shadow: 0 14px 40px rgba(0,0,0,.28); }
+    .anno-tip-item + .anno-tip-item { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+    .anno-tip-loc { font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 650; margin-bottom: 3px; }
+    .anno-tip-comment { white-space: pre-wrap; }
+    .anno-tip-actions { margin-top: 8px; display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 4px; }
+    .anno-tip-edit, .anno-tip-delete { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; padding: 4px 12px; font-size: .82rem; font-weight: 600; }
+    .anno-tip-edit { color: var(--accent); }
+    .anno-tip-edit:hover { border-color: var(--accent); }
+    .anno-tip-delete { color: var(--danger); }
+    .anno-tip-delete:hover { border-color: var(--danger); }
+    .anno-tip-delete.armed { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+
+    /* Selection affordance + composer overlays */
+    .comment-fab { position: fixed; z-index: 40; border: 1px solid var(--accent); background: var(--accent); color: var(--bg); border-radius: 10px; padding: 7px 14px; font-size: .85rem; font-weight: 600; box-shadow: 0 6px 20px rgba(0,0,0,.22); }
+    .comment-fab[hidden] { display: none; }
+    .composer { position: fixed; z-index: 41; width: min(340px, calc(100vw - 24px)); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 14px 40px rgba(0,0,0,.28); padding: 16px; }
+    .composer-loc { font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 650; }
+    .composer-excerpt { margin: 6px 0 12px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); white-space: pre-wrap; font-style: italic; max-height: 96px; overflow: auto; }
+    .composer-input { width: 100%; min-height: 76px; resize: vertical; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg); line-height: 1.5; }
+    .composer-input:focus { outline: 3px solid var(--focus); outline-offset: 1px; border-color: var(--accent); }
+    .composer-err { display: none; margin-top: 8px; color: var(--danger); font-size: .88rem; }
+    .composer-err.visible { display: block; }
+    .composer-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
+    .composer-actions .btn { padding: 8px 14px; }
+
+    @media (max-width: 560px) {
+      .wordmark span:not(.mark) { display: none; }
+      .nav { flex-wrap: wrap; }
+      .composer { left: 12px !important; right: 12px; width: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app" aria-live="polite"></div>
+  <script src="/briefing-assets/marked.umd.js"></script>
+  <script src="/briefing-assets/purify.min.js"></script>
+  <script src="/briefing-assets/highlight.min.js"></script>
+  <script src="/briefing-assets/mermaid.min.js"></script>
+  <script src="/briefing-assets/vega.min.js"></script>
+  <script src="/briefing-assets/vega-lite.min.js"></script>
+  <script src="/briefing-assets/vega-embed.min.js"></script>
+  <script nonce="{{NONCE}}">
+    "use strict";
+    const app = document.getElementById("app");
+    let presentation;
+    let screens = [];
+    let current = 0;
+    let overview = false;
+    let submitted = false;
+    let contextOpen = false;
+    let pendingFocus = null;
+    let pendingSelection = null;
+    let composer = null;
+    let composerReturnFocus = null;
+    let state = { chunks: {}, decisions: {}, annotations: [], overallNote: "" };
+    let disclosureState = {};
+    const MAX_ANNOTATIONS = 500;
+    const MAX_QUOTE = 2000;
+    const MAX_COMMENT = 4000;
+    const ANCHOR_CONTEXT = 40;
+    const MARGIN_RAIL_WIDTH = 300;
+    const MARGIN_RAIL_GAP = 28;
+    const MARGIN_RAIL_MIN_USABLE = 150;
+    const DELETE_ARM_MS = 5000;
+    const BACKTICK = String.fromCharCode(96);
+    const FENCE = BACKTICK + BACKTICK + BACKTICK;
+
+    const el = (tag, attrs = {}, children = []) => {
+      const node = document.createElement(tag);
+      for (const [key, value] of Object.entries(attrs)) {
+        if (key === "class") node.className = value;
+        else if (key === "text") node.textContent = value;
+        else if (key === "htmlFor") node.htmlFor = value;
+        else if (key.startsWith("on")) node.addEventListener(key.slice(2).toLowerCase(), value);
+        else if (value !== undefined && value !== null && value !== false) node.setAttribute(key, value === true ? "" : String(value));
+      }
+      for (const child of Array.isArray(children) ? children : [children]) {
+        if (child !== undefined && child !== null && child !== false) node.append(child);
+      }
+      return node;
+    };
+
+    let richCounter = 0;
+    let mermaidInitialized = false;
+
+    function safeMarkdownUrl(value) {
+      const raw = String(value || "").trim();
+      if (!raw || /\s/.test(raw)) return null;
+      const hasScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(raw);
+      const host = raw.split(/[/?#]/, 1)[0].replace(/:\d+$/, "");
+      const looksLikeBareDomain = !hasScheme && /^[A-Za-z0-9.-]+(?::\d+)?(?:[/?#].*)?$/.test(raw) && host.includes(".");
+      if (!hasScheme && !looksLikeBareDomain) return null;
+      try {
+        const url = new URL(hasScheme ? raw : "https://" + raw);
+        if (url.protocol === "http:" || url.protocol === "https:") return url.href;
+      } catch { /* Render invalid markdown links as plain text. */ }
+      return null;
+    }
+
+    function safeImageUrl(value) {
+      const raw = String(value || "").trim();
+      if (/^data:image\/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/i.test(raw)) return raw;
+      return safeMarkdownUrl(raw);
+    }
+
+    function escapeHtml(value) {
+      return String(value || "").replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+    }
+
+    function escapeHtmlAttr(value) {
+      return escapeHtml(value);
+    }
+
+    function markdownApi() {
+      const api = window.marked;
+      return api && api.parse && api.parseInline && api.Renderer ? api : null;
+    }
+
+    function sanitizeHtml(html) {
+      if (!window.DOMPurify) throw new Error("DOMPurify did not load");
+      return String(window.DOMPurify.sanitize(String(html || ""), {
+        ALLOWED_TAGS: ["p", "br", "strong", "em", "a", "code", "pre", "ul", "ol", "li", "blockquote", "hr", "table", "thead", "tbody", "tr", "th", "td", "span", "div", "kbd", "sup", "sub", "small", "mark", "img", "h1", "h2", "h3", "h4", "h5", "h6"],
+        ALLOWED_ATTR: ["href", "title", "target", "rel", "src", "alt", "class", "colspan", "rowspan", "align", "aria-label", "role"],
+        ALLOW_DATA_ATTR: true,
+        FORBID_ATTR: ["style"],
+        FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "input", "button", "textarea", "select"],
+      }));
+    }
+
+    function sanitizeSvg(svg) {
+      if (!window.DOMPurify) throw new Error("DOMPurify did not load");
+      return String(window.DOMPurify.sanitize(String(svg || ""), {
+        USE_PROFILES: { html: true, svg: true, svgFilters: true },
+        ADD_TAGS: ["foreignObject", "style"],
+        ADD_ATTR: ["class", "id", "style", "transform", "d", "x", "y", "x1", "y1", "x2", "y2", "width", "height", "viewBox", "xmlns", "role", "aria-label", "marker-end", "marker-start"],
+      }));
+    }
+
+    function fragmentFromHtml(html) {
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      return template.content.cloneNode(true);
+    }
+
+    function makeMarkdownRenderer() {
+      const api = markdownApi();
+      if (!api) throw new Error("Marked did not load");
+      const renderer = new api.Renderer();
+      renderer.link = function(token) {
+        const label = this.parser.parseInline(token.tokens || []);
+        const href = safeMarkdownUrl(token.href);
+        if (!href) return label;
+        const title = token.title ? ' title="' + escapeHtmlAttr(token.title) + '"' : "";
+        return '<a href="' + escapeHtmlAttr(href) + '" target="_blank" rel="noreferrer"' + title + '>' + label + '</a>'; 
+      };
+      renderer.image = function(token) {
+        const src = safeImageUrl(token.href);
+        const alt = escapeHtmlAttr(token.text || "");
+        if (!src) return alt;
+        const title = token.title ? ' title="' + escapeHtmlAttr(token.title) + '"' : "";
+        return '<img src="' + escapeHtmlAttr(src) + '" alt="' + alt + '"' + title + '>';
+      };
+      return renderer;
+    }
+
+    function scopeSanitizedClasses(root) {
+      root.querySelectorAll("[class]").forEach(node => {
+        if (node.tagName && node.tagName.toLowerCase() === "code") {
+          const keep = [...node.classList].filter(cls => cls === "hljs" || cls.startsWith("language-"));
+          if (keep.length) node.setAttribute("class", keep.join(" "));
+          else node.removeAttribute("class");
+          return;
+        }
+        node.removeAttribute("class");
+      });
+    }
+
+    function normalizeSanitizedLinks(root) {
+      root.querySelectorAll("a[href]").forEach(link => {
+        const safe = safeMarkdownUrl(link.getAttribute("href"));
+        if (!safe) link.removeAttribute("href");
+        else {
+          link.setAttribute("href", safe);
+          link.setAttribute("target", "_blank");
+          link.setAttribute("rel", "noreferrer");
+        }
+      });
+      root.querySelectorAll("img[src]").forEach(image => {
+        const safe = safeImageUrl(image.getAttribute("src"));
+        if (!safe) image.remove();
+        else image.setAttribute("src", safe);
+      });
+    }
+
+    function renderRichError(title, message, source) {
+      const box = el("div", { class: "render-error", role: "alert" }, [
+        el("div", { class: "render-error-title", text: title }),
+        el("div", { class: "render-error-message", text: message }),
+      ]);
+      if (source) {
+        box.append(el("details", {}, [
+          el("summary", { text: "Source" }),
+          el("pre", {}, el("code", {}, String(source).slice(0, 12000))),
+        ]));
+      }
+      return box;
+    }
+
+    function languageOf(code) {
+      for (const cls of code.classList) {
+        if (cls.startsWith("language-")) return cls.slice("language-".length).toLowerCase();
+      }
+      return (code.getAttribute("data-language") || "").toLowerCase();
+    }
+
+    function isMermaidLanguage(language) {
+      return language === "mermaid";
+    }
+
+    function isVegaLiteLanguage(language) {
+      return language === "vega-lite" || language === "vegalite" || language === "vl";
+    }
+
+    function sourceExcerpt(source) {
+      return String(source || "").trim().slice(0, 500);
+    }
+
+    function cleanTargetText(value) {
+      return String(value || "").replace(/\s+/g, " ").trim();
+    }
+
+    function sectionForNode(node) {
+      return node.closest("[data-section]")?.getAttribute("data-section") || "Section";
+    }
+
+    function normalizeTarget(target) {
+      const out = {};
+      for (const key of ["section", "contentType", "targetType", "targetId", "targetLabel", "sourceExcerpt"]) {
+        const value = cleanTargetText(target && target[key]);
+        if (value) out[key] = value.slice(0, 500);
+      }
+      return out;
+    }
+
+    function stableMermaidId(rawId) {
+      return cleanTargetText(rawId).replace(/^briefing-mermaid-\d+-/, "");
+    }
+
+    function semanticMermaidId(stableId) {
+      return cleanTargetText(stableId).replace(/^flowchart-/, "").replace(/-\d+$/, "");
+    }
+
+    function mermaidLabelMap(source) {
+      const map = new Map();
+      const text = String(source || "");
+      const pattern = /(^|[\s;])([A-Za-z][A-Za-z0-9_-]*)\s*(?:\[([^\]]+)\]|\(([^)]+)\)|\{([^}]+)\})/g;
+      for (const match of text.matchAll(pattern)) {
+        const id = match[2];
+        const label = cleanTargetText(match[3] || match[4] || match[5] || "").replace(/^['"]|['"]$/g, "");
+        if (id && label) map.set(id, label);
+      }
+      return map;
+    }
+
+    function richTargetsMatch(left, right) {
+      const a = normalizeTarget(left);
+      const b = normalizeTarget(right);
+      if (!a.contentType || !b.contentType || a.contentType !== b.contentType) return false;
+      if (!a.targetType || !b.targetType || a.targetType !== b.targetType) return false;
+      if (a.section && b.section && a.section !== b.section) return false;
+      if (a.targetId && b.targetId) return a.targetId === b.targetId;
+      if (a.targetLabel && b.targetLabel) return a.targetLabel === b.targetLabel;
+      return false;
+    }
+
+    function annotationsForRichTarget(target) {
+      return state.annotations.filter(a => a.target && richTargetsMatch(a.target, target));
+    }
+
+    function decorateRichTarget(node, target, { openNewWhenEmpty = true } = {}) {
+      const anns = annotationsForRichTarget(target);
+      if (anns.length) {
+        node.setAttribute("data-anno-ids", anns.map(a => a.id).join(" "));
+        node.classList.add("rich-has-comments");
+      } else {
+        node.removeAttribute("data-anno-ids");
+        node.classList.remove("rich-has-comments");
+      }
+      const showExisting = pinned => {
+        if (!anns.length) return false;
+        showPopover(node, pinned);
+        return true;
+      };
+      node.addEventListener("mouseenter", () => { if (!popover.pinned) showExisting(false); });
+      node.addEventListener("mouseleave", () => { if (!popover.pinned) hidePopover(); });
+      node.addEventListener("focus", () => { if (!popover.pinned) showExisting(false); });
+      node.addEventListener("blur", () => { if (!popover.pinned) hidePopover(); });
+      node.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!showExisting(true) && openNewWhenEmpty) openRichComment(node, target);
+      });
+      node.addEventListener("keydown", event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!showExisting(true) && openNewWhenEmpty) openRichComment(node, target);
+      });
+      return anns;
+    }
+
+    function richLocation(target) {
+      const t = normalizeTarget(target);
+      const pieces = [t.section || "Section"];
+      if (t.contentType) pieces.push(t.contentType);
+      if (t.targetType && t.targetLabel) pieces.push(t.targetType + ": " + t.targetLabel);
+      else if (t.targetType) pieces.push(t.targetType);
+      return pieces.join(" · ");
+    }
+
+    function makeRichBlock(sourceNode, contentType, title, targetType, source) {
+      const target = normalizeTarget({
+        section: sectionForNode(sourceNode),
+        contentType,
+        targetType,
+        targetLabel: title,
+        sourceExcerpt: sourceExcerpt(source),
+      });
+      const body = el("div", { class: "rich-body" });
+      const comment = el("button", { class: "rich-comment", type: "button", text: "Comment" });
+      const figure = el("figure", { class: "rich-block rich-" + contentType, "data-rich-type": contentType }, [
+        el("div", { class: "rich-head" }, [
+          el("div", { class: "rich-title", text: title }),
+          el("div", { class: "rich-actions" }, comment),
+        ]),
+        body,
+      ]);
+      const saved = decorateRichTarget(comment, target);
+      if (saved.length) {
+        comment.textContent = "Comments (" + saved.length + ")";
+        comment.classList.add("has-comments");
+      }
+      return { figure, body, target };
+    }
+
+    function attachMermaidTargets(svg, source, baseTarget) {
+      if (!svg) return;
+      const labels = mermaidLabelMap(source);
+      const candidates = svg.querySelectorAll("g.node, g.edgePath, g.edgeLabel, .node, .edgeLabel");
+      candidates.forEach((node, index) => {
+        const classes = String(node.getAttribute("class") || "");
+        const targetType = /edge/i.test(classes) ? "edge" : "node";
+        const rawId = node.getAttribute("id") || targetType + "-" + index;
+        const stableId = stableMermaidId(rawId);
+        const semanticId = semanticMermaidId(stableId);
+        const label = cleanTargetText(labels.get(semanticId) || node.textContent || semanticId || stableId).slice(0, 160);
+        if (!label && !stableId) return;
+        node.classList.add("rich-targetable");
+        node.setAttribute("tabindex", "0");
+        node.setAttribute("role", "button");
+        node.setAttribute("aria-label", "Comment on Mermaid " + targetType + (label ? ": " + label : ""));
+        const target = normalizeTarget({
+          ...baseTarget,
+          targetType,
+          targetId: stableId,
+          targetLabel: label || targetType,
+          sourceExcerpt: sourceExcerpt(source),
+        });
+        decorateRichTarget(node, target);
+      });
+    }
+
+    async function renderMermaidBlock(pre, source) {
+      const block = makeRichBlock(pre, "mermaid", "Mermaid diagram", "diagram", source);
+      pre.replaceWith(block.figure);
+      if (!window.mermaid) {
+        block.body.append(renderRichError("Mermaid renderer unavailable", "The local Mermaid library did not load.", source));
+        return;
+      }
+      try {
+        if (!mermaidInitialized) {
+          window.mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",
+            theme: window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
+            htmlLabels: false,
+            flowchart: { htmlLabels: false },
+          });
+          mermaidInitialized = true;
+        }
+        const id = "briefing-mermaid-" + (++richCounter);
+        const rendered = await window.mermaid.render(id, source);
+        block.body.innerHTML = sanitizeSvg(rendered.svg);
+        if (rendered.bindFunctions) rendered.bindFunctions(block.body);
+        attachMermaidTargets(block.body.querySelector("svg"), source, block.target);
+      } catch (error) {
+        block.body.replaceChildren(renderRichError("Mermaid render failed", String(error && error.message ? error.message : error), source));
+      }
+    }
+
+    async function renderVegaLiteBlock(pre, source) {
+      const block = makeRichBlock(pre, "vega-lite", "Vega-Lite chart", "chart", source);
+      pre.replaceWith(block.figure);
+      const embed = window.vegaEmbed;
+      if (!embed) {
+        block.body.append(renderRichError("Vega-Lite renderer unavailable", "The local Vega/Vega-Lite libraries did not load.", source));
+        return;
+      }
+      let spec;
+      try {
+        spec = JSON.parse(source);
+      } catch (error) {
+        block.body.append(renderRichError("Vega-Lite JSON parse failed", String(error && error.message ? error.message : error), source));
+        return;
+      }
+      try {
+        const renderSpec = spec && typeof spec === "object" && !Array.isArray(spec) ? { ...spec } : spec;
+        if (renderSpec && renderSpec.width === undefined) {
+          renderSpec.width = "container";
+          if (renderSpec.autosize === undefined) renderSpec.autosize = { type: "fit", contains: "padding", resize: true };
+        }
+        await embed(block.body, renderSpec, { actions: false, renderer: "svg", tooltip: true });
+      } catch (error) {
+        block.body.replaceChildren(renderRichError("Vega-Lite render failed", String(error && error.message ? error.message : error), source));
+      }
+    }
+
+    function enhanceCodeBlocks(root) {
+      root.querySelectorAll("pre > code").forEach(code => {
+        const pre = code.parentElement;
+        const language = languageOf(code);
+        const source = code.textContent || "";
+        if (isMermaidLanguage(language)) {
+          void renderMermaidBlock(pre, source);
+          return;
+        }
+        if (isVegaLiteLanguage(language)) {
+          void renderVegaLiteBlock(pre, source);
+          return;
+        }
+        if (window.hljs) {
+          try {
+            if (language && window.hljs.getLanguage && window.hljs.getLanguage(language)) code.innerHTML = window.hljs.highlight(source, { language, ignoreIllegals: true }).value;
+            else code.innerHTML = window.hljs.highlightAuto(source).value;
+            code.classList.add("hljs");
+          } catch {
+            code.textContent = source;
+          }
+        }
+      });
+    }
+
+    function cleanupExternalRenderArtifacts() {
+      document.querySelectorAll("#vg-tooltip-element, .vg-tooltip, .vega-tooltip").forEach(node => node.remove());
+    }
+
+    function renderMarkdownInto(root, value, inlineOnly = false) {
+      try {
+        const api = markdownApi();
+        if (!api) throw new Error("Marked did not load");
+        const renderer = makeMarkdownRenderer();
+        const source = String(value || "");
+        const html = inlineOnly ? api.parseInline(source, { gfm: true, breaks: false, renderer }) : api.parse(source, { gfm: true, breaks: false, renderer });
+        const clean = sanitizeHtml(html);
+        root.replaceChildren(fragmentFromHtml(clean));
+        scopeSanitizedClasses(root);
+        normalizeSanitizedLinks(root);
+        if (!inlineOnly) enhanceCodeBlocks(root);
+        if (!root.childNodes.length) root.append(document.createTextNode(""));
+      } catch (error) {
+        root.replaceChildren(renderRichError("Markdown render failed", String(error && error.message ? error.message : error), value));
+      }
+    }
+
+    function inlineMarkdown(value) {
+      const root = el("span", {});
+      renderMarkdownInto(root, value, true);
+      return [...root.childNodes];
+    }
+
+    function mdInline(tag, attrs, value) {
+      return el(tag, attrs, inlineMarkdown(value));
+    }
+
+    function markdownBlock(className, value) {
+      const root = el("div", { class: className ? className + " markdown" : "markdown" });
+      renderMarkdownInto(root, value, false);
+      return root;
+    }
+
+    const list = (items, className) => el("ul", { class: className }, items.map(item => mdInline("li", {}, item)));
+    const storageKey = () => "briefing:" + presentation.id;
+    const save = () => localStorage.setItem(storageKey(), JSON.stringify({ current, state, disclosures: disclosureState }));
+    const restore = () => {
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey()) || "null");
+        if (saved && Number.isInteger(saved.current) && saved.state) {
+          current = Math.max(0, Math.min(saved.current, screens.length));
+          state = saved.state;
+          disclosureState = saved.disclosures;
+        }
+      } catch { /* Ignore corrupt browser-local draft state. */ }
+      if (!state || typeof state !== "object") state = { chunks: {}, decisions: {}, annotations: [], overallNote: "" };
+      if (!state.chunks) state.chunks = {};
+      if (!state.decisions) state.decisions = {};
+      if (!Array.isArray(state.annotations)) state.annotations = [];
+      if (!disclosureState || typeof disclosureState !== "object" || Array.isArray(disclosureState)) disclosureState = {};
+    };
+    const chunkState = index => state.chunks[index] ||= { note: "", checkpoint: "", status: "" };
+    const decisionState = index => state.decisions[index] ||= { selected: "", note: "" };
+    const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+    const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+
+    function bindDisclosure(node, key) {
+      node.dataset.disclosureKey = key;
+      if (hasOwn(disclosureState, key)) node.open = Boolean(disclosureState[key]);
+      node.addEventListener("toggle", () => {
+        disclosureState[key] = node.open;
+        save();
+      });
+      return node;
+    }
+
+    function captureDisclosureState() {
+      document.querySelectorAll("#app details[data-disclosure-key]").forEach(detail => {
+        const key = detail.getAttribute("data-disclosure-key");
+        if (key) disclosureState[key] = detail.open;
+      });
+    }
+
+    // --- Inline annotations (text selection is always active in annotatable regions) ---
+    const commentButton = el("button", { class: "comment-fab", type: "button", "aria-label": "Comment on the selected text (shortcut: c)", title: "Comment (c)", text: "Comment" });
+    commentButton.hidden = true;
+    commentButton.addEventListener("pointerdown", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openComposer();
+    });
+    commentButton.addEventListener("touchstart", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      openComposer();
+    }, { passive: false });
+    commentButton.addEventListener("click", event => {
+      event.preventDefault();
+      openComposer();
+    });
+    document.body.append(commentButton);
+
+    // Shared saved-comment popover. Hover or keyboard focus shows a quiet
+    // read-only preview; clicking a highlight (or pressing Enter/Space on it)
+    // pins the popover and reveals an Edit action. The pinned state survives
+    // moving the pointer from the highlight onto its Edit button.
+    const tooltip = el("div", { class: "anno-tip", role: "tooltip" });
+    tooltip.hidden = true;
+    document.body.append(tooltip);
+    const popover = { mark: null, pinned: false };
+
+    function hidePopover() {
+      tooltip.hidden = true;
+      tooltip.replaceChildren();
+      tooltip.classList.remove("pinned");
+      popover.mark = null;
+      popover.pinned = false;
+    }
+
+    function annotationsForMark(mark) {
+      const ids = (mark.getAttribute("data-anno-ids") || "").split(/\s+/).filter(Boolean);
+      return ids.map(id => state.annotations.find(a => a.id === id)).filter(Boolean);
+    }
+
+    function showPopover(mark, pinned) {
+      const anns = annotationsForMark(mark);
+      if (!anns.length) return;
+      popover.mark = mark;
+      popover.pinned = pinned;
+      tooltip.classList.toggle("pinned", pinned);
+      tooltip.setAttribute("role", pinned ? "dialog" : "tooltip");
+      tooltip.setAttribute("aria-label", pinned ? "Saved comments" : "Saved comment preview");
+      tooltip.replaceChildren(...anns.map(a => {
+        const item = el("div", { class: "anno-tip-item" }, [
+          el("div", { class: "anno-tip-loc", text: a.location }),
+          markdownBlock("anno-tip-comment", a.comment),
+        ]);
+        if (pinned) item.append(el("div", { class: "anno-tip-actions" }, [
+          el("button", { class: "anno-tip-edit", type: "button", text: "Edit", onclick: () => openEditComposer(a.id, mark.getBoundingClientRect()) }),
+          el("button", { class: "anno-tip-delete", type: "button", text: "Delete", onclick: event => requestDeleteAnnotation(a.id, event.currentTarget) }),
+        ]));
+        return item;
+      }));
+      tooltip.hidden = false;
+      positionSavedPopover(tooltip, mark.getBoundingClientRect());
+    }
+
+    // Pin the popover so it stays open and exposes Edit. focusEdit lands keyboard
+    // focus on the Edit button so keyboard users can reach it (and Escape back).
+    function pinPopover(mark, focusEdit) {
+      hideCommentButton();
+      showPopover(mark, true);
+      if (focusEdit) tooltip.querySelector(".anno-tip-edit")?.focus();
+    }
+
+    // Linearize a region's visible text into one string plus a map back to the
+    // text nodes that produced it, so annotations can be anchored by text offset
+    // rather than by a serialized live DOM Range.
+    function linearize(region) {
+      const walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      let text = "";
+      let node;
+      while ((node = walker.nextNode())) {
+        const value = node.nodeValue || "";
+        nodes.push({ node, start: text.length, length: value.length });
+        text += value;
+      }
+      return { text, nodes };
+    }
+
+    // Offset, in the region's linear text, of a Range boundary. Uses a measuring
+    // Range so element-boundary selections resolve as well as text-node ones.
+    function linearStart(region, range) {
+      const measure = document.createRange();
+      measure.setStart(region, 0);
+      measure.setEnd(range.startContainer, range.startOffset);
+      return measure.toString().length;
+    }
+
+    function occurrences(haystack, needle) {
+      const out = [];
+      if (!needle) return out;
+      let from = 0;
+      for (;;) {
+        const at = haystack.indexOf(needle, from);
+        if (at < 0) break;
+        out.push(at);
+        from = at + 1;
+      }
+      return out;
+    }
+
+    // Resolve an annotation to a [start, end) interval in the region's current
+    // text using its exact quote, expected offset, and prefix/suffix context.
+    // Returns null when the quote is absent so the passage is never highlighted
+    // on the wrong text; the annotation still appears in the final review.
+    function resolveInterval(text, ann) {
+      const quote = ann.anchorQuote || ann.quote || "";
+      const positions = occurrences(text, quote);
+      if (!positions.length) return null;
+      const prefix = ann.prefix || "";
+      const suffix = ann.suffix || "";
+      const expected = Number.isInteger(ann.start) ? ann.start : 0;
+      let best = -1;
+      let bestScore = -Infinity;
+      for (const at of positions) {
+        let context = 0;
+        for (let i = 1; i <= prefix.length; i++) {
+          if (text[at - i] === prefix[prefix.length - i]) context++; else break;
+        }
+        for (let i = 0; i < suffix.length; i++) {
+          if (text[at + quote.length + i] === suffix[i]) context++; else break;
+        }
+        const score = context * 1000 - Math.abs(at - expected);
+        if (score > bestScore) { bestScore = score; best = at; }
+      }
+      return best < 0 ? null : { start: best, end: best + quote.length };
+    }
+
+    // Rebuild highlight <mark>s inside a freshly rendered region. Runs against a
+    // clean DOM every render, so repeated renders never corrupt offsets, and
+    // overlapping annotations merge into shared segments.
+    function highlightRegion(region) {
+      const location = region.getAttribute("data-section");
+      const anns = state.annotations.filter(a => (a.location || "") === location);
+      if (!anns.length) return;
+      const { text } = linearize(region);
+      const intervals = [];
+      for (const ann of anns) {
+        const found = resolveInterval(text, ann);
+        if (found) intervals.push({ start: found.start, end: found.end, id: ann.id });
+      }
+      if (!intervals.length) return;
+      // Merge into non-overlapping segments, each carrying every covering id.
+      const bounds = new Set();
+      for (const iv of intervals) { bounds.add(iv.start); bounds.add(iv.end); }
+      const points = [...bounds].sort((a, b) => a - b);
+      const segments = [];
+      for (let i = 0; i < points.length - 1; i++) {
+        const s = points[i], e = points[i + 1];
+        const ids = intervals.filter(iv => iv.start <= s && iv.end >= e).map(iv => iv.id);
+        if (ids.length) segments.push({ start: s, end: e, ids });
+      }
+      if (!segments.length) return;
+      // Re-linearize after computing segments; wrap each text node's covered parts.
+      const { nodes } = linearize(region);
+      for (const entry of nodes) {
+        const ns = entry.start;
+        const ne = ns + entry.length;
+        const covering = segments.filter(seg => seg.start < ne && seg.end > ns);
+        if (!covering.length) continue;
+        const value = entry.node.nodeValue || "";
+        const frag = document.createDocumentFragment();
+        let cursor = ns;
+        for (const seg of covering) {
+          const s = Math.max(seg.start, ns);
+          const e = Math.min(seg.end, ne);
+          if (s > cursor) frag.append(document.createTextNode(value.slice(cursor - ns, s - ns)));
+          const mark = el("mark", { class: "anno-mark", tabindex: "0", "data-anno-ids": seg.ids.join(" ") }, value.slice(s - ns, e - ns));
+          const ids = seg.ids.map(id => state.annotations.find(a => a.id === id)).filter(Boolean);
+          mark.setAttribute("aria-label", ids.map(a => "Comment: " + a.comment).join("; "));
+          mark.addEventListener("mouseenter", () => { if (!popover.pinned) showPopover(mark, false); });
+          mark.addEventListener("mouseleave", () => { if (!popover.pinned) hidePopover(); });
+          mark.addEventListener("focus", () => { if (!popover.pinned) showPopover(mark, false); });
+          mark.addEventListener("blur", () => { if (!popover.pinned) hidePopover(); });
+          mark.addEventListener("click", () => {
+            const sel = window.getSelection();
+            // A real text selection outranks viewing; let the Comment action win.
+            if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+            pinPopover(mark, false);
+          });
+          mark.addEventListener("keydown", event => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pinPopover(mark, true); }
+          });
+          frag.append(mark);
+          cursor = e;
+        }
+        if (cursor < ne) frag.append(document.createTextNode(value.slice(cursor - ns)));
+        entry.node.parentNode.replaceChild(frag, entry.node);
+      }
+    }
+
+    function decorateHighlights() {
+      hidePopover();
+      if (!state.annotations.length) return;
+      document.querySelectorAll("#app [data-section]").forEach(highlightRegion);
+    }
+
+    // Viewport-bounded placement below the anchor, flipping above when it would
+    // overflow. Used directly for the mobile saved-comment fallback.
+    function clampBelowAbove(node, rect) {
+      const margin = 8;
+      const w = node.offsetWidth;
+      const h = node.offsetHeight;
+      const left = Math.max(margin, Math.min(rect.left, window.innerWidth - w - margin));
+      let top = rect.bottom + margin;
+      if (top + h > window.innerHeight - margin) top = rect.top - h - margin;
+      top = Math.max(margin, Math.min(top, window.innerHeight - h - margin));
+      node.style.left = left + "px";
+      node.style.top = top + "px";
+    }
+
+    // Selection-relative overlays (the Comment action and the composer) stay
+    // anchored below/above the selection or its highlight.
+    function positionOverlay(node, rect) {
+      node.style.left = "0px";
+      node.style.top = "0px";
+      requestAnimationFrame(() => clampBelowAbove(node, rect));
+    }
+
+    // Saved comments become true book-like margin notes when the viewport can
+    // hold the content column, gap, and a useful rail. The note is anchored to
+    // the column edge rather than the selected words, so it never covers reading
+    // text. Narrower screens retain the bounded below/above fallback.
+    function positionSavedPopover(node, rect) {
+      const margin = 8;
+      node.style.left = "0px";
+      node.style.top = "0px";
+      node.style.width = "";
+      node.style.maxWidth = "";
+      node.dataset.placement = "overlay";
+      requestAnimationFrame(() => {
+        const column = document.querySelector("main");
+        const columnRect = column?.getBoundingClientRect();
+        if (columnRect) {
+          const left = columnRect.right + MARGIN_RAIL_GAP;
+          const available = window.innerWidth - margin - left;
+          if (available >= MARGIN_RAIL_MIN_USABLE) {
+            const width = Math.min(MARGIN_RAIL_WIDTH, available);
+            node.style.width = width + "px";
+            node.style.maxWidth = width + "px";
+            const h = node.offsetHeight;
+            const top = Math.max(margin, Math.min(rect.top, window.innerHeight - h - margin));
+            node.style.left = left + "px";
+            node.style.top = top + "px";
+            node.dataset.placement = "margin";
+            return;
+          }
+        }
+        clampBelowAbove(node, rect);
+      });
+    }
+
+    function hideCommentButton() { commentButton.hidden = true; }
+
+    function selectionAnchorRect(range) {
+      const rects = [...range.getClientRects()].filter(rect => rect.width > 0 || rect.height > 0);
+      if (rects.length) return rects[rects.length - 1];
+      const rect = range.getBoundingClientRect();
+      return rect && (rect.width > 0 || rect.height > 0) ? rect : null;
+    }
+
+    function annotatableRegion(range) {
+      const node = range.commonAncestorContainer;
+      const elt = node.nodeType === 1 ? node : node.parentElement;
+      if (!elt) return null;
+      const region = elt.closest("[data-section]");
+      if (!region) return null;
+      if (!region.contains(range.startContainer) || !region.contains(range.endContainer)) return null;
+      // Never annotate form controls even if a future region were to contain one.
+      const start = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
+      if (start && start.closest("input, textarea, select, button")) return null;
+      return region;
+    }
+
+    function evaluateSelection() {
+      if (submitted || composer) { hideCommentButton(); return; }
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) { hideCommentButton(); return; }
+      const range = sel.getRangeAt(0);
+      const region = annotatableRegion(range);
+      if (!region) { hideCommentButton(); return; }
+      const raw = sel.toString();
+      const quote = raw.trim();
+      const anchorRaw = range.toString();
+      const anchorQuote = anchorRaw.trim();
+      if (!quote || !anchorQuote) { hideCommentButton(); return; }
+      const lead = anchorRaw.length - anchorRaw.trimStart().length;
+      const { text } = linearize(region);
+      const start = linearStart(region, range) + lead;
+      const clipped = quote.slice(0, MAX_QUOTE);
+      const clippedAnchor = anchorQuote.slice(0, MAX_QUOTE);
+      const end = start + clippedAnchor.length;
+      const location = region.getAttribute("data-section") || "Section";
+      const rect = selectionAnchorRect(range);
+      if (!rect) { hideCommentButton(); return; }
+      pendingSelection = {
+        location,
+        quote: clipped,
+        anchorQuote: clippedAnchor,
+        start,
+        prefix: text.slice(Math.max(0, start - ANCHOR_CONTEXT), start),
+        suffix: text.slice(end, end + ANCHOR_CONTEXT),
+        rect,
+      };
+      // A real text selection — even one overlapping an existing highlight —
+      // outranks the saved-comment popover: unpin/hide it before the Comment
+      // action so it can never sit above the add-comment affordance.
+      hidePopover();
+      commentButton.hidden = false;
+      positionOverlay(commentButton, rect);
+    }
+
+    function addAnnotation(sel, comment) {
+      if (state.annotations.length >= MAX_ANNOTATIONS) return null;
+      const target = sel.target ? normalizeTarget(sel.target) : null;
+      const ann = {
+        id: uid(),
+        location: String(sel.location).slice(0, 300),
+        quote: String(sel.quote).slice(0, MAX_QUOTE),
+        anchorQuote: String(sel.anchorQuote || sel.quote).slice(0, MAX_QUOTE),
+        comment: String(comment).slice(0, MAX_COMMENT),
+        start: sel.start,
+        prefix: sel.prefix,
+        suffix: sel.suffix,
+        ...(target && Object.keys(target).length ? { target } : {}),
+      };
+      state.annotations.push(ann);
+      save();
+      return ann;
+    }
+
+    function openRichComment(anchor, target) {
+      if (composer || submitted) return;
+      hidePopover();
+      hideCommentButton();
+      const normalized = normalizeTarget(target);
+      const location = richLocation(normalized);
+      const quote = (normalized.targetLabel || normalized.targetType || normalized.contentType || "Rendered content").slice(0, MAX_QUOTE);
+      const rect = anchor.getBoundingClientRect();
+      buildComposer({
+        title: "Add a comment",
+        location,
+        excerpt: quote,
+        initial: "",
+        saveLabel: "Save comment",
+        rect,
+        onSave: comment => {
+          const ann = addAnnotation({
+            location,
+            quote,
+            anchorQuote: quote,
+            start: 0,
+            prefix: "",
+            suffix: "",
+            target: normalized,
+          }, comment);
+          if (!ann) return "Comment limit reached.";
+          closeComposer(true);
+        },
+      });
+    }
+
+    function deleteAnnotation(id) {
+      state.annotations = state.annotations.filter(a => a.id !== id);
+      save();
+      render();
+    }
+
+    function disarmDeleteButton(button) {
+      button.dataset.deleteArmed = "false";
+      button.classList.remove("armed");
+      button.textContent = "Delete";
+      button.setAttribute("aria-label", "Delete comment");
+    }
+
+    function requestDeleteAnnotation(id, button) {
+      if (button.dataset.deleteArmed === "true") {
+        hidePopover();
+        deleteAnnotation(id);
+        return;
+      }
+      document.querySelectorAll('[data-delete-armed="true"]').forEach(disarmDeleteButton);
+      button.dataset.deleteArmed = "true";
+      button.classList.add("armed");
+      button.textContent = "Confirm delete?";
+      button.setAttribute("aria-label", "Confirm delete comment?");
+      window.setTimeout(() => {
+        if (button.isConnected && button.dataset.deleteArmed === "true") disarmDeleteButton(button);
+      }, DELETE_ARM_MS);
+    }
+
+    function closeComposer(rerender, restoreFocus = false) {
+      if (composer) { composer.remove(); composer = null; }
+      if (restoreFocus && composerReturnFocus) pendingFocus = composerReturnFocus;
+      composerReturnFocus = null;
+      pendingSelection = null;
+      const sel = window.getSelection();
+      if (sel && sel.removeAllRanges) sel.removeAllRanges();
+      hideCommentButton();
+      if (rerender) render();
+    }
+
+    // Shared focused composer for both adding a new comment and editing a saved
+    // one. onSave returns an error string to keep the composer open, or nothing
+    // once it has persisted and closed.
+    function buildComposer(opts) {
+      if (composer) { composer.remove(); composer = null; }
+      composerReturnFocus = opts.returnFocus || null;
+      const field = el("textarea", { class: "composer-input", "aria-label": opts.title, placeholder: "Add a comment about this passage" });
+      field.value = opts.initial || "";
+      const err = el("div", { class: "composer-err", role: "alert" });
+      const setErr = message => { err.textContent = message; err.classList.add("visible"); };
+      const saveBtn = el("button", { class: "btn primary", type: "button", text: opts.saveLabel });
+      const cancelBtn = el("button", { class: "btn", type: "button", text: "Cancel" });
+      saveBtn.addEventListener("click", () => {
+        const comment = field.value.trim();
+        if (!comment) { setErr("Enter a comment or cancel."); field.focus(); return; }
+        const problem = opts.onSave(comment);
+        if (problem) setErr(problem);
+      });
+      saveBtn.setAttribute("title", "Save (Command+Enter or Control+Enter)");
+      field.addEventListener("keydown", event => {
+        if (!event.isComposing && event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          saveBtn.click();
+        }
+      });
+      cancelBtn.addEventListener("click", () => closeComposer(true, true));
+      const excerpt = opts.excerpt.length > 240 ? opts.excerpt.slice(0, 240) + "…" : opts.excerpt;
+      composer = el("div", { class: "composer", role: "dialog", "aria-modal": "false", "aria-label": opts.title }, [
+        el("div", { class: "composer-loc", text: opts.location }),
+        el("blockquote", { class: "composer-excerpt", text: excerpt }),
+        field, err,
+        el("div", { class: "composer-actions" }, [cancelBtn, saveBtn]),
+      ]);
+      document.body.append(composer);
+      hideCommentButton();
+      positionOverlay(composer, opts.rect);
+      field.focus();
+      field.setSelectionRange(field.value.length, field.value.length);
+    }
+
+    function openComposer() {
+      if (composer || !pendingSelection) return;
+      const sel = pendingSelection;
+      buildComposer({
+        title: "Add a comment",
+        location: sel.location,
+        excerpt: sel.quote,
+        initial: "",
+        saveLabel: "Save comment",
+        rect: sel.rect,
+        onSave: comment => {
+          const ann = addAnnotation(sel, comment);
+          if (!ann) return "Comment limit reached.";
+          // Land focus on the new highlight so keyboard users get the preview.
+          pendingFocus = '[data-anno-ids~="' + ann.id + '"]';
+          closeComposer(true);
+        },
+      });
+    }
+
+    function targetAllowsCommentShortcut(target) {
+      const element = target instanceof Element ? target : target?.parentElement;
+      if (!element) return true;
+      return !element.closest("input, textarea, select, button, [contenteditable]");
+    }
+
+    function isCommentShortcut(event) {
+      return event.key.toLowerCase() === "c" && !event.isComposing && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+    }
+
+    function openComposerFromShortcut(event) {
+      if (!isCommentShortcut(event) || submitted || composer || !targetAllowsCommentShortcut(event.target)) return false;
+      evaluateSelection();
+      if (commentButton.hidden || !pendingSelection) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      openComposer();
+      return true;
+    }
+
+    // Edit a saved comment in place. Persists immediately; re-render rebuilds all
+    // overlapping highlight segments and their tooltips from the updated comment.
+    function openEditComposer(id, rect) {
+      const ann = state.annotations.find(a => a.id === id);
+      if (!ann) return;
+      hidePopover();
+      buildComposer({
+        title: "Edit comment",
+        location: ann.location,
+        excerpt: ann.quote,
+        initial: ann.comment,
+        saveLabel: "Save changes",
+        rect,
+        returnFocus: '[data-anno-ids~="' + id + '"]',
+        onSave: comment => {
+          ann.comment = String(comment).slice(0, MAX_COMMENT);
+          save();
+          pendingFocus = '[data-anno-ids~="' + id + '"]';
+          closeComposer(true);
+        },
+      });
+    }
+
+    let selectionEvaluateTimer = 0;
+    function scheduleEvaluateSelection(delay = 0) {
+      clearTimeout(selectionEvaluateTimer);
+      selectionEvaluateTimer = setTimeout(evaluateSelection, delay);
+    }
+
+    document.addEventListener("selectionchange", () => scheduleEvaluateSelection(80));
+    document.addEventListener("mouseup", () => scheduleEvaluateSelection(0));
+    document.addEventListener("pointerup", () => scheduleEvaluateSelection(40));
+    document.addEventListener("touchend", () => scheduleEvaluateSelection(100), { passive: true });
+    document.addEventListener("keyup", event => { if (event.shiftKey || event.key.indexOf("Arrow") === 0) scheduleEvaluateSelection(0); });
+    function handleSelectionPointerStart(event) {
+      if (event.target === commentButton) return;
+      if (composer && composer.contains(event.target)) return;
+      hideCommentButton();
+      // Keep a pinned popover open while clicking inside it (its Edit button) or
+      // on a highlight; unpin only when clicking elsewhere.
+      if (popover.pinned && !tooltip.contains(event.target) && !(event.target.closest && event.target.closest(".anno-mark"))) hidePopover();
+    }
+    document.addEventListener("mousedown", handleSelectionPointerStart);
+    document.addEventListener("pointerdown", handleSelectionPointerStart);
+    document.addEventListener("touchstart", handleSelectionPointerStart, { passive: true });
+    document.addEventListener("keydown", event => {
+      if (openComposerFromShortcut(event)) return;
+      if (event.key !== "Escape") return;
+      if (composer) { closeComposer(true, true); event.preventDefault(); return; }
+      if (!tooltip.hidden) {
+        const returnTo = popover.pinned ? popover.mark : null;
+        hidePopover();
+        returnTo?.focus();
+        event.preventDefault();
+        return;
+      }
+      if (!commentButton.hidden) { hideCommentButton(); return; }
+    });
+    const hasContext = () => {
+      const t = presentation.tray || {};
+      return Boolean((t.keyContext && t.keyContext.length) || t.runningSummary || (t.openQuestions && t.openQuestions.length));
+    };
+
+    function header() {
+      const total = screens.length;
+      const isReview = current >= total;
+      const stepNow = isReview ? total : current + 1;
+      const percent = total ? Math.round((stepNow / total) * 100) : 0;
+
+      const actions = el("div", { class: "header-actions" });
+      if (hasContext()) {
+        actions.append(el("button", {
+          class: "ghost", "aria-expanded": String(contextOpen), "aria-controls": "context-panel",
+          text: contextOpen ? "Hide context" : "Context",
+          onclick: () => { contextOpen = !contextOpen; render(); },
+        }));
+      }
+      actions.append(el("button", { class: "ghost", text: overview ? "Paced view" : "View all", onclick: () => { overview = !overview; render(); } }));
+
+      const inner = el("div", { class: "header-inner" }, [
+        el("div", { class: "header-row" }, [
+          el("div", { class: "wordmark" }, [el("span", { class: "mark", text: "◆" }), el("span", { text: "Briefing" })]),
+          actions,
+        ]),
+        overview ? null : el("div", { class: "progress-line" }, [
+          el("div", { class: "progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": total, "aria-valuenow": stepNow, "aria-label": "Progress through briefing" },
+            (() => { const f = el("div", { class: "progress-fill" }); f.style.width = percent + "%"; return f; })()),
+          el("span", { class: "progress-step", text: isReview ? "Review" : "Step " + stepNow + " of " + total }),
+        ]),
+      ]);
+
+      const wrap = el("div", {}, el("div", { class: "header" }, inner));
+      if (contextOpen && hasContext()) wrap.append(contextPanel());
+      return wrap;
+    }
+
+    function contextPanel() {
+      const panel = el("div", { class: "context-panel", id: "context-panel" });
+      panel.append(el("div", { class: "context-block", "data-section": "Context: Goal" }, [el("div", { class: "context-label", text: "Goal" }), markdownBlock("context-goal", presentation.goal)]));
+      const t = presentation.tray || {};
+      if (t.keyContext && t.keyContext.length) panel.append(el("div", { class: "context-block", "data-section": "Context: Keep in mind" }, [el("div", { class: "context-label", text: "Keep in mind" }), list(t.keyContext, "context-list")]));
+      if (t.runningSummary) panel.append(el("div", { class: "context-block", "data-section": "Context: Running summary" }, [el("div", { class: "context-label", text: "Running summary" }), markdownBlock("context-summary", t.runningSummary)]));
+      if (t.openQuestions && t.openQuestions.length) panel.append(el("div", { class: "context-block", "data-section": "Context: Open questions" }, [el("div", { class: "context-label", text: "Open questions" }), list(t.openQuestions, "context-list")]));
+      return el("div", { class: "context" }, panel);
+    }
+
+    function chunkBody(chunk, disclosureScope = "") {
+      const nodes = [mdInline("h1", { class: "title", tabindex: "-1" }, chunk.title)];
+      if (chunk.purpose) nodes.push(markdownBlock("purpose", chunk.purpose));
+      nodes.push(markdownBlock("lede", chunk.mainPoint));
+      if (chunk.keyPoints && chunk.keyPoints.length) nodes.push(list(chunk.keyPoints, "points"));
+      if (chunk.details) nodes.push(markdownBlock("detail", chunk.details));
+      if (chunk.remember && chunk.remember.length) {
+        const anchors = el("div", { class: "anchors" }, el("div", { class: "context-label", text: "Worth remembering" }));
+        anchors.append(chunk.remember.length === 1 ? markdownBlock("", chunk.remember[0]) : list(chunk.remember, ""));
+        nodes.push(anchors);
+      }
+      if (chunk.sources && chunk.sources.length) {
+        const sources = el("ul", { class: "source-list" }, chunk.sources.map(s => el("li", {}, el("a", { href: s.url, target: "_blank", rel: "noreferrer" }, inlineMarkdown(s.label)))));
+        nodes.push(disclosure("Sources (" + chunk.sources.length + ")", sources, "", disclosureScope ? disclosureScope + ":sources" : ""));
+      }
+      return nodes;
+    }
+
+    function disclosure(summaryText, body, extraClass = "", key = "", defaultOpen = false) {
+      const node = el("details", { class: "disclose " + extraClass }, [el("summary", { text: summaryText }), body]);
+      if (defaultOpen) node.open = true;
+      return key ? bindDisclosure(node, key) : node;
+    }
+
+    function chunkScreen(chunk, index) {
+      const draft = chunkState(index);
+      const frag = el("div", {}, el("div", { class: "reading", "data-section": "Section: " + chunk.title }, chunkBody(chunk, "chunk:" + index)));
+
+      const respondBody = el("div", { class: "disclose-body" });
+      const usesCheckpoint = Boolean(chunk.checkpoint);
+      if (usesCheckpoint) respondBody.append(markdownBlock("prompt", chunk.checkpoint));
+      const field = el("textarea", { "aria-label": usesCheckpoint ? "Response to checkpoint" : "Note", placeholder: usesCheckpoint ? "Optional — a short answer or reflection" : "Optional note or question" });
+      field.value = usesCheckpoint ? (draft.checkpoint || "") : (draft.note || "");
+      field.addEventListener("input", () => { if (usesCheckpoint) draft.checkpoint = field.value; else draft.note = field.value; save(); });
+      respondBody.append(field);
+
+      const flag = el("input", { type: "checkbox" });
+      flag.checked = draft.status === "revisit";
+      flag.addEventListener("change", () => { draft.status = flag.checked ? "revisit" : ""; save(); });
+      respondBody.append(el("label", { class: "flag" }, [flag, el("span", { text: "Flag this section for follow-up" })]));
+
+      frag.append(disclosure("Respond", respondBody, "respond", "chunk:" + index + ":respond", usesCheckpoint));
+      return frag;
+    }
+
+    function decisionScreen(decision, index) {
+      const draft = decisionState(index);
+      const intro = el("div", { class: "reading", "data-section": "Decision: " + decision.question }, [el("span", { class: "tag", text: "Decision" }), mdInline("h1", { class: "title", tabindex: "-1" }, decision.question)]);
+      if (decision.context) intro.append(markdownBlock("purpose", decision.context));
+      const frag = el("div", {}, intro);
+
+      const options = el("div", { class: "options" });
+      decision.options.forEach((option, optionIndex) => {
+        const id = "decision-" + index + "-" + optionIndex;
+        const radio = el("input", { id, type: "radio", name: "decision-" + index, value: option.label });
+        radio.checked = draft.selected === option.label;
+        radio.addEventListener("change", () => { draft.selected = option.label; save(); document.getElementById("decision-error")?.classList.remove("visible"); });
+        const title = el("div", {}, [mdInline("span", { class: "option-title" }, option.label)]);
+        if (option.recommended) title.append(el("span", { class: "recommended", text: "Recommended" }));
+        const body = el("div", {}, title);
+        if (option.description) body.append(markdownBlock("option-desc", option.description));
+        if (option.tradeoffs && option.tradeoffs.length) body.append(list(option.tradeoffs, "tradeoffs"));
+        options.append(el("label", { class: "option", htmlFor: id }, [radio, body]));
+      });
+      frag.append(options);
+
+      const note = el("textarea", { "aria-label": "Guidance for this decision", placeholder: "Constraints, concerns, or an alternative" });
+      note.value = draft.note || "";
+      note.addEventListener("input", () => { draft.note = note.value; save(); });
+      frag.append(disclosure("Add guidance", note, "", "decision:" + index + ":guidance"));
+      frag.append(el("div", { class: "error", id: "decision-error", role: "alert", text: "Choose an option before continuing, or add guidance instead." }));
+      return frag;
+    }
+
+    function reviewScreen() {
+      const frag = el("div", {}, [
+        el("span", { class: "tag", text: "Review" }),
+        mdInline("h1", { class: "title", tabindex: "-1" }, presentation.completionPrompt || "Submit"),
+        el("p", { class: "purpose", text: "Only what is listed here is returned — your answers, notes, decisions, comments, and anything flagged for follow-up." }),
+      ]);
+      const grid = el("div", { class: "review" });
+      presentation.chunks.forEach((chunk, index) => {
+        const draft = chunkState(index);
+        if (!draft.note && !draft.checkpoint && draft.status !== "revisit") return;
+        const pieces = [];
+        if (draft.status === "revisit") pieces.push("Flagged for follow-up");
+        if (draft.checkpoint) pieces.push(draft.checkpoint);
+        if (draft.note) pieces.push(draft.note);
+        grid.append(el("div", { class: "review-item" }, [mdInline("strong", {}, chunk.title), markdownBlock("", pieces.join("\n\n"))]));
+      });
+      presentation.decisions.forEach((decision, index) => {
+        const draft = decisionState(index);
+        if (!draft.selected && !draft.note) return;
+        grid.append(el("div", { class: "review-item" }, [mdInline("strong", {}, decision.question), markdownBlock("", (draft.selected || "No option selected") + (draft.note ? "\n\n" + draft.note : ""))]));
+      });
+      state.annotations.forEach(a => {
+        const children = [
+          el("strong", { text: "Comment · " + a.location }),
+          a.target ? el("div", { class: "target-meta", text: richLocation(a.target) }) : null,
+          el("blockquote", { class: "comment-quote", text: a.quote }),
+          markdownBlock("", a.comment),
+          el("div", { class: "review-actions" }, [
+            el("button", { class: "link-edit", type: "button", text: "Edit", onclick: event => openEditComposer(a.id, event.currentTarget.getBoundingClientRect()) }),
+            el("button", { class: "link-danger", type: "button", text: "Delete", onclick: event => requestDeleteAnnotation(a.id, event.currentTarget) }),
+          ]),
+        ];
+        grid.append(el("div", { class: "review-item" }, children));
+      });
+      if (!grid.children.length) frag.append(el("p", { class: "review-empty", text: "Nothing recorded yet. You can still add an overall response below." }));
+      else frag.append(grid);
+
+      const overall = el("textarea", { "aria-label": "Overall response", placeholder: "Optional overall response, question, or correction" });
+      overall.value = state.overallNote || "";
+      overall.addEventListener("input", () => { state.overallNote = overall.value; save(); });
+      frag.append(disclosure("Overall response", overall, "", "review:overall"));
+      frag.append(el("div", { class: "error", id: "submit-error", role: "alert", text: "Could not submit this briefing. The server may have stopped." }));
+      return frag;
+    }
+
+    function renderOverview() {
+      const main = el("main", {});
+      main.append(el("div", { class: "overview-head" }, [
+        el("h1", { class: "title", text: "All content", tabindex: "-1" }),
+        el("button", { class: "btn", text: "Back to paced view", onclick: () => { overview = false; render(); } }),
+      ]));
+      presentation.chunks.forEach((chunk, i) => {
+        const item = el("div", { class: "overview-item", "data-section": "Section: " + chunk.title }, chunkBody(chunk));
+        item.querySelectorAll("details.disclose").forEach(d => d.open = true);
+        main.append(item);
+      });
+      presentation.decisions.forEach((decision, i) => {
+        const item = el("div", { class: "overview-item" });
+        const intro = el("div", { class: "reading", "data-section": "Decision: " + decision.question }, [el("span", { class: "tag", text: "Decision" }), mdInline("h1", { class: "title", tabindex: "-1" }, decision.question)]);
+        if (decision.context) intro.append(markdownBlock("purpose", decision.context));
+        item.append(intro);
+        const options = el("div", { class: "options" });
+        decision.options.forEach(option => {
+          const title = el("div", {}, [mdInline("span", { class: "option-title" }, option.label)]);
+          if (option.recommended) title.append(el("span", { class: "recommended", text: "Recommended" }));
+          const body = el("div", {}, title);
+          if (option.description) body.append(markdownBlock("option-desc", option.description));
+          if (option.tradeoffs && option.tradeoffs.length) body.append(list(option.tradeoffs, "tradeoffs"));
+          options.append(el("div", { class: "option" }, body));
+        });
+        item.append(options);
+        main.append(item);
+      });
+      return main;
+    }
+
+    function currentScreenValid() {
+      const screen = screens[current];
+      if (!screen || screen.type !== "decision") return true;
+      const draft = decisionState(screen.index);
+      if (screen.data.required === false || draft.selected || draft.note.trim()) return true;
+      document.getElementById("decision-error")?.classList.add("visible");
+      return false;
+    }
+
+    async function finish() {
+      const payload = {
+        chunks: presentation.chunks.map((chunk, index) => ({
+          title: chunk.title,
+          status: chunkState(index).status || "unmarked",
+          checkpoint: chunkState(index).checkpoint.trim(),
+          note: chunkState(index).note.trim(),
+        })).filter(item => item.status !== "unmarked" || item.checkpoint || item.note),
+        decisions: presentation.decisions.map((decision, index) => ({
+          question: decision.question,
+          selected: decisionState(index).selected,
+          note: decisionState(index).note.trim(),
+        })).filter(item => item.selected || item.note),
+        annotations: (state.annotations || []).map(a => ({ location: a.location, quote: a.quote, comment: a.comment, ...(a.target ? { target: a.target } : {}) })).filter(a => a.quote && a.comment),
+        overallNote: (state.overallNote || "").trim(),
+      };
+      try {
+        const response = await fetch("/api/" + presentation.token + "/complete", {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        localStorage.removeItem(storageKey());
+        submitted = true;
+        render();
+      } catch {
+        document.getElementById("submit-error")?.classList.add("visible");
+      }
+    }
+
+    async function cancel() {
+      if (!confirm("Cancel this briefing?")) return;
+      try {
+        await fetch("/api/" + presentation.token + "/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      } finally {
+        localStorage.removeItem(storageKey());
+        submitted = true;
+        renderDone(true);
+      }
+    }
+
+    function renderDone(cancelled = false) {
+      closeComposer(false);
+      hidePopover();
+      cleanupExternalRenderArtifacts();
+      app.replaceChildren(el("div", { class: "done" }, el("div", { class: "done-card" }, [
+        el("div", { class: "done-icon", text: cancelled ? "×" : "✓" }),
+        el("h1", { text: cancelled ? "Briefing cancelled" : "Submitted" }),
+        el("p", { text: cancelled ? "You can close this tab." : "Your response has been submitted. You can close this tab." }),
+      ])));
+    }
+
+    function applyFocus() {
+      const target = pendingFocus;
+      pendingFocus = null;
+      requestAnimationFrame(() => {
+        const node = (target && document.querySelector(target)) || document.querySelector("main h1") || document.querySelector("h1");
+        node?.focus();
+      });
+    }
+
+    function render() {
+      captureDisclosureState();
+      hideCommentButton();
+      cleanupExternalRenderArtifacts();
+      if (submitted) { renderDone(); return; }
+      const frag = document.createDocumentFragment();
+      frag.append(header());
+
+      if (overview) { frag.append(renderOverview()); app.replaceChildren(frag); decorateHighlights(); applyFocus(); return; }
+
+      const main = el("main", {});
+      const isReview = current >= screens.length;
+      if (isReview) main.append(reviewScreen());
+      else {
+        const screen = screens[current];
+        main.append(screen.type === "chunk" ? chunkScreen(screen.data, screen.index) : decisionScreen(screen.data, screen.index));
+      }
+
+      const back = el("button", { class: "btn", text: "Back", disabled: current === 0, onclick: () => { current = Math.max(0, current - 1); save(); render(); } });
+      const next = el("button", { class: "btn primary", text: isReview ? "Submit" : current === screens.length - 1 ? "Review" : "Next", onclick: () => {
+        if (isReview) { finish(); return; }
+        if (!currentScreenValid()) return;
+        current = Math.min(screens.length, current + 1); save(); render();
+      }});
+      main.append(el("nav", { class: "nav", "aria-label": "Briefing navigation" }, [
+        back,
+        el("button", { class: "link-danger", text: "Cancel", onclick: cancel }),
+        el("span", { class: "spacer" }),
+        next,
+      ]));
+
+      frag.append(main);
+      app.replaceChildren(frag);
+      decorateHighlights();
+      applyFocus();
+    }
+
+    document.addEventListener("keydown", event => {
+      if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement || overview || submitted || event.shiftKey) return;
+      if (event.key === "ArrowLeft" && current > 0) { current--; save(); render(); }
+      if (event.key === "ArrowRight" && current < screens.length && currentScreenValid()) { current++; save(); render(); }
+    });
+
+    (async () => {
+      try {
+        const token = location.pathname.split("/").filter(Boolean).pop();
+        const response = await fetch("/api/" + token + "/presentation", { cache: "no-store" });
+        if (!response.ok) throw new Error("Presentation unavailable");
+        presentation = await response.json();
+        presentation.token = token;
+        presentation.decisions ||= [];
+        document.title = presentation.title + " - Briefing";
+        if (presentation.status !== "active") {
+          submitted = true;
+          renderDone(presentation.status === "cancelled");
+          return;
+        }
+        screens = [
+          ...presentation.chunks.map((data, index) => ({ type: "chunk", data, index })),
+          ...presentation.decisions.map((data, index) => ({ type: "decision", data, index })),
+        ];
+        restore();
+        render();
+      } catch (error) {
+        app.replaceChildren(el("div", { class: "done" }, el("div", { class: "done-card" }, [el("h1", { text: "Briefing unavailable" }), el("p", { text: String(error.message || error) })])));
+      }
+    })();
+  </script>
+</body>
+</html>

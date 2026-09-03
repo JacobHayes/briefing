@@ -1,0 +1,148 @@
+# Publishes GitHub releases with prebuilt binaries.
+#
+# - Tag push `vX.Y.Z`  -> full release for that tag.
+# - Nightly cron       -> prerelease `vX.Y.Z-nightly.YYYYMMDD` at main HEAD, skipped when
+#                         main has not moved since the last nightly.
+# - `rwx run .rwx/release.yml --init kind=nightly` to force one from the CLI.
+#
+# Assets are named `briefing-<target>.tar.gz` (plus sha256 sums) so `mise use
+# github:JacobHayes/briefing` autodetects the right one.
+#
+# RWX's GitHub App token can clone and read releases but cannot create them, so `publish`
+# uses the vault secret BRIEFING_GITHUB_TOKEN: a fine-grained PAT with Contents: read/write on
+# JacobHayes/briefing (`rwx vaults secrets set BRIEFING_GITHUB_TOKEN=...`).
+
+on:
+  cli:
+    init:
+      commit-sha: ${{ event.git.sha }}
+      tag: ""
+      kind: nightly
+  github:
+    push:
+      if: ${{ event.git.tag != '' }}
+      init:
+        commit-sha: ${{ event.git.sha }}
+        tag: ${{ event.git.tag }}
+        kind: tag
+  cron:
+    - key: nightly
+      schedule: '0 9 * * *' # 09:00 UTC daily
+      init:
+        commit-sha: ${{ event.git.sha }}
+        tag: ""
+        kind: nightly
+
+concurrency-pools:
+  - id: JacobHayes/briefing:release
+    capacity: 1
+    on-overflow: cancel-waiting
+
+base:
+  image: ubuntu:24.04
+  config: rwx/base 1.2.0
+
+tasks:
+  - key: code
+    call: git/clone 2.1.0
+    with:
+      repository: https://github.com/JacobHayes/briefing.git
+      ref: ${{ init.commit-sha }}
+      github-token: ${{ github.token }}
+      preserve-git-dir: true
+
+  - key: tools
+    use: [code]
+    run: |
+      curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+      export PATH="$HOME/.cargo/bin:$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
+      rustup target add aarch64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+      curl https://mise.run | sh
+      mise trust mise.toml && MISE_YES=1 mise install
+      echo "$HOME/.cargo/bin:$HOME/.local/share/mise/shims:$HOME/.local/bin" > "$RWX_ENV/PATH"
+      sudo apt-get update && sudo apt-get install -y --no-install-recommends gh && sudo apt-get clean
+    filter:
+      - mise.toml
+      - rust-toolchain.toml
+
+  # Decide the version/tag for this run and whether anything needs publishing.
+  - key: plan
+    use: [tools]
+    cache: false
+    env:
+      KIND: ${{ init.kind }}
+      TAG: ${{ init.tag }}
+      GH_TOKEN: ${{ github.token }}
+    run: |
+      set -euo pipefail
+      cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+      sha="$(git rev-parse HEAD)"
+      case "$KIND" in
+        tag)
+          version="${TAG#v}"
+          [ "$version" = "$cargo_version" ] || { echo "tag $TAG does not match Cargo.toml version $cargo_version" >&2; exit 1; }
+          release_tag="$TAG"; prerelease=false; publish=true ;;
+        nightly)
+          release_tag="v${cargo_version}-nightly.$(date -u +%Y%m%d)"; prerelease=true; publish=true
+          # Skip when the newest nightly already points at this commit.
+          last="$(gh api repos/JacobHayes/briefing/releases \
+            --jq '[.[] | select(.prerelease and (.tag_name | test("-nightly\\.")))][0].target_commitish // ""')"
+          if [ "$last" = "$sha" ]; then echo "main unchanged since last nightly ($sha); nothing to publish"; publish=false; fi ;;
+        *) echo "unknown kind $KIND" >&2; exit 1 ;;
+      esac
+      echo "release_tag=$release_tag prerelease=$prerelease publish=$publish sha=$sha"
+      echo "$release_tag" > "$RWX_VALUES/release-tag"
+      echo "$prerelease" > "$RWX_VALUES/prerelease"
+      echo "$publish" > "$RWX_VALUES/publish"
+      echo "$sha" > "$RWX_VALUES/sha"
+
+  - key: build
+    use: [tools]
+    if: ${{ tasks.plan.values.publish == 'true' }}
+    parallel:
+      matrix:
+        target: [aarch64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl]
+    env:
+      TARGET: ${{ parallel.target }}
+    run: |
+      set -euo pipefail
+      (cd assets && npm ci --ignore-scripts --no-audit --no-fund)
+      cargo zigbuild --release --locked --target "$TARGET"
+      staging="$(mktemp -d)/briefing-$TARGET"
+      mkdir -p "$staging" dist
+      cp "target/$TARGET/release/briefing" README.md LICENSE "$staging/"
+      tar -C "$(dirname "$staging")" -czf "dist/briefing-$TARGET.tar.gz" "briefing-$TARGET"
+      (cd dist && sha256sum "briefing-$TARGET.tar.gz" > "briefing-$TARGET.tar.gz.sha256")
+    outputs:
+      artifacts:
+        - key: dist
+          path: dist
+
+  - key: publish
+    use: [tools]
+    after: [build]
+    if: ${{ tasks.plan.values.publish == 'true' }}
+    cache: false
+    env:
+      GH_TOKEN:
+        value: ${{ secrets.BRIEFING_GITHUB_TOKEN }}
+        cache-key: excluded
+      RELEASE_TAG: ${{ tasks.plan.values.release-tag }}
+      PRERELEASE: ${{ tasks.plan.values.prerelease }}
+      SHA: ${{ tasks.plan.values.sha }}
+      ASSETS: ${{ tasks.build.artifacts.dist }}
+    run: |
+      set -euo pipefail
+      files="$(find "$ASSETS" -type f \( -name '*.tar.gz' -o -name '*.sha256' \))"
+      flags=(--repo JacobHayes/briefing --target "$SHA" --title "briefing $RELEASE_TAG")
+      if [ "$PRERELEASE" = "true" ]; then
+        flags+=(--prerelease --notes "Nightly build of main at $SHA.")
+      else
+        flags+=(--generate-notes)
+      fi
+      if gh release view "$RELEASE_TAG" --repo JacobHayes/briefing >/dev/null 2>&1; then
+        gh release upload "$RELEASE_TAG" --repo JacobHayes/briefing --clobber $files
+      else
+        gh release create "$RELEASE_TAG" "${flags[@]}" $files
+      fi
+      echo "published $RELEASE_TAG"

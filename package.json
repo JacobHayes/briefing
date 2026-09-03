@@ -1,0 +1,10 @@
+{
+  "name": "briefing",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi package: briefing extension (brief_user over the briefing CLI) and skill",
+  "pi": {
+    "extensions": ["./integrations/pi/briefing.ts"],
+    "skills": ["./skills/briefing"]
+  }
+}
