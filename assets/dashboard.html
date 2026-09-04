@@ -50,7 +50,7 @@
     function card(b) {
       const meta = [];
       if (b.source) meta.push(b.source);
-      meta.push(`created ${ago(b.ageSecs)}`);
+      meta.push(`created ${ago(Math.max(0, now() - b.createdAt))}`);
       if (b.finishedAt) meta.push(`${b.status} ${ago(Math.max(0, now() - b.finishedAt))}`);
       if (b.draft) {
         const parts = [`screen ${b.draft.screen}/${b.draft.screens}`];
@@ -89,7 +89,7 @@
       }
     }
     refresh();
-    setInterval(refresh, 5000);
+    setInterval(() => { if (!document.hidden) refresh(); }, 5000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
   </script>
 </body>

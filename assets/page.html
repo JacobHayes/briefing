@@ -275,15 +275,13 @@
     const MARGIN_RAIL_GAP = 28;
     const MARGIN_RAIL_MIN_USABLE = 150;
     const DELETE_ARM_MS = 5000;
-    const BACKTICK = String.fromCharCode(96);
-    const FENCE = BACKTICK + BACKTICK + BACKTICK;
+    const errorMessage = error => errorMessage(error);
 
     const el = (tag, attrs = {}, children = []) => {
       const node = document.createElement(tag);
       for (const [key, value] of Object.entries(attrs)) {
         if (key === "class") node.className = value;
         else if (key === "text") node.textContent = value;
-        else if (key === "htmlFor") node.htmlFor = value;
         else if (key.startsWith("on")) node.addEventListener(key.slice(2).toLowerCase(), value);
         else if (value !== undefined && value !== null && value !== false) node.setAttribute(key, value === true ? "" : String(value));
       }
@@ -320,34 +318,31 @@
       return String(value || "").replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
     }
 
-    function escapeHtmlAttr(value) {
-      return escapeHtml(value);
-    }
-
     function markdownApi() {
       const api = window.marked;
       return api && api.parse && api.parseInline && api.Renderer ? api : null;
     }
 
-    function sanitizeHtml(html) {
-      if (!window.DOMPurify) throw new Error("DOMPurify did not load");
-      return String(window.DOMPurify.sanitize(String(html || ""), {
-        ALLOWED_TAGS: ["p", "br", "strong", "em", "a", "code", "pre", "ul", "ol", "li", "blockquote", "hr", "table", "thead", "tbody", "tr", "th", "td", "span", "div", "kbd", "sup", "sub", "small", "mark", "img", "h1", "h2", "h3", "h4", "h5", "h6"],
-        ALLOWED_ATTR: ["href", "title", "target", "rel", "src", "alt", "class", "colspan", "rowspan", "align", "aria-label", "role"],
-        ALLOW_DATA_ATTR: true,
-        FORBID_ATTR: ["style"],
-        FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "input", "button", "textarea", "select"],
-      }));
-    }
+    // DOMPurify only skips re-parsing its config when handed the same object, so keep one.
+    const SANITIZE_HTML = {
+      ALLOWED_TAGS: ["p", "br", "strong", "em", "a", "code", "pre", "ul", "ol", "li", "blockquote", "hr", "table", "thead", "tbody", "tr", "th", "td", "span", "div", "kbd", "sup", "sub", "small", "mark", "img", "h1", "h2", "h3", "h4", "h5", "h6"],
+      ALLOWED_ATTR: ["href", "title", "target", "rel", "src", "alt", "class", "colspan", "rowspan", "align", "aria-label", "role"],
+      ALLOW_DATA_ATTR: true,
+      FORBID_ATTR: ["style"],
+      FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "input", "button", "textarea", "select"],
+    };
+    const SANITIZE_SVG = {
+      USE_PROFILES: { html: true, svg: true, svgFilters: true },
+      ADD_TAGS: ["foreignObject", "style"],
+      ADD_ATTR: ["class", "id", "style", "transform", "d", "x", "y", "x1", "y1", "x2", "y2", "width", "height", "viewBox", "xmlns", "role", "aria-label", "marker-end", "marker-start"],
+    };
 
-    function sanitizeSvg(svg) {
+    function sanitize(markup, config) {
       if (!window.DOMPurify) throw new Error("DOMPurify did not load");
-      return String(window.DOMPurify.sanitize(String(svg || ""), {
-        USE_PROFILES: { html: true, svg: true, svgFilters: true },
-        ADD_TAGS: ["foreignObject", "style"],
-        ADD_ATTR: ["class", "id", "style", "transform", "d", "x", "y", "x1", "y1", "x2", "y2", "width", "height", "viewBox", "xmlns", "role", "aria-label", "marker-end", "marker-start"],
-      }));
+      return String(window.DOMPurify.sanitize(String(markup || ""), config));
     }
+    const sanitizeHtml = html => sanitize(html, SANITIZE_HTML);
+    const sanitizeSvg = svg => sanitize(svg, SANITIZE_SVG);
 
     function fragmentFromHtml(html) {
       const template = document.createElement("template");
@@ -355,7 +350,9 @@
       return template.content.cloneNode(true);
     }
 
+    let markdownRenderer = null;
     function makeMarkdownRenderer() {
+      if (markdownRenderer) return markdownRenderer;
       const api = markdownApi();
       if (!api) throw new Error("Marked did not load");
       const renderer = new api.Renderer();
@@ -363,16 +360,17 @@
         const label = this.parser.parseInline(token.tokens || []);
         const href = safeMarkdownUrl(token.href);
         if (!href) return label;
-        const title = token.title ? ' title="' + escapeHtmlAttr(token.title) + '"' : "";
-        return '<a href="' + escapeHtmlAttr(href) + '" target="_blank" rel="noreferrer"' + title + '>' + label + '</a>'; 
+        const title = token.title ? ' title="' + escapeHtml(token.title) + '"' : "";
+        return '<a href="' + escapeHtml(href) + '" target="_blank" rel="noreferrer"' + title + '>' + label + '</a>'; 
       };
       renderer.image = function(token) {
         const src = safeImageUrl(token.href);
-        const alt = escapeHtmlAttr(token.text || "");
+        const alt = escapeHtml(token.text || "");
         if (!src) return alt;
-        const title = token.title ? ' title="' + escapeHtmlAttr(token.title) + '"' : "";
-        return '<img src="' + escapeHtmlAttr(src) + '" alt="' + alt + '"' + title + '>';
+        const title = token.title ? ' title="' + escapeHtml(token.title) + '"' : "";
+        return '<img src="' + escapeHtml(src) + '" alt="' + alt + '"' + title + '>';
       };
+      markdownRenderer = renderer;
       return renderer;
     }
 
@@ -607,7 +605,7 @@
         if (rendered.bindFunctions) rendered.bindFunctions(block.body);
         attachMermaidTargets(block.body.querySelector("svg"), source, block.target);
       } catch (error) {
-        block.body.replaceChildren(renderRichError("Mermaid render failed", String(error && error.message ? error.message : error), source));
+        block.body.replaceChildren(renderRichError("Mermaid render failed", errorMessage(error), source));
       }
     }
 
@@ -623,7 +621,7 @@
       try {
         spec = JSON.parse(source);
       } catch (error) {
-        block.body.append(renderRichError("Vega-Lite JSON parse failed", String(error && error.message ? error.message : error), source));
+        block.body.append(renderRichError("Vega-Lite JSON parse failed", errorMessage(error), source));
         return;
       }
       try {
@@ -634,7 +632,7 @@
         }
         await embed(block.body, renderSpec, { actions: false, renderer: "svg", tooltip: true });
       } catch (error) {
-        block.body.replaceChildren(renderRichError("Vega-Lite render failed", String(error && error.message ? error.message : error), source));
+        block.body.replaceChildren(renderRichError("Vega-Lite render failed", errorMessage(error), source));
       }
     }
 
@@ -669,9 +667,8 @@
 
     function renderMarkdownInto(root, value, inlineOnly = false) {
       try {
-        const api = markdownApi();
-        if (!api) throw new Error("Marked did not load");
         const renderer = makeMarkdownRenderer();
+        const api = markdownApi();
         const source = String(value || "");
         const html = inlineOnly ? api.parseInline(source, { gfm: true, breaks: false, renderer }) : api.parse(source, { gfm: true, breaks: false, renderer });
         const clean = sanitizeHtml(html);
@@ -681,7 +678,7 @@
         if (!inlineOnly) enhanceCodeBlocks(root);
         if (!root.childNodes.length) root.append(document.createTextNode(""));
       } catch (error) {
-        root.replaceChildren(renderRichError("Markdown render failed", String(error && error.message ? error.message : error), value));
+        root.replaceChildren(renderRichError("Markdown render failed", errorMessage(error), value));
       }
     }
 
@@ -712,8 +709,8 @@
     let toastTimer = null;
     const snapshot = () => ({ current, state, disclosures: disclosureState, updatedAt: Date.now() });
     const cacheLocally = draft => { try { localStorage.setItem(storageKey(), JSON.stringify(draft)); } catch { /* storage unavailable */ } };
+    // Debounced: a typing burst costs one snapshot, not one per keystroke.
     const save = () => {
-      cacheLocally(snapshot());
       clearTimeout(syncTimer);
       syncTimer = setTimeout(() => { void syncDraft(); }, 500);
     };
@@ -749,6 +746,8 @@
       if (syncing) { syncQueued = true; return; }
       syncing = true;
       clearTimeout(syncTimer);
+      syncTimer = null;
+      cacheLocally(snapshot());
       try {
         const response = await fetch("/api/" + presentation.token + "/draft", {
           method: "PUT", headers: { "content-type": "application/json" }, keepalive: flush,
@@ -766,8 +765,10 @@
         if (syncQueued) { syncQueued = false; save(); }
       }
     }
+    let refreshing = false;
     async function refreshFromServer() {
-      if (submitted) return;
+      if (submitted || refreshing) return;
+      refreshing = true;
       try {
         const response = await fetch("/api/" + presentation.token + "/presentation", { cache: "no-store" });
         if (!response.ok) return;
@@ -776,6 +777,7 @@
         if ((latest.draftRevision || 0) > draftRevision && latest.draft) adoptServerDraft(latest.draft, latest.draftRevision, "Loaded a newer draft from another device");
         else if (syncQueued || syncTimer) void syncDraft();
       } catch { /* Server unreachable; keep the local draft. */ }
+      finally { refreshing = false; }
     }
     const restore = () => {
       let local = null;
@@ -955,7 +957,7 @@
       const location = region.getAttribute("data-section");
       const anns = state.annotations.filter(a => (a.location || "") === location);
       if (!anns.length) return;
-      const { text } = linearize(region);
+      const { text, nodes } = linearize(region);
       const intervals = [];
       for (const ann of anns) {
         const found = resolveInterval(text, ann);
@@ -973,8 +975,7 @@
         if (ids.length) segments.push({ start: s, end: e, ids });
       }
       if (!segments.length) return;
-      // Re-linearize after computing segments; wrap each text node's covered parts.
-      const { nodes } = linearize(region);
+      // Wrap each text node's covered parts (the DOM is untouched since linearize ran).
       for (const entry of nodes) {
         const ns = entry.start;
         const ne = ns + entry.length;
@@ -1453,11 +1454,24 @@
       return frag;
     }
 
-    function decisionScreen(decision, index) {
-      const draft = decisionState(index);
+    function decisionIntro(decision) {
       const intro = el("div", { class: "reading", "data-section": "Decision: " + decision.question }, [el("span", { class: "tag", text: "Decision" }), mdInline("h1", { class: "title", tabindex: "-1" }, decision.question)]);
       if (decision.context) intro.append(markdownBlock("purpose", decision.context));
-      const frag = el("div", {}, intro);
+      return intro;
+    }
+
+    function optionBody(option) {
+      const title = el("div", {}, [mdInline("span", { class: "option-title" }, option.label)]);
+      if (option.recommended) title.append(el("span", { class: "recommended", text: "Recommended" }));
+      const body = el("div", {}, title);
+      if (option.description) body.append(markdownBlock("option-desc", option.description));
+      if (option.tradeoffs && option.tradeoffs.length) body.append(list(option.tradeoffs, "tradeoffs"));
+      return body;
+    }
+
+    function decisionScreen(decision, index) {
+      const draft = decisionState(index);
+      const frag = el("div", {}, decisionIntro(decision));
 
       const options = el("div", { class: "options" });
       decision.options.forEach((option, optionIndex) => {
@@ -1465,12 +1479,7 @@
         const radio = el("input", { id, type: "radio", name: "decision-" + index, value: option.label });
         radio.checked = draft.selected === option.label;
         radio.addEventListener("change", () => { draft.selected = option.label; save(); document.getElementById("decision-error")?.classList.remove("visible"); });
-        const title = el("div", {}, [mdInline("span", { class: "option-title" }, option.label)]);
-        if (option.recommended) title.append(el("span", { class: "recommended", text: "Recommended" }));
-        const body = el("div", {}, title);
-        if (option.description) body.append(markdownBlock("option-desc", option.description));
-        if (option.tradeoffs && option.tradeoffs.length) body.append(list(option.tradeoffs, "tradeoffs"));
-        options.append(el("label", { class: "option", htmlFor: id }, [radio, body]));
+        options.append(el("label", { class: "option", for: id }, [radio, optionBody(option)]));
       });
       frag.append(options);
 
@@ -1523,7 +1532,7 @@
       overall.value = state.overallNote || "";
       overall.addEventListener("input", () => { state.overallNote = overall.value; save(); });
       frag.append(disclosure("Overall response", overall, "", "review:overall"));
-      frag.append(el("div", { class: "error", id: "submit-error", role: "alert", text: "Could not submit this briefing. Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to reopen this briefing." }));
+      frag.append(el("div", { class: "error", id: "submit-error", role: "alert", text: submitErrorText("") }));
       return frag;
     }
 
@@ -1539,20 +1548,8 @@
         main.append(item);
       });
       presentation.decisions.forEach((decision, i) => {
-        const item = el("div", { class: "overview-item" });
-        const intro = el("div", { class: "reading", "data-section": "Decision: " + decision.question }, [el("span", { class: "tag", text: "Decision" }), mdInline("h1", { class: "title", tabindex: "-1" }, decision.question)]);
-        if (decision.context) intro.append(markdownBlock("purpose", decision.context));
-        item.append(intro);
-        const options = el("div", { class: "options" });
-        decision.options.forEach(option => {
-          const title = el("div", {}, [mdInline("span", { class: "option-title" }, option.label)]);
-          if (option.recommended) title.append(el("span", { class: "recommended", text: "Recommended" }));
-          const body = el("div", {}, title);
-          if (option.description) body.append(markdownBlock("option-desc", option.description));
-          if (option.tradeoffs && option.tradeoffs.length) body.append(list(option.tradeoffs, "tradeoffs"));
-          options.append(el("div", { class: "option" }, body));
-        });
-        item.append(options);
+        const item = el("div", { class: "overview-item" }, decisionIntro(decision));
+        item.append(el("div", { class: "options" }, decision.options.map(option => el("div", { class: "option" }, optionBody(option)))));
         main.append(item);
       });
       return main;
@@ -1566,6 +1563,8 @@
       document.getElementById("decision-error")?.classList.add("visible");
       return false;
     }
+
+    const submitErrorText = detail => "Could not submit this briefing" + detail + ". Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to reopen this briefing.";
 
     async function finish() {
       const payload = {
@@ -1594,7 +1593,7 @@
       } catch (error) {
         const banner = document.getElementById("submit-error");
         if (banner) {
-          banner.textContent = "Could not submit this briefing (" + (error && error.message ? error.message : error) + "). Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to reopen this briefing.";
+          banner.textContent = submitErrorText(" (" + errorMessage(error) + ")");
           banner.classList.add("visible");
         }
       }
