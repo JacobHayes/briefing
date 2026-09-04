@@ -24,7 +24,7 @@ Prebuilt static binaries (macOS arm64, Linux arm64/amd64) are attached to every 
 release, so mise can install it straight from GitHub:
 
 ```sh
-mise use -g github:JacobHayes/briefing@latest          # newest build (vYYYY.M.D.N)
+mise use -g github:JacobHayes/briefing@latest          # newest build (vYYYY.MM.DD.N)
 ```
 
 (The repo is private for now, so mise needs a `GITHUB_TOKEN`, or `gh auth login`.) Or build
@@ -178,7 +178,7 @@ cargo zigbuild --release --target aarch64-apple-darwin   # any release target, f
 
 CI and releases run on [RWX](https://www.rwx.com) (`.rwx/ci.yml`, `.rwx/release.yml`):
 every push runs the checks and cross-builds all targets with `cargo-zigbuild`; a daily cron
-publishes an immutable calver release `vYYYY.M.D.N` (N counts builds within the day) when
+publishes an immutable calver release `vYYYY.MM.DD.N` (N counts builds within the day) when
 `main` moved, and `rwx run .rwx/release.yml` publishes one on demand. Fresh releases are
 hidden by mise's `minimum_release_age` for a while; `MISE_MINIMUM_RELEASE_AGE=0` overrides. `rwx run .rwx/ci.yml --wait` runs CI against the working tree without pushing.
 TLS is rustls + ring with bundled webpki roots, so no platform SDKs are needed to cross-compile.

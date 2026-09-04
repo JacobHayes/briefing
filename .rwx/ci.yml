@@ -66,6 +66,16 @@ tasks:
       cargo fmt --all -- --check
       cargo clippy --all-targets --locked -- -D warnings
       cargo test --locked
+    filter:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - rustfmt.toml
+      - mise.toml
+      - build.rs
+      - src/**/*
+      - tests/**/*
+      - assets/**/*
 
   - key: build
     use: [deps]
@@ -78,3 +88,11 @@ tasks:
       cp "target/$TARGET/release/briefing" "$RWX_ARTIFACTS/briefing-$TARGET/"
     env:
       TARGET: ${{ parallel.target }}
+    filter:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - mise.toml
+      - build.rs
+      - src/**/*
+      - assets/**/*
