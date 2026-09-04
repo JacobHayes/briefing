@@ -21,11 +21,10 @@ and decisions.
 ## Install
 
 Prebuilt static binaries (macOS arm64, Linux arm64/amd64) are attached to every GitHub
-release, including nightly prereleases, so mise can install it straight from GitHub:
+release, so mise can install it straight from GitHub:
 
 ```sh
-mise use -g github:JacobHayes/briefing@latest          # tagged release
-mise use -g "github:JacobHayes/briefing@latest" --prerelease   # or the newest nightly
+mise use -g github:JacobHayes/briefing@latest          # newest daily build (vYYYY.M.D) or tag
 ```
 
 (The repo is private for now, so mise needs a `GITHUB_TOKEN`, or `gh auth login`.) Or build
@@ -179,8 +178,8 @@ cargo zigbuild --release --target aarch64-apple-darwin   # any release target, f
 
 CI and releases run on [RWX](https://www.rwx.com) (`.rwx/ci.yml`, `.rwx/release.yml`):
 every push runs the checks and cross-builds all targets with `cargo-zigbuild`; a `v*` tag
-publishes a release; a nightly cron publishes a `vX.Y.Z-nightly.YYYYMMDD` prerelease when
-`main` moved. `rwx run .rwx/ci.yml --wait` runs CI against the working tree without pushing.
+publishes a release; a daily cron publishes a plain calver release `vYYYY.M.D` when `main`
+moved (`rwx run .rwx/release.yml --init kind=daily` to publish on demand). `rwx run .rwx/ci.yml --wait` runs CI against the working tree without pushing.
 TLS is rustls + ring with bundled webpki roots, so no platform SDKs are needed to cross-compile.
 
 Tests cover validation, the hub state machine, the on-disk store, drafts, host/origin checks,

@@ -1,12 +1,14 @@
 # Publishes GitHub releases with prebuilt binaries.
 #
-# - Tag push `vX.Y.Z`  -> full release for that tag.
-# - Nightly cron       -> prerelease `vX.Y.Z-nightly.YYYYMMDD` at main HEAD, skipped when
-#                         main has not moved since the last nightly.
-# - `rwx run .rwx/release.yml --init kind=nightly` to force one from the CLI.
+# - Tag push `vX.Y.Z`  -> release for that tag (must match Cargo.toml).
+# - Daily cron         -> plain (non-prerelease) calver release `vYYYY.M.D` at main HEAD,
+#                         skipped when main has not moved since the last daily release. A
+#                         second run on the same day replaces that day's release.
+# - `rwx run .rwx/release.yml --init kind=daily` to publish from the CLI.
 #
-# Assets are named `briefing-<target>.tar.gz` (plus sha256 sums) so `mise use
-# github:JacobHayes/briefing` autodetects the right one.
+# Calver rather than `-nightly.N` suffixes so `mise use github:JacobHayes/briefing@latest`
+# resolves them without --prerelease. Assets are named `briefing-<target>.tar.gz` (plus
+# sha256 sums) so mise autodetects the right one.
 #
 # RWX's GitHub App token can clone and read releases but cannot create them, so `publish`
 # uses the vault secret BRIEFING_GITHUB_TOKEN: a fine-grained PAT with Contents: read/write on
@@ -17,7 +19,7 @@ on:
     init:
       commit-sha: ${{ event.git.sha }}
       tag: ""
-      kind: nightly
+      kind: daily
   github:
     push:
       if: ${{ event.git.tag != '' }}
@@ -26,12 +28,12 @@ on:
         tag: ${{ event.git.tag }}
         kind: tag
   cron:
-    - key: nightly
+    - key: daily
       schedule: '0 9 * * *' # 09:00 UTC daily
       init:
         commit-sha: ${{ event.git.sha }}
         tag: ""
-        kind: nightly
+        kind: daily
 
 concurrency-pools:
   - id: JacobHayes/briefing:release
@@ -82,12 +84,12 @@ tasks:
           version="${TAG#v}"
           [ "$version" = "$cargo_version" ] || { echo "tag $TAG does not match Cargo.toml version $cargo_version" >&2; exit 1; }
           release_tag="$TAG"; prerelease=false; publish=true ;;
-        nightly)
-          release_tag="v${cargo_version}-nightly.$(date -u +%Y%m%d)"; prerelease=true; publish=true
-          # Skip when the newest nightly already points at this commit.
+        daily)
+          release_tag="v$(date -u +%Y.%-m.%-d)"; prerelease=false; publish=true
+          # Skip when the newest daily release already points at this commit.
           last="$(gh api repos/JacobHayes/briefing/releases \
-            --jq '[.[] | select(.prerelease and (.tag_name | test("-nightly\\.")))][0].target_commitish // ""')"
-          if [ "$last" = "$sha" ]; then echo "main unchanged since last nightly ($sha); nothing to publish"; publish=false; fi ;;
+            --jq '[.[] | select(.tag_name | test("^v[0-9]{4}\\.[0-9]{1,2}\\.[0-9]{1,2}$"))][0].target_commitish // ""')"
+          if [ "$last" = "$sha" ]; then echo "main unchanged since last daily release ($sha); nothing to publish"; publish=false; fi ;;
         *) echo "unknown kind $KIND" >&2; exit 1 ;;
       esac
       echo "release_tag=$release_tag prerelease=$prerelease publish=$publish sha=$sha"
@@ -136,13 +138,13 @@ tasks:
       files="$(find "$ASSETS" -type f \( -name '*.tar.gz' -o -name '*.sha256' \))"
       flags=(--repo JacobHayes/briefing --target "$SHA" --title "briefing $RELEASE_TAG")
       if [ "$PRERELEASE" = "true" ]; then
-        flags+=(--prerelease --notes "Nightly build of main at $SHA.")
-      else
-        flags+=(--generate-notes)
+        flags+=(--prerelease)
       fi
+      flags+=(--notes "Build of main at $SHA.")
+      # Same tag already published (a second run today, or a re-run): replace it so the
+      # release and its tag point at this commit.
       if gh release view "$RELEASE_TAG" --repo JacobHayes/briefing >/dev/null 2>&1; then
-        gh release upload "$RELEASE_TAG" --repo JacobHayes/briefing --clobber $files
-      else
-        gh release create "$RELEASE_TAG" "${flags[@]}" $files
+        gh release delete "$RELEASE_TAG" --repo JacobHayes/briefing --cleanup-tag --yes
       fi
+      gh release create "$RELEASE_TAG" "${flags[@]}" $files
       echo "published $RELEASE_TAG"
