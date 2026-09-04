@@ -28,6 +28,7 @@ tasks:
       - Cargo.toml
       - Cargo.lock
       - mise.toml
+      - mise.lock
       - build.rs
       - src/**/*
       - assets/**/*

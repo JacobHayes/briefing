@@ -40,6 +40,7 @@ tasks:
       - Cargo.lock
       - rustfmt.toml
       - mise.toml
+      - mise.lock
       - build.rs
       - src/**/*
       - tests/**/*
