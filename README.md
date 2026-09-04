@@ -5,18 +5,36 @@ Claude Code, Codex, or anything else that can run a CLI or speak MCP.
 
 When an answer is too long or too dependent on earlier context to read as one chat message,
 the agent calls `brief_user` with a structured presentation, gets a link back to show the user,
-and calls `await_briefing` for their feedback. The user gets a quiet reading
-column in the browser: one semantic chunk per screen, a Context panel one click away, decision
-cards, always-on inline commenting, and a final briefing screen. Only user-authored signal comes
-back: notes, checkpoint answers, inline comments with their quoted passages, flagged sections,
-and decisions.
+and calls `await_briefing` for their feedback. The user gets a quiet reading column in the
+browser: one semantic chunk per screen, a Context panel one click away, decision cards,
+always-on inline commenting, and a final review screen. Only user-authored signal comes back:
+notes, checkpoint answers, inline comments with their quoted passages, flagged sections, and
+decisions.
 
+```mermaid
+sequenceDiagram
+    participant Agent as Agent<br/>(Claude Code, Codex, Pi, CLI)
+    participant B as briefing<br/>(MCP server or CLI)
+    participant S as Page server<br/>(embedded or hub)
+    participant User as User's browser
+
+    Agent->>B: brief_user(presentation)
+    B->>S: register, mirror record to disk
+    B-->>Agent: link + briefingId
+    Agent->>User: shows the link
+    Agent->>B: await_briefing(briefingId)
+    User->>S: opens the page
+    loop reading
+        User->>S: notes, comments, decisions (draft saved server-side)
+    end
+    User->>S: Submit
+    S-->>B: feedback
+    B-->>Agent: feedback (structuredContent)
 ```
-                 ┌──────────────┐   brief_user    ┌──────────────┐   http    ┌─────────┐
-  Pi / Claude /  │  MCP (stdio) │ ─────────────────▶  │  embedded or │ ◀──────▶  │ browser │
-  Codex / CLI    │  or CLI      │ ◀─────────────────  │  hub server  │           │  page   │
-                 └──────────────┘   notes+decisions   └──────────────┘           └─────────┘
-```
+
+The record on disk is what makes this robust: if the agent's process dies at any point, a
+later `await_briefing` with the same id returns the stored feedback or re-serves the page with
+the draft intact ([recovery](#recovery-and-hand-off)).
 
 ## Install
 
@@ -46,7 +64,7 @@ seven files. The result is a single static binary with no runtime dependencies a
 |---|---|---|
 | Claude Code | `claude mcp add --scope user briefing -- briefing mcp` | [integrations/claude-code.md](integrations/claude-code.md) |
 | Codex | `[mcp_servers.briefing]` with `tool_timeout_sec` raised | [integrations/codex.md](integrations/codex.md) |
-| Pi | `pi install git:github.com/JacobHayes/briefing` (extension + skill) | [integrations/pi](integrations/pi/briefing.ts) |
+| Pi | `pi install ssh://git@github.com/JacobHayes/briefing` (extension + skill) | [integrations/pi](integrations/pi/briefing.ts) |
 | Anything | `briefing present presentation.json` | below |
 
 Link `skills/briefing` into each harness's skills directory so the model gets the same
@@ -63,15 +81,18 @@ server picks a plan from that with no extra tool parameters:
 
 | Client (from handshake) | Hold | Budget before returning `pending` |
 |---|---|---|
-| Codex | form elicitation (Codex pauses its tool timeout while one is open; the server cancels it when the browser submits, declining it cancels the briefing) | hours |
-| Claude Code, VS Code | `notifications/progress` every 10 s (Claude Code resets its idle timer on progress; VS Code has no timeout) | hours |
+| Codex | form elicitation (Codex pauses its tool timeout while one is open; the server cancels it when the browser submits, declining it cancels the briefing) | 4 h |
+| Claude Code, VS Code | `notifications/progress` every 10 s (Claude Code's idle timer resets on progress; VS Code has no timeout) | 24 h |
 | Gemini CLI | progress | 570 s |
 | Goose | progress | 280 s |
 | Cursor, Cline, Zed, Continue, OpenCode, Windsurf, Pi's MCP adapter, unknown | progress | 50 s |
 
 When the budget runs out the tool returns `status: "pending"` with a `briefingId` and the
 model continues with `await_briefing`; the human never notices. `--hold` and
-`--max-wait-secs` override the plan. Details and sources: [docs/harness-timeouts.md](docs/harness-timeouts.md).
+`--max-wait-secs` override the plan. Claude Code moves any MCP call longer than two minutes
+into a background task and notifies the model when it completes; the tool text tells the
+model to wait for that rather than poll. Details and sources:
+[docs/harness-timeouts.md](docs/harness-timeouts.md).
 
 Pi's own extension has no timeout to work around, so it exposes a single blocking
 `brief_user` that shows the link in Pi's UI and returns the feedback directly.
@@ -85,7 +106,7 @@ drops text blocks, so nothing important lives in text). Each result carries an
 | Tool | `structuredContent` |
 |---|---|
 | `brief_user` | `{status: "open", briefingId, url, openedBrowser, scope, instructions}` |
-| `await_briefing` | `{status: "completed" \| "cancelled" \| "pending", briefingId, url?, feedback?, instructions}` where `feedback` is `{cancelled, chunks[{title, status, checkpoint, note}], decisions[{question, selected, note}], annotations[{location, quote, comment, target?}], overallNote}` |
+| `await_briefing` | `{status: "completed" \| "cancelled" \| "pending" \| "reopened", briefingId, url?, feedback?, instructions}` where `feedback` is `{cancelled, chunks[{title, status, checkpoint, note}], decisions[{question, selected, note}], annotations[{location, quote, comment, target?}], overallNote}`; `reopened` means a briefing from an earlier process is being served again at `url` |
 | `cancel_briefing` | `{briefingId, cancelled}` |
 
 All three declare an `outputSchema`. The text block is a one-line summary only, so nothing
@@ -109,11 +130,16 @@ briefing await <briefingId>        # recover one: re-serve it if still open, pri
 the result on stdout. Exit codes: 0 completed, 2 cancelled, 3 still pending after
 `--wait-seconds`, 130 interrupted.
 
-Common flags / env: `--bind auto|local|tailscale` (`BRIEFING_BIND`), `--no-open`,
-`--on-create 'cmd'` (`BRIEFING_ON_CREATE`, runs with `BRIEFING_URL/ID/TITLE`, e.g. to push
-the link to ntfy from a headless box),
-`--hub URL` (`BRIEFING_HUB`), `BRIEFING_STATE_DIR` to move the record store,
-`BRIEFING_BROWSER` to override the opener, `BRIEFING_LOG` for tracing.
+Global flags and their env vars:
+
+| Flag / env | Meaning |
+|---|---|
+| `--bind auto\|local\|tailscale` (`BRIEFING_BIND`) | Where the embedded server listens; `auto` prefers the Tailscale address |
+| `--no-open` (`BRIEFING_NO_OPEN`) | Never try to open a browser |
+| `--on-create 'cmd'` (`BRIEFING_ON_CREATE`) | Shell hook run with `BRIEFING_URL/ID/TITLE`, e.g. to push the link to ntfy from a headless box |
+| `--hub URL` (`BRIEFING_HUB`) | Use a hub instead of the embedded server |
+| `BRIEFING_STATE_DIR` | Where records are mirrored (default `$XDG_STATE_HOME/briefing/briefings`) |
+| `BRIEFING_BROWSER`, `BRIEFING_LOG` | Override the browser opener; tracing filter |
 
 ## Recovery and hand-off
 
@@ -176,12 +202,21 @@ mise run assets:update
 cargo zigbuild --release --target aarch64-apple-darwin   # any release target, from Linux
 ```
 
-CI and releases run on [RWX](https://www.rwx.com) (`.rwx/ci.yml`, `.rwx/release.yml`):
-every push runs the checks and cross-builds all targets with `cargo-zigbuild`; a daily cron
-publishes an immutable calver release `vYYYY.MM.DD.N` (N counts builds within the day) when
-`main` moved, and `rwx run .rwx/release.yml` publishes one on demand. Fresh releases are
-hidden by mise's `minimum_release_age` for a while; `MISE_MINIMUM_RELEASE_AGE=0` overrides. `rwx run .rwx/ci.yml --wait` runs CI against the working tree without pushing.
-TLS is rustls + ring with bundled webpki roots, so no platform SDKs are needed to cross-compile.
+CI and releases run on [RWX](https://www.rwx.com):
+
+- `.rwx/ci.yml`: every push runs fmt, clippy, and tests, then cross-builds all three targets
+  with `cargo-zigbuild`. `rwx run .rwx/ci.yml --wait --init branch=main` runs it against the
+  working tree without pushing.
+- `.rwx/release.yml`: a daily cron publishes an immutable calver release `vYYYY.MM.DD.N`
+  (N counts builds within the day) when `main` moved; `rwx run .rwx/release.yml` publishes
+  one on demand (`--init force=true` even if `main` did not move). Publishing needs the vault
+  secret `BRIEFING_GITHUB_TOKEN` (fine-grained PAT, Contents read/write on this repo).
+- Build tasks filter their inputs to the files they read, so doc-only commits reuse cached
+  builds.
+
+Fresh releases are hidden by mise's `minimum_release_age` for a while;
+`MISE_MINIMUM_RELEASE_AGE=0` overrides. TLS is rustls + ring with bundled webpki roots, so no
+platform SDKs are needed to cross-compile.
 
 Tests cover validation, the hub state machine, the on-disk store, drafts, host/origin checks,
 the full HTTP flow, recovery of a briefing across processes, and the MCP server driven over
