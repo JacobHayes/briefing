@@ -45,40 +45,14 @@ tasks:
       repository: https://github.com/JacobHayes/briefing.git
       ref: ${{ init.commit-sha }}
 
-  - key: tools
-    use: [code]
-    run: |
-      curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
-      export PATH="$HOME/.cargo/bin:$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
-      rustup target add aarch64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl
-      curl https://mise.run | sh
-      mise trust mise.toml && MISE_YES=1 mise install
-      echo "$HOME/.cargo/bin:$HOME/.local/share/mise/shims:$HOME/.local/bin" > "$RWX_ENV/PATH"
-      sudo apt-get update && sudo apt-get install -y --no-install-recommends gh && sudo apt-get clean
-    filter:
-      - mise.toml
-      - rust-toolchain.toml
-
-  # Same cached dependency layer as ci.yml, so the three build legs share one fetch.
-  - key: deps
-    use: [tools]
-    run: |
-      cargo fetch --locked
-      (cd assets && npm ci --ignore-scripts --no-audit --no-fund)
-    filter:
-      - mise.toml
-      - rust-toolchain.toml
-      - Cargo.toml
-      - Cargo.lock
-      - build.rs
-      - src/lib.rs
-      - src/main.rs
-      - assets/package.json
-      - assets/package-lock.json
+  # Rust + mise tools and the dependency fetch (shared with ci.yml).
+  - key: toolchain
+    use: code
+    call: ${{ run.dir }}/packages/toolchain.yml
 
   # Decide the tag for this run and whether anything needs publishing.
   - key: plan
-    use: [tools]
+    use: toolchain.tools
     cache: false
     env:
       FORCE: ${{ init.force }}
@@ -105,7 +79,7 @@ tasks:
       echo "$sha" > "$RWX_VALUES/sha"
 
   - key: build
-    use: [deps]
+    use: toolchain
     if: ${{ tasks.plan.values.publish == 'true' }}
     parallel:
       matrix:
@@ -137,7 +111,7 @@ tasks:
           path: dist
 
   - key: publish
-    use: [tools]
+    use: toolchain.tools
     after: [build]
     if: ${{ tasks.plan.values.publish == 'true' }}
     cache: false
@@ -150,6 +124,7 @@ tasks:
       ASSETS: ${{ tasks.build.artifacts.dist }}
     run: |
       set -euo pipefail
+      sudo apt-get update && sudo apt-get install -y --no-install-recommends gh && sudo apt-get clean
       files="$(find "$ASSETS" -type f \( -name '*.tar.gz' -o -name '*.sha256' \))"
       if gh release view "$RELEASE_TAG" --repo JacobHayes/briefing >/dev/null 2>&1; then
         echo "$RELEASE_TAG already exists; releases are immutable, re-run to get the next counter" >&2
