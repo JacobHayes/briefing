@@ -20,15 +20,6 @@ pub const MAX_TRADEOFFS: usize = 4;
 pub const MAX_PRESENTATION_BYTES: usize = 1024 * 1024;
 pub const MAX_FENCED_SOURCE_BYTES: usize = 128 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Research,
-    Explanation,
-    Decision,
-    Briefing,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
@@ -124,8 +115,6 @@ pub struct Tray {
 pub struct Briefing {
     /// Short title for the briefing.
     pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<Mode>,
     /// The user's current goal or the outcome this presentation supports.
     pub goal: String,
     /// 1-10 semantic chunks in the order the user should encounter them.
@@ -134,7 +123,7 @@ pub struct Briefing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tray: Option<Tray>,
     /// 0-6 decisions shown after the explanatory chunks.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     #[schemars(length(max = 6))]
     pub decisions: Vec<Decision>,
     /// Short heading for the final briefing screen.
@@ -146,11 +135,8 @@ pub struct Briefing {
 #[error("{0}")]
 pub struct ValidationError(pub String);
 
-fn require_text(value: Option<&str>, label: &str) -> Result<(), ValidationError> {
-    match value {
-        Some(text) if !text.trim().is_empty() => Ok(()),
-        _ => Err(ValidationError(format!("{label} cannot be empty"))),
-    }
+fn require_text(text: &str, label: &str) -> Result<(), ValidationError> {
+    if text.trim().is_empty() { Err(ValidationError(format!("{label} cannot be empty"))) } else { Ok(()) }
 }
 
 fn is_vega_lite_fence(language: &str) -> bool {
@@ -267,16 +253,16 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
     if serialized.len() > MAX_PRESENTATION_BYTES {
         return Err(ValidationError(format!("brief_user input exceeds {}KB", MAX_PRESENTATION_BYTES / 1024)));
     }
-    require_text(Some(&input.title), "title")?;
-    require_text(Some(&input.goal), "goal")?;
+    require_text(&input.title, "title")?;
+    require_text(&input.goal, "goal")?;
     if input.chunks.is_empty() || input.chunks.len() > MAX_CHUNKS {
         return Err(ValidationError(format!("brief_user requires 1-{MAX_CHUNKS} chunks")));
     }
 
     for (index, chunk) in input.chunks.iter().enumerate() {
         let n = index + 1;
-        require_text(Some(&chunk.title), &format!("chunk {n} title"))?;
-        require_text(Some(&chunk.main_point), &format!("chunk {n} mainPoint"))?;
+        require_text(&chunk.title, &format!("chunk {n} title"))?;
+        require_text(&chunk.main_point, &format!("chunk {n} mainPoint"))?;
         let too_many = |len: usize, max: usize, what: &str| {
             if len > max { Err(ValidationError(format!("chunk {n} has more than {max} {what}"))) } else { Ok(()) }
         };
@@ -284,7 +270,7 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
         too_many(chunk.remember.as_ref().map_or(0, Vec::len), MAX_REMEMBER, "remember anchors")?;
         too_many(chunk.sources.as_ref().map_or(0, Vec::len), MAX_SOURCES, "sources")?;
         for source in chunk.sources.iter().flatten() {
-            require_text(Some(&source.label), &format!("chunk {n} source label"))?;
+            require_text(&source.label, &format!("chunk {n} source label"))?;
             let url = url::Url::parse(&source.url)
                 .map_err(|_| ValidationError(format!("chunk {n} source URL is invalid: {}", source.url)))?;
             if url.scheme() != "http" && url.scheme() != "https" {
@@ -307,13 +293,13 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
     }
     for (index, decision) in input.decisions.iter().enumerate() {
         let n = index + 1;
-        require_text(Some(&decision.question), &format!("decision {n} question"))?;
+        require_text(&decision.question, &format!("decision {n} question"))?;
         if decision.options.len() < MIN_OPTIONS || decision.options.len() > MAX_OPTIONS {
             return Err(ValidationError(format!("decision {n} requires {MIN_OPTIONS}-{MAX_OPTIONS} options")));
         }
         let mut labels = std::collections::HashSet::new();
         for option in &decision.options {
-            require_text(Some(&option.label), &format!("decision {n} option label"))?;
+            require_text(&option.label, &format!("decision {n} option label"))?;
             if !labels.insert(option.label.trim().to_lowercase()) {
                 return Err(ValidationError(format!("decision {n} has duplicate option: {}", option.label)));
             }
@@ -337,9 +323,14 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
     Ok(normalized)
 }
 
+/// JSON Schema for `T` as a JSON value.
+pub fn schema_value<T: JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes")
+}
+
 /// JSON Schema for the `brief_user` tool input.
 pub fn json_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(Briefing)).expect("schema serializes")
+    schema_value::<Briefing>()
 }
 
 /// The bundled demo presentation.
@@ -354,7 +345,6 @@ mod tests {
     fn minimal() -> Briefing {
         Briefing {
             title: "T".into(),
-            mode: None,
             goal: "G".into(),
             chunks: vec![Chunk {
                 title: "C".into(),

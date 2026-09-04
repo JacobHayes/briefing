@@ -6,8 +6,10 @@
 //! adopt them (`briefing await <id>` after the creator died) and so results survive until
 //! the agent fetches them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
@@ -28,24 +30,40 @@ pub enum BriefingStatus {
     Cancelled,
 }
 
+impl BriefingStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BriefingStatus::Active => "active",
+            BriefingStatus::Completed => "completed",
+            BriefingStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl fmt::Display for BriefingStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl BriefingResponse {
+    /// The status a finished briefing carries for this result.
+    pub fn status(&self) -> BriefingStatus {
+        if self.cancelled { BriefingStatus::Cancelled } else { BriefingStatus::Completed }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitOutcome {
     Pending,
     Done(BriefingResponse),
 }
 
-impl PartialEq for BriefingResponse {
-    fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
-    }
-}
-impl Eq for BriefingResponse {}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum HubError {
     #[error("briefing not found")]
     NotFound,
-    #[error("briefing already {0:?}")]
+    #[error("briefing already {0}")]
     AlreadyFinished(BriefingStatus),
 }
 
@@ -88,89 +106,38 @@ pub struct BriefingInfo {
     pub id: String,
     pub title: String,
     pub status: BriefingStatus,
-    pub age_secs: u64,
+    /// Unix seconds.
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Filled in by whoever knows the public origin (backend or hub API).
+    /// Where the briefing is (or was last) served.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<DraftSummary>,
-    /// True when this process loaded the record from disk rather than creating it.
-    #[serde(default)]
-    pub adopted: bool,
+    /// True the first time this process serves a briefing at a different link than the
+    /// one it was last served at: the old link is dead and the new one must be shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reopened: bool,
     /// True when the record is only on disk (listed, but not served by this process).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub on_disk_only: bool,
 }
 
-struct Record {
-    id: String,
-    token: String,
-    presentation: Briefing,
-    status: watch::Sender<BriefingStatus>,
-    result: Option<BriefingResponse>,
-    created_at: u64,
-    finished_at: Option<u64>,
-    source: Option<String>,
-    url: Option<String>,
-    draft_revision: u64,
-    draft: Option<Value>,
-    adopted: bool,
-}
-
-impl Record {
-    fn stored(&self) -> StoredRecord {
-        StoredRecord {
-            id: self.id.clone(),
-            token: self.token.clone(),
-            presentation: self.presentation.clone(),
-            status: *self.status.borrow(),
-            created_at: self.created_at,
-            finished_at: self.finished_at,
-            source: self.source.clone(),
-            url: self.url.clone(),
-            draft_revision: self.draft_revision,
-            draft: self.draft.clone(),
-            result: self.result.clone(),
-        }
-    }
-
-    fn from_stored(stored: StoredRecord) -> Record {
-        let (status, _) = watch::channel(stored.status);
-        Record {
-            id: stored.id,
-            token: stored.token,
-            presentation: stored.presentation,
-            status,
-            result: stored.result,
-            created_at: stored.created_at,
-            finished_at: stored.finished_at,
-            source: stored.source,
-            url: stored.url,
-            draft_revision: stored.draft_revision,
-            draft: stored.draft,
-            adopted: true,
-        }
-    }
-
-    fn info(&self) -> BriefingInfo {
-        BriefingInfo {
-            id: self.id.clone(),
-            title: self.presentation.title.clone(),
-            status: *self.status.borrow(),
-            age_secs: now_secs().saturating_sub(self.created_at),
-            created_at: self.created_at,
-            finished_at: self.finished_at,
-            source: self.source.clone(),
-            url: self.url.clone(),
-            draft: self.draft.as_ref().map(|draft| draft_summary(&self.presentation, draft)),
-            adopted: self.adopted,
-            on_disk_only: false,
-        }
+fn info(stored: &StoredRecord, on_disk_only: bool) -> BriefingInfo {
+    BriefingInfo {
+        id: stored.id.clone(),
+        title: stored.presentation.title.clone(),
+        status: stored.status,
+        created_at: stored.created_at,
+        finished_at: stored.finished_at,
+        source: stored.source.clone(),
+        url: stored.url.clone(),
+        draft: stored.draft.as_ref().map(|draft| draft_summary(&stored.presentation, draft)),
+        reopened: false,
+        on_disk_only,
     }
 }
 
@@ -192,6 +159,23 @@ pub fn draft_summary(presentation: &Briefing, draft: &Value) -> DraftSummary {
     }
 }
 
+/// An in-memory record: the stored form plus a channel that wakes waiters on finish.
+struct Record {
+    stored: StoredRecord,
+    status: watch::Sender<BriefingStatus>,
+}
+
+impl Record {
+    fn new(stored: StoredRecord) -> Record {
+        let (status, _) = watch::channel(stored.status);
+        Record { stored, status }
+    }
+
+    fn is_active(&self) -> bool {
+        self.stored.status == BriefingStatus::Active
+    }
+}
+
 pub struct HubConfig {
     /// How long a finished briefing stays fetchable through `wait`/`status`.
     pub finished_ttl: Duration,
@@ -204,6 +188,9 @@ pub struct HubConfig {
 impl HubConfig {
     pub const FINISHED_TTL: Duration = Duration::from_secs(6 * 60 * 60);
     pub const ACTIVE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+    /// The same defaults as CLI flag text (a test in main.rs keeps them in step).
+    pub const FINISHED_TTL_TEXT: &str = "6h";
+    pub const ACTIVE_TTL_TEXT: &str = "14d";
 
     /// Default TTLs plus the default on-disk store.
     pub fn with_default_store() -> Self {
@@ -220,7 +207,9 @@ impl Default for HubConfig {
 pub struct Hub {
     config: HubConfig,
     records: Mutex<HashMap<String, Record>>,
-    tokens: Mutex<HashMap<String, String>>,
+    /// Unix seconds of the last sweep; sweeps are rate-limited because each one reads the
+    /// whole store directory.
+    last_sweep: AtomicU64,
 }
 
 pub fn random_token(bytes: usize) -> String {
@@ -231,87 +220,105 @@ pub fn random_token(bytes: usize) -> String {
 
 /// How often a waiter re-reads the on-disk record, in case another process finished it.
 const RECONCILE_EVERY: Duration = Duration::from_secs(2);
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// A record serialized under the lock, to be written to disk once it is released.
+struct Pending(Option<(String, Vec<u8>)>);
 
 impl Hub {
     pub fn new(config: HubConfig) -> Self {
-        let hub = Self { config, records: Mutex::new(HashMap::new()), tokens: Mutex::new(HashMap::new()) };
+        let hub = Self { config, records: Mutex::new(HashMap::new()), last_sweep: AtomicU64::new(0) };
         hub.sweep();
         hub
     }
 
-    pub fn store(&self) -> Option<&Store> {
-        self.config.store.as_ref()
+    /// Serialize `record` for the store (call while holding the lock; write with `flush`).
+    fn encode(&self, record: &Record) -> Pending {
+        if self.config.store.is_none() {
+            return Pending(None);
+        }
+        match serde_json::to_vec(&record.stored) {
+            Ok(bytes) => Pending(Some((record.stored.id.clone(), bytes))),
+            Err(error) => {
+                tracing::warn!(%error, id = record.stored.id, "could not serialize briefing record");
+                Pending(None)
+            }
+        }
     }
 
-    fn persist(&self, record: &Record) {
-        if let Some(store) = &self.config.store
-            && let Err(error) = store.save(&record.stored())
+    fn flush(&self, pending: Pending) {
+        if let (Some(store), Some((id, bytes))) = (&self.config.store, pending.0)
+            && let Err(error) = store.write(&id, &bytes)
         {
-            tracing::warn!(%error, id = record.id, "could not write briefing record");
+            tracing::warn!(%error, id, "could not write briefing record");
         }
     }
 
     pub fn create(&self, presentation: Briefing, source: Option<String>) -> CreatedBriefing {
-        self.sweep();
-        let id = random_token(12);
-        let token = random_token(24);
-        let (status, _) = watch::channel(BriefingStatus::Active);
-        let record = Record {
-            id: id.clone(),
-            token: token.clone(),
+        self.sweep_if_due();
+        let stored = StoredRecord {
+            id: random_token(12),
+            token: random_token(24),
             presentation,
-            status,
-            result: None,
+            status: BriefingStatus::Active,
             created_at: now_secs(),
             finished_at: None,
             source,
             url: None,
             draft_revision: 0,
             draft: None,
-            adopted: false,
+            result: None,
         };
-        self.persist(&record);
-        self.records.lock().unwrap().insert(id.clone(), record);
-        self.tokens.lock().unwrap().insert(token.clone(), id.clone());
-        CreatedBriefing { id, token }
+        let created = CreatedBriefing { id: stored.id.clone(), token: stored.token.clone() };
+        let record = Record::new(stored);
+        let pending = self.encode(&record);
+        self.records.lock().unwrap().insert(created.id.clone(), record);
+        self.flush(pending);
+        created
     }
 
     /// Remember the public URL a briefing is served at (shown by `status` and the dashboard,
-    /// also after the serving process is gone).
-    pub fn set_url(&self, id: &str, url: &str) {
-        let mut records = self.records.lock().unwrap();
-        if let Some(record) = records.get_mut(id) {
-            record.url = Some(url.to_string());
-            self.persist(record);
-        }
-    }
-
-    fn insert_adopted(&self, stored: StoredRecord) {
-        let record = Record::from_stored(stored);
-        self.tokens.lock().unwrap().insert(record.token.clone(), record.id.clone());
-        self.records.lock().unwrap().insert(record.id.clone(), record);
-    }
-
-    /// Load `id` from disk if this process does not know it. Returns true when it adopted it.
-    pub fn ensure_loaded(&self, id: &str) -> bool {
-        if self.records.lock().unwrap().contains_key(id) {
-            return false;
-        }
-        let Some(stored) = self.config.store.as_ref().and_then(|store| store.load(id)) else {
-            return false;
+    /// also after the serving process is gone). Returns true when it changed.
+    pub fn set_url(&self, id: &str, url: &str) -> bool {
+        let pending = {
+            let mut records = self.records.lock().unwrap();
+            let Some(record) = records.get_mut(id) else {
+                return false;
+            };
+            if record.stored.url.as_deref() == Some(url) {
+                return false;
+            }
+            record.stored.url = Some(url.to_string());
+            self.encode(record)
         };
-        tracing::info!(id, status = ?stored.status, "adopted briefing record from disk");
-        self.insert_adopted(stored);
+        self.flush(pending);
         true
     }
 
+    fn adopt(&self, stored: StoredRecord) {
+        tracing::info!(id = stored.id, status = %stored.status, "adopted briefing record from disk");
+        self.records.lock().unwrap().entry(stored.id.clone()).or_insert_with(|| Record::new(stored));
+    }
+
+    /// Load `id` from disk if this process does not know it.
+    fn ensure_loaded(&self, id: &str) {
+        if self.records.lock().unwrap().contains_key(id) {
+            return;
+        }
+        if let Some(stored) = self.config.store.as_ref().and_then(|store| store.load(id)) {
+            self.adopt(stored);
+        }
+    }
+
     fn id_for_token(&self, token: &str) -> Option<String> {
-        if let Some(id) = self.tokens.lock().unwrap().get(token).cloned() {
-            return Some(id);
+        let known =
+            self.records.lock().unwrap().values().find(|r| r.stored.token == token).map(|r| r.stored.id.clone());
+        if known.is_some() {
+            return known;
         }
         let stored = self.config.store.as_ref()?.find_by_token(token)?;
         let id = stored.id.clone();
-        self.insert_adopted(stored);
+        self.adopt(stored);
         Some(id)
     }
 
@@ -320,35 +327,40 @@ impl Hub {
         let Some(store) = &self.config.store else {
             return;
         };
-        let active = self.records.lock().unwrap().get(id).is_some_and(|r| *r.status.borrow() == BriefingStatus::Active);
-        if !active {
+        if !self.records.lock().unwrap().get(id).is_some_and(Record::is_active) {
             return;
         }
         if let Some(stored) = store.load(id)
             && stored.status != BriefingStatus::Active
         {
-            let result = stored.result.unwrap_or_else(|| parse_browser_result(&Value::Null, true));
+            let result = stored.result.unwrap_or_else(BriefingResponse::cancelled);
             let _ = self.finish(id, result, stored.status);
         }
+    }
+
+    /// Load (and reconcile) `id`, then read it.
+    fn with_record<R>(&self, id: &str, read: impl FnOnce(&Record) -> R) -> Option<R> {
+        self.ensure_loaded(id);
+        self.reconcile(id);
+        self.records.lock().unwrap().get(id).map(read)
+    }
+
+    /// Whether the browser token names a briefing this process can serve.
+    pub fn has_token(&self, token: &str) -> bool {
+        self.id_for_token(token).is_some()
     }
 
     /// The JSON the browser page fetches: the presentation plus id, status, and draft.
     pub fn page_payload(&self, token: &str) -> Option<Value> {
         let id = self.id_for_token(token)?;
         let records = self.records.lock().unwrap();
-        let record = records.get(&id)?;
-        let mut payload = serde_json::to_value(&record.presentation).ok()?;
+        let stored = &records.get(&id)?.stored;
+        let mut payload = serde_json::to_value(&stored.presentation).ok()?;
         let object = payload.as_object_mut()?;
-        object.insert("id".into(), Value::String(record.id.clone()));
-        object.insert("status".into(), serde_json::to_value(*record.status.borrow()).ok()?);
-        object.insert("draftRevision".into(), Value::from(record.draft_revision));
-        object.insert("draft".into(), record.draft.clone().unwrap_or(Value::Null));
-        if object.get("mode").is_none_or(Value::is_null) {
-            object.insert("mode".into(), Value::String("briefing".into()));
-        }
-        if !object.contains_key("decisions") {
-            object.insert("decisions".into(), Value::Array(vec![]));
-        }
+        object.insert("id".into(), Value::String(stored.id.clone()));
+        object.insert("status".into(), Value::String(stored.status.to_string()));
+        object.insert("draftRevision".into(), Value::from(stored.draft_revision));
+        object.insert("draft".into(), stored.draft.clone().unwrap_or(Value::Null));
         Some(payload)
     }
 
@@ -356,75 +368,75 @@ impl Hub {
     /// returns the newer draft instead of overwriting it.
     pub fn save_draft(&self, token: &str, base: Option<u64>, draft: Value) -> Result<DraftSave, HubError> {
         let id = self.id_for_token(token).ok_or(HubError::NotFound)?;
-        let mut records = self.records.lock().unwrap();
-        let record = records.get_mut(&id).ok_or(HubError::NotFound)?;
-        let current = *record.status.borrow();
-        if current != BriefingStatus::Active {
-            return Err(HubError::AlreadyFinished(current));
-        }
-        if let Some(base) = base
-            && base != record.draft_revision
-            && let Some(existing) = &record.draft
-        {
-            return Ok(DraftSave::Stale { revision: record.draft_revision, draft: existing.clone() });
-        }
-        record.draft_revision += 1;
-        record.draft = Some(draft);
-        self.persist(record);
-        Ok(DraftSave::Saved { revision: record.draft_revision })
+        let (outcome, pending) = {
+            let mut records = self.records.lock().unwrap();
+            let record = records.get_mut(&id).ok_or(HubError::NotFound)?;
+            let stored = &mut record.stored;
+            if stored.status != BriefingStatus::Active {
+                return Err(HubError::AlreadyFinished(stored.status));
+            }
+            if let Some(base) = base
+                && base != stored.draft_revision
+                && let Some(existing) = &stored.draft
+            {
+                return Ok(DraftSave::Stale { revision: stored.draft_revision, draft: existing.clone() });
+            }
+            stored.draft_revision += 1;
+            stored.draft = Some(draft);
+            (DraftSave::Saved { revision: stored.draft_revision }, self.encode(record))
+        };
+        self.flush(pending);
+        Ok(outcome)
     }
 
     fn finish(&self, id: &str, result: BriefingResponse, status: BriefingStatus) -> Result<(), HubError> {
-        let mut records = self.records.lock().unwrap();
-        let record = records.get_mut(id).ok_or(HubError::NotFound)?;
-        let current = *record.status.borrow();
-        if current != BriefingStatus::Active {
-            return Err(HubError::AlreadyFinished(current));
-        }
-        record.result = Some(result);
-        record.finished_at = Some(now_secs());
-        record.status.send_replace(status);
-        self.persist(record);
+        let pending = {
+            let mut records = self.records.lock().unwrap();
+            let record = records.get_mut(id).ok_or(HubError::NotFound)?;
+            if !record.is_active() {
+                return Err(HubError::AlreadyFinished(record.stored.status));
+            }
+            record.stored.result = Some(result);
+            record.stored.finished_at = Some(now_secs());
+            record.stored.status = status;
+            record.status.send_replace(status);
+            self.encode(record)
+        };
+        self.flush(pending);
         Ok(())
     }
 
     /// Browser submission (`complete` or `cancel`) for the presentation behind `token`.
     pub fn submit_by_token(&self, token: &str, body: &Value, cancelled: bool) -> Result<(), HubError> {
         let id = self.id_for_token(token).ok_or(HubError::NotFound)?;
-        let status = if cancelled { BriefingStatus::Cancelled } else { BriefingStatus::Completed };
-        self.finish(&id, parse_browser_result(body, cancelled), status)
+        let result = parse_browser_result(body, cancelled);
+        let status = result.status();
+        self.finish(&id, result, status)
     }
 
     /// Agent-side cancellation. Returns false when the briefing was not active.
     pub fn cancel(&self, id: &str) -> bool {
         self.ensure_loaded(id);
-        self.finish(id, parse_browser_result(&Value::Null, true), BriefingStatus::Cancelled).is_ok()
+        self.finish(id, BriefingResponse::cancelled(), BriefingStatus::Cancelled).is_ok()
     }
 
     pub fn status(&self, id: &str) -> Option<BriefingStatus> {
-        self.ensure_loaded(id);
-        self.records.lock().unwrap().get(id).map(|r| *r.status.borrow())
+        self.with_record(id, |r| r.stored.status)
     }
 
     pub fn info(&self, id: &str) -> Option<BriefingInfo> {
-        self.ensure_loaded(id);
-        self.reconcile(id);
-        self.records.lock().unwrap().get(id).map(Record::info)
+        self.with_record(id, |r| info(&r.stored, false))
     }
 
     /// Everything this process knows plus on-disk records from other processes.
     pub fn list(&self) -> Vec<BriefingInfo> {
-        let mut infos: Vec<BriefingInfo> = self.records.lock().unwrap().values().map(Record::info).collect();
+        let mut infos: Vec<BriefingInfo> =
+            self.records.lock().unwrap().values().map(|r| info(&r.stored, false)).collect();
         if let Some(store) = &self.config.store {
-            for stored in store.list() {
-                if infos.iter().any(|i| i.id == stored.id) {
-                    continue;
-                }
-                let mut info = Record::from_stored(stored).info();
-                info.adopted = false;
-                info.on_disk_only = true;
-                infos.push(info);
-            }
+            let known: HashSet<&str> = infos.iter().map(|i| i.id.as_str()).collect();
+            let disk: Vec<BriefingInfo> =
+                store.list().iter().filter(|s| !known.contains(s.id.as_str())).map(|s| info(s, true)).collect();
+            infos.extend(disk);
         }
         infos.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
         infos
@@ -432,13 +444,13 @@ impl Hub {
 
     pub fn token_for(&self, id: &str) -> Option<String> {
         self.ensure_loaded(id);
-        self.records.lock().unwrap().get(id).map(|r| r.token.clone())
+        self.records.lock().unwrap().get(id).map(|r| r.stored.token.clone())
     }
 
     fn snapshot(&self, id: &str) -> Result<(watch::Receiver<BriefingStatus>, Option<BriefingResponse>), HubError> {
         let records = self.records.lock().unwrap();
         let record = records.get(id).ok_or(HubError::NotFound)?;
-        Ok((record.status.subscribe(), record.result.clone()))
+        Ok((record.status.subscribe(), record.stored.result.clone()))
     }
 
     /// Wait up to `timeout` for the briefing to finish. Periodically re-reads the on-disk
@@ -468,30 +480,27 @@ impl Hub {
         }
     }
 
-    pub fn active_count(&self) -> usize {
-        self.records.lock().unwrap().values().filter(|r| *r.status.borrow() == BriefingStatus::Active).count()
+    fn sweep_if_due(&self) {
+        if now_secs().saturating_sub(self.last_sweep.load(Ordering::Relaxed)) >= SWEEP_EVERY.as_secs() {
+            self.sweep();
+        }
     }
 
-    /// Drop expired records (memory and disk). Called on every create; safe to call any time.
+    /// Drop expired records (memory and disk). Safe to call any time.
     pub fn sweep(&self) {
         let now = now_secs();
-        {
-            let mut records = self.records.lock().unwrap();
-            let mut tokens = self.tokens.lock().unwrap();
-            records.retain(|_, record| {
-                let keep = match record.finished_at {
-                    Some(finished) => now.saturating_sub(finished) < self.config.finished_ttl.as_secs(),
-                    None => now.saturating_sub(record.created_at) < self.config.active_ttl.as_secs(),
-                };
-                if !keep {
-                    if record.finished_at.is_none() {
-                        record.status.send_replace(BriefingStatus::Cancelled);
-                    }
-                    tokens.remove(&record.token);
-                }
-                keep
-            });
-        }
+        self.last_sweep.store(now, Ordering::Relaxed);
+        self.records.lock().unwrap().retain(|_, record| {
+            let stored = &record.stored;
+            let keep = match stored.finished_at {
+                Some(finished) => now.saturating_sub(finished) < self.config.finished_ttl.as_secs(),
+                None => now.saturating_sub(stored.created_at) < self.config.active_ttl.as_secs(),
+            };
+            if !keep && stored.finished_at.is_none() {
+                record.status.send_replace(BriefingStatus::Cancelled);
+            }
+            keep
+        });
         if let Some(store) = &self.config.store {
             store.sweep(self.config.finished_ttl, self.config.active_ttl);
         }
@@ -526,6 +535,7 @@ mod tests {
             hub.submit_by_token(&created.token, &json!({}), false),
             Err(HubError::AlreadyFinished(BriefingStatus::Completed))
         );
+        assert_eq!(HubError::AlreadyFinished(BriefingStatus::Completed).to_string(), "briefing already completed");
         assert!(!hub.cancel(&created.id));
         assert_eq!(hub.wait("missing", Duration::from_millis(1)).await, Err(HubError::NotFound));
         assert_eq!(hub.info(&created.id).unwrap().source.as_deref(), Some("test"));
@@ -589,16 +599,17 @@ mod tests {
         // Process A creates a briefing and the user saves a draft, then A dies.
         let a = Hub::new(config());
         let created = a.create(demo(), Some("a".into()));
-        a.set_url(&created.id, "http://a.example/briefing/x");
+        assert!(a.set_url(&created.id, "http://a.example/briefing/x"));
+        assert!(!a.set_url(&created.id, "http://a.example/briefing/x"));
         a.save_draft(&created.token, None, json!({"current": 1, "state": {}, "updatedAt": 1})).unwrap();
         drop(a);
 
         // Process B adopts it by id (agent side) and by token (browser side).
         let b = Hub::new(config());
         let info = b.info(&created.id).unwrap();
-        assert!(info.adopted);
         assert_eq!(info.url.as_deref(), Some("http://a.example/briefing/x"));
         assert_eq!(info.draft.unwrap().screen, 2);
+        assert!(b.has_token(&created.token));
         assert_eq!(b.page_payload(&created.token).unwrap()["draft"]["current"], 1);
 
         // A third process (the one the browser talks to) submits; B's waiter sees it via disk.

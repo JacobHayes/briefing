@@ -84,10 +84,6 @@ impl Store {
         Ok(Store { dir: dir.to_path_buf() })
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     fn path(&self, id: &str) -> Option<PathBuf> {
         // Ids are URL-safe base64; refuse anything else so a caller can't escape the dir.
         if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
@@ -96,11 +92,14 @@ impl Store {
         Some(self.dir.join(format!("{id}.json")))
     }
 
-    /// Atomic write (temp file + rename), owner-only permissions.
     pub fn save(&self, record: &StoredRecord) -> std::io::Result<()> {
-        let path = self.path(&record.id).ok_or_else(|| std::io::Error::other("invalid briefing id"))?;
-        let tmp = self.dir.join(format!(".{}.{}.tmp", record.id, std::process::id()));
-        let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+        self.write(&record.id, &serde_json::to_vec(record).map_err(std::io::Error::other)?)
+    }
+
+    /// Atomic write (temp file + rename), owner-only permissions.
+    pub fn write(&self, id: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let path = self.path(id).ok_or_else(|| std::io::Error::other("invalid briefing id"))?;
+        let tmp = self.dir.join(format!(".{id}.{}.tmp", std::process::id()));
         {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
@@ -111,7 +110,7 @@ impl Store {
             }
             let mut file = options.open(&tmp)?;
             use std::io::Write;
-            file.write_all(&bytes)?;
+            file.write_all(bytes)?;
             file.sync_all()?;
         }
         std::fs::rename(&tmp, &path)

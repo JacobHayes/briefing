@@ -102,7 +102,7 @@ impl Drop for McpClient {
 }
 
 fn demo_presentation() -> Value {
-    serde_json::from_str(include_str!("../assets/demo.json")).unwrap()
+    serde_json::to_value(briefing::content::demo()).unwrap()
 }
 
 fn submit(url: &str, body: Value) {

@@ -22,18 +22,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::assets;
 use crate::content::{self, Briefing};
-use crate::hub::{BriefingStatus, DraftSave, Hub, HubError, WaitOutcome, random_token};
+use crate::hub::{BriefingInfo, DraftSave, Hub, HubError, WaitOutcome, random_token};
 
 /// Browser submission cap: 500 annotations of 2 KB quote + 4 KB comment plus notes fits well inside.
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AGENT_REQUEST_BYTES: usize = content::MAX_PRESENTATION_BYTES + 64 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
-
-/// A shell command run when a briefing is created (hub mode); receives
-/// `BRIEFING_URL`, `BRIEFING_ID`, `BRIEFING_TITLE`.
-#[derive(Clone, Debug)]
-pub struct OnCreateHook(pub String);
 
 pub struct HttpConfig {
     /// Origin used to build briefing URLs, e.g. `http://127.0.0.1:41234` or `https://briefings.example`.
@@ -42,20 +37,30 @@ pub struct HttpConfig {
     pub allowed_hosts: Vec<String>,
     /// Serve the dashboard at `/` and the agent API under `/agent/*` (hub mode).
     pub agent_api: bool,
-    pub on_create: Option<OnCreateHook>,
+    /// Shell command run when a briefing is created; receives `BRIEFING_URL`, `BRIEFING_ID`,
+    /// `BRIEFING_TITLE`.
+    pub on_create: Option<String>,
+}
+
+/// `host` or `host:port` as it appears in a Host header, for a parsed URL.
+pub fn host_with_port(url: &url::Url) -> Option<String> {
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
 }
 
 impl HttpConfig {
     pub fn host_allowed(&self, host: &str) -> bool {
-        let host = host.trim().to_ascii_lowercase();
+        let host = host.trim();
         let bare = host
             .rsplit_once(':')
             .filter(|(h, p)| !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-            .map(|(h, _)| h.to_string());
-        self.allowed_hosts.iter().any(|allowed| {
-            let allowed = allowed.to_ascii_lowercase();
-            allowed == host || Some(&allowed) == bare.as_ref()
-        })
+            .map(|(h, _)| h);
+        self.allowed_hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(host) || bare.is_some_and(|b| allowed.eq_ignore_ascii_case(b)))
     }
 
     pub fn origin_allowed(&self, origin: &str) -> bool {
@@ -65,14 +70,7 @@ impl HttpConfig {
         if url.scheme() != "http" && url.scheme() != "https" {
             return false;
         }
-        let Some(host) = url.host_str() else {
-            return false;
-        };
-        let host = match url.port() {
-            Some(port) => format!("{host}:{port}"),
-            None => host.to_string(),
-        };
-        self.host_allowed(&host)
+        host_with_port(&url).is_some_and(|host| self.host_allowed(&host))
     }
 
     pub fn briefing_url(&self, token: &str) -> String {
@@ -95,20 +93,13 @@ fn json_response(status: StatusCode, value: Value) -> Response {
         .into_response()
 }
 
-fn hub_error(error: HubError) -> Response {
-    match error {
-        HubError::NotFound => json_response(StatusCode::NOT_FOUND, json!({"error": "Briefing not found"})),
-        HubError::AlreadyFinished(status) => {
-            json_response(StatusCode::CONFLICT, json!({"error": format!("Briefing already {}", status_word(status))}))
-        }
-    }
-}
-
-fn status_word(status: BriefingStatus) -> &'static str {
-    match status {
-        BriefingStatus::Active => "active",
-        BriefingStatus::Completed => "completed",
-        BriefingStatus::Cancelled => "cancelled",
+impl IntoResponse for HubError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            HubError::NotFound => StatusCode::NOT_FOUND,
+            HubError::AlreadyFinished(_) => StatusCode::CONFLICT,
+        };
+        json_response(status, json!({"error": self.to_string()}))
     }
 }
 
@@ -125,15 +116,15 @@ async fn healthz() -> Response {
 }
 
 async fn asset(Path(name): Path<String>) -> Response {
-    match assets::asset(&format!("/briefing-assets/{name}")) {
-        Some(asset) => (
+    match assets::asset(&name) {
+        Some(bytes) => (
             StatusCode::OK,
             [
                 (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
-                (header::CONTENT_TYPE, HeaderValue::from_static(asset.content_type)),
+                (header::CONTENT_TYPE, HeaderValue::from_static("application/javascript; charset=utf-8")),
                 (header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")),
             ],
-            asset.bytes,
+            bytes,
         )
             .into_response(),
         None => text(StatusCode::NOT_FOUND, "Asset not found"),
@@ -157,7 +148,7 @@ fn html(body: String, csp: String) -> Response {
 }
 
 async fn page(State(state): State<AppState>, Path(token): Path<String>) -> Response {
-    if state.hub.page_payload(&token).is_none() {
+    if !state.hub.has_token(&token) {
         return text(StatusCode::NOT_FOUND, "Briefing not found");
     }
     let nonce = random_token(18);
@@ -165,7 +156,7 @@ async fn page(State(state): State<AppState>, Path(token): Path<String>) -> Respo
         "default-src 'none'; script-src 'self' 'nonce-{nonce}' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          connect-src 'self' http: https:; img-src 'self' data: http: https:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     );
-    html(assets::render_page(&nonce), csp)
+    html(assets::render(assets::PAGE_HTML, &nonce), csp)
 }
 
 async fn dashboard() -> Response {
@@ -174,14 +165,12 @@ async fn dashboard() -> Response {
         "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; connect-src 'self'; \
          base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     );
-    html(assets::render_dashboard(&nonce), csp)
+    html(assets::render(assets::DASHBOARD_HTML, &nonce), csp)
 }
 
-async fn presentation(State(state): State<AppState>, Path(token): Path<String>) -> Response {
-    match state.hub.page_payload(&token) {
-        Some(payload) => json_response(StatusCode::OK, payload),
-        None => hub_error(HubError::NotFound),
-    }
+async fn presentation(State(state): State<AppState>, Path(token): Path<String>) -> Result<Response, HubError> {
+    let payload = state.hub.page_payload(&token).ok_or(HubError::NotFound)?;
+    Ok(json_response(StatusCode::OK, payload))
 }
 
 fn origin_ok(state: &AppState, headers: &HeaderMap) -> bool {
@@ -194,7 +183,7 @@ async fn submit(state: AppState, headers: HeaderMap, token: String, body: Value,
     }
     match state.hub.submit_by_token(&token, &body, cancelled) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
-        Err(error) => hub_error(error),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -232,20 +221,19 @@ async fn save_draft(
     Path(token): Path<String>,
     headers: HeaderMap,
     Json(body): Json<DraftRequest>,
-) -> Response {
+) -> Result<Response, HubError> {
     if !origin_ok(&state, &headers) {
-        return text(StatusCode::FORBIDDEN, "Forbidden");
+        return Ok(text(StatusCode::FORBIDDEN, "Forbidden"));
     }
     if !body.draft.is_object() {
-        return json_response(StatusCode::BAD_REQUEST, json!({"error": "draft must be an object"}));
+        return Ok(json_response(StatusCode::BAD_REQUEST, json!({"error": "draft must be an object"})));
     }
-    match state.hub.save_draft(&token, body.base_revision, body.draft) {
-        Ok(DraftSave::Saved { revision }) => json_response(StatusCode::OK, json!({"revision": revision})),
-        Ok(DraftSave::Stale { revision, draft }) => {
+    Ok(match state.hub.save_draft(&token, body.base_revision, body.draft)? {
+        DraftSave::Saved { revision } => json_response(StatusCode::OK, json!({"revision": revision})),
+        DraftSave::Stale { revision, draft } => {
             json_response(StatusCode::CONFLICT, json!({"error": "stale", "revision": revision, "draft": draft}))
         }
-        Err(error) => hub_error(error),
-    }
+    })
 }
 
 // ---- Agent API (hub mode) ----
@@ -259,8 +247,8 @@ pub struct CreateRequest {
     pub source: Option<String>,
 }
 
-pub fn run_on_create_hook(hook: &OnCreateHook, url: &str, id: &str, title: &str) {
-    let command = hook.0.clone();
+fn run_on_create_hook(command: &str, url: &str, id: &str, title: &str) {
+    let command = command.to_string();
     let (url, id, title) = (url.to_string(), id.to_string(), title.to_string());
     tokio::spawn(async move {
         let result = tokio::process::Command::new("sh")
@@ -300,11 +288,17 @@ pub fn create_briefing(
     Ok((created.id, url))
 }
 
-/// URL for a briefing this server can serve: its stored URL when it was created here,
-/// otherwise this server's origin plus the token (adopted records).
+/// URL at which this server serves briefing `id` (its origin plus the record's token).
 pub fn url_for(state: &AppState, id: &str) -> Option<String> {
     let token = state.hub.token_for(id)?;
     Some(state.config.briefing_url(&token))
+}
+
+/// Point every record this server holds at this server's link.
+pub fn with_live_urls(state: &AppState, infos: &mut [BriefingInfo]) {
+    for info in infos.iter_mut().filter(|info| !info.on_disk_only) {
+        info.url = url_for(state, &info.id);
+    }
 }
 
 async fn agent_create(State(state): State<AppState>, Json(body): Json<CreateRequest>) -> Response {
@@ -316,22 +310,14 @@ async fn agent_create(State(state): State<AppState>, Json(body): Json<CreateRequ
 
 async fn agent_list(State(state): State<AppState>) -> Response {
     let mut briefings = state.hub.list();
-    for info in &mut briefings {
-        if !info.on_disk_only {
-            info.url = url_for(&state, &info.id);
-        }
-    }
+    with_live_urls(&state, &mut briefings);
     json_response(StatusCode::OK, json!({"briefings": briefings}))
 }
 
-async fn agent_info(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    match state.hub.info(&id) {
-        Some(mut info) => {
-            info.url = url_for(&state, &id);
-            json_response(StatusCode::OK, serde_json::to_value(info).unwrap_or_default())
-        }
-        None => hub_error(HubError::NotFound),
-    }
+async fn agent_info(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response, HubError> {
+    let mut info = state.hub.info(&id).ok_or(HubError::NotFound)?;
+    info.url = url_for(&state, &id);
+    Ok(json_response(StatusCode::OK, serde_json::to_value(info).unwrap_or_default()))
 }
 
 #[derive(Deserialize)]
@@ -344,30 +330,30 @@ pub fn clamp_wait(requested: Option<u64>) -> Duration {
     requested.map(Duration::from_secs).unwrap_or(DEFAULT_WAIT).min(MAX_WAIT)
 }
 
-async fn agent_wait(State(state): State<AppState>, Path(id): Path<String>, Query(query): Query<WaitQuery>) -> Response {
-    match state.hub.wait(&id, clamp_wait(query.timeout_secs)).await {
-        Ok(WaitOutcome::Pending) => json_response(StatusCode::OK, json!({"status": "pending"})),
-        Ok(WaitOutcome::Done(result)) => json_response(
-            StatusCode::OK,
-            json!({"status": if result.cancelled { "cancelled" } else { "completed" }, "result": result}),
-        ),
-        Err(error) => hub_error(error),
-    }
+async fn agent_wait(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<WaitQuery>,
+) -> Result<Response, HubError> {
+    Ok(match state.hub.wait(&id, clamp_wait(query.timeout_secs)).await? {
+        WaitOutcome::Pending => json_response(StatusCode::OK, json!({"status": "pending"})),
+        WaitOutcome::Done(result) => {
+            json_response(StatusCode::OK, json!({"status": result.status(), "result": result}))
+        }
+    })
 }
 
-async fn agent_cancel(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    if state.hub.status(&id).is_none() {
-        return hub_error(HubError::NotFound);
-    }
-    json_response(StatusCode::OK, json!({"ok": true, "cancelled": state.hub.cancel(&id)}))
+async fn agent_cancel(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response, HubError> {
+    state.hub.status(&id).ok_or(HubError::NotFound)?;
+    Ok(json_response(StatusCode::OK, json!({"ok": true, "cancelled": state.hub.cancel(&id)})))
 }
 
 /// Build the router. `mcp` is an optional router (e.g. one that nests an MCP service at
 /// `/mcp`); it is only mounted when the agent API is enabled.
 pub fn router(state: AppState, mcp: Option<Router<AppState>>) -> Router {
-    let browser = Router::new()
+    let mut app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/briefing-assets/{name}", get(asset))
+        .route(&format!("{}{{name}}", assets::ASSET_PREFIX), get(asset))
         .route("/briefing/{token}", get(page))
         .route("/api/{token}/presentation", get(presentation))
         .route("/api/{token}/draft", axum::routing::put(save_draft))
@@ -375,7 +361,6 @@ pub fn router(state: AppState, mcp: Option<Router<AppState>>) -> Router {
         .route("/api/{token}/cancel", post(cancel_from_browser))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
 
-    let mut app = browser;
     if state.config.agent_api {
         let mut agent = Router::new()
             .route("/", get(dashboard))
@@ -422,11 +407,6 @@ pub fn serve_listener(router: Router, listener: tokio::net::TcpListener) -> std:
         }
     });
     Ok(RunningServer { local_addr, shutdown, task })
-}
-
-/// Bind and serve in one step.
-pub async fn serve(router: Router, host: &str, port: u16) -> std::io::Result<RunningServer> {
-    serve_listener(router, bind(host, port).await?)
 }
 
 pub fn origin_for(public_host: &str, port: u16) -> String {

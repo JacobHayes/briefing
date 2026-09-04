@@ -79,7 +79,6 @@ ask how they would like to proceed instead of re-opening the briefing.
 ```json
 {
   "title": "Choosing a queue backend",
-  "mode": "decision",
   "goal": "Pick a queue for the ingest pipeline",
   "chunks": [
     {

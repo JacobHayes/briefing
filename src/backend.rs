@@ -1,6 +1,6 @@
 //! Where presentations live: an embedded server in this process, or a remote hub.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -8,7 +8,7 @@ use tokio::sync::OnceCell;
 
 use crate::browser;
 use crate::content::Briefing;
-use crate::http::{self, AppState, HttpConfig, OnCreateHook};
+use crate::http::{self, AppState, HttpConfig};
 use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, WaitOutcome};
 use crate::response::BriefingResponse;
 use crate::tailscale::{self, BindScope, BindTarget};
@@ -22,6 +22,15 @@ pub enum BindMode {
     Local,
     /// Require the Tailscale address; fall back to loopback with a diagnostic if unavailable.
     Tailscale,
+}
+
+impl BindMode {
+    pub async fn target(self) -> BindTarget {
+        match self {
+            BindMode::Local => BindTarget::local(None),
+            BindMode::Auto | BindMode::Tailscale => tailscale::detect_bind_target().await,
+        }
+    }
 }
 
 /// What a caller learns after creating a briefing.
@@ -40,30 +49,25 @@ pub struct Created {
     pub opened_browser: bool,
 }
 
-/// Best-effort machine name for the `source` label on briefings.
-pub fn hostname() -> String {
-    if let Ok(name) = std::env::var("HOSTNAME")
-        && !name.trim().is_empty()
-    {
-        return name.trim().to_string();
-    }
-    if let Ok(name) = std::fs::read_to_string("/etc/hostname")
-        && !name.trim().is_empty()
-    {
-        return name.trim().to_string();
-    }
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "local".into())
+/// Best-effort machine name for the `source` label on briefings (computed once).
+pub fn hostname() -> &'static str {
+    static HOSTNAME: OnceLock<String> = OnceLock::new();
+    HOSTNAME.get_or_init(|| {
+        let from_env = std::env::var("HOSTNAME").ok();
+        let from_file = || std::fs::read_to_string("/etc/hostname").ok();
+        let from_command =
+            || std::process::Command::new("hostname").output().ok().and_then(|o| String::from_utf8(o.stdout).ok());
+        from_env
+            .or_else(from_file)
+            .or_else(from_command)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "local".into())
+    })
 }
 
 pub struct LocalServer {
     pub state: AppState,
-    pub origin: String,
     pub scope: BindScope,
     pub label: String,
     pub bind_host: String,
@@ -77,24 +81,23 @@ pub struct LocalBackend {
     hub: Arc<Hub>,
     bind: BindMode,
     open_browser: bool,
-    on_create: Option<OnCreateHook>,
+    on_create: Option<String>,
     server: OnceCell<LocalServer>,
 }
 
 impl LocalBackend {
-    pub fn new(bind: BindMode, open_browser: bool, on_create: Option<OnCreateHook>, config: HubConfig) -> Self {
+    pub fn new(bind: BindMode, open_browser: bool, on_create: Option<String>, config: HubConfig) -> Self {
         Self { hub: Arc::new(Hub::new(config)), bind, open_browser, on_create, server: OnceCell::new() }
     }
 
     /// Use an already-running server (hub mode) instead of starting one.
-    pub fn attached(state: AppState, scope: BindScope, label: String, bind_host: String, open_browser: bool) -> Self {
+    pub fn attached(state: AppState, target: &BindTarget, open_browser: bool) -> Self {
         let hub = state.hub.clone();
         let server = LocalServer {
-            origin: state.config.public_origin.clone(),
             state,
-            scope,
-            label,
-            bind_host,
+            scope: target.scope,
+            label: target.label.clone(),
+            bind_host: target.bind_host.clone(),
             diagnostics: None,
             running: None,
         };
@@ -107,23 +110,15 @@ impl LocalBackend {
         &self.hub
     }
 
-    async fn bind_target(&self) -> BindTarget {
-        match self.bind {
-            BindMode::Local => BindTarget::local(None),
-            BindMode::Auto | BindMode::Tailscale => tailscale::detect_bind_target().await,
-        }
-    }
-
     async fn start(&self, target: BindTarget) -> anyhow::Result<LocalServer> {
         let listener = http::bind(&target.bind_host, 0)
             .await
             .map_err(|error| anyhow::anyhow!("{} bind failed: {error}", target.label))?;
         let port = listener.local_addr()?.port();
-        let origin = http::origin_for(&target.public_host, port);
         let state = AppState {
             hub: self.hub.clone(),
             config: Arc::new(HttpConfig {
-                public_origin: origin.clone(),
+                public_origin: http::origin_for(&target.public_host, port),
                 allowed_hosts: vec![target.public_host.clone()],
                 agent_api: false,
                 on_create: self.on_create.clone(),
@@ -132,7 +127,6 @@ impl LocalBackend {
         let running = http::serve_listener(http::router(state.clone(), None), listener)?;
         Ok(LocalServer {
             state,
-            origin,
             scope: target.scope,
             label: target.label,
             bind_host: target.bind_host,
@@ -144,7 +138,7 @@ impl LocalBackend {
     async fn ensure_server(&self) -> anyhow::Result<&LocalServer> {
         self.server
             .get_or_try_init(|| async {
-                let preferred = self.bind_target().await;
+                let preferred = self.bind.target().await;
                 let fallback = (preferred.scope == BindScope::Tailnet).then(|| {
                     BindTarget::local(Some(format!(
                         "Fell back to local loopback after {} bind failed",
@@ -189,15 +183,27 @@ impl LocalBackend {
         })
     }
 
+    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<WaitOutcome> {
+        Ok(self.hub.wait(id, timeout).await?)
+    }
+
+    pub fn cancel(&self, id: &str) -> bool {
+        self.hub.cancel(id)
+    }
+
     /// Status of a briefing. An active briefing is served by this process (starting the
-    /// embedded server if needed) so the returned URL is live even for adopted records.
+    /// embedded server if needed), so the returned URL is live even for adopted records;
+    /// `reopened` is set the first time that link differs from the one on record.
     pub async fn info(&self, id: &str) -> anyhow::Result<Option<BriefingInfo>> {
         let Some(mut info) = self.hub.info(id) else {
             return Ok(None);
         };
         if info.status == BriefingStatus::Active {
             let server = self.ensure_server().await?;
-            info.url = http::url_for(&server.state, id);
+            if let Some(url) = http::url_for(&server.state, id) {
+                info.reopened = self.hub.set_url(id, &url);
+                info.url = Some(url);
+            }
         }
         Ok(Some(info))
     }
@@ -205,11 +211,7 @@ impl LocalBackend {
     pub fn list(&self) -> Vec<BriefingInfo> {
         let mut infos = self.hub.list();
         if let Some(server) = self.server.get() {
-            for info in &mut infos {
-                if !info.on_disk_only && info.status == BriefingStatus::Active {
-                    info.url = http::url_for(&server.state, &info.id);
-                }
-            }
+            http::with_live_urls(&server.state, &mut infos);
         }
         infos
     }
@@ -222,6 +224,8 @@ impl LocalBackend {
         }
     }
 }
+
+const HUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Minimal HTTP(S) client for the hub API: hyper + rustls with bundled webpki roots, so the
 /// binary cross-compiles without platform TLS frameworks.
@@ -265,17 +269,13 @@ impl RemoteBackend {
         Ok(Self { client, base: base.trim_end_matches('/').to_string() })
     }
 
-    pub fn base(&self) -> &str {
-        &self.base
-    }
-
     async fn request(
         &self,
         method: ::http::Method,
         path: &str,
         body: Option<serde_json::Value>,
         timeout: Duration,
-    ) -> anyhow::Result<(::http::StatusCode, serde_json::Value)> {
+    ) -> anyhow::Result<serde_json::Value> {
         use http_body_util::BodyExt;
         let uri: ::http::Uri = format!("{}{path}", self.base).parse()?;
         let mut request =
@@ -294,12 +294,11 @@ impl RemoteBackend {
         let status = response.status();
         let bytes = response.into_body().collect().await?.to_bytes();
         let value = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes)? };
-        Ok((status, value))
-    }
-
-    fn check(status: ::http::StatusCode, value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         if status.is_success() {
             return Ok(value);
+        }
+        if status == ::http::StatusCode::NOT_FOUND {
+            return Err(NotFound.into());
         }
         let detail =
             serde_json::from_value::<RemoteError>(value.clone()).map(|e| e.error).unwrap_or_else(|_| value.to_string());
@@ -307,15 +306,15 @@ impl RemoteBackend {
     }
 
     pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
-        let (status, value) = self
+        let value = self
             .request(
                 ::http::Method::POST,
                 "/agent/briefings",
                 Some(serde_json::json!({"presentation": presentation, "source": source})),
-                Duration::from_secs(30),
+                HUB_REQUEST_TIMEOUT,
             )
             .await?;
-        let created: RemoteCreated = serde_json::from_value(Self::check(status, value)?)?;
+        let created: RemoteCreated = serde_json::from_value(value)?;
         Ok(Created {
             id: created.id,
             url: created.url,
@@ -336,9 +335,8 @@ impl RemoteBackend {
             }
             let slice = remaining.min(http::MAX_WAIT);
             let path = format!("/agent/briefings/{id}/wait?timeout_secs={}", slice.as_secs().max(1));
-            let (status, value) =
-                self.request(::http::Method::GET, &path, None, slice + Duration::from_secs(30)).await?;
-            let wait: RemoteWait = serde_json::from_value(Self::check(status, value)?)?;
+            let value = self.request(::http::Method::GET, &path, None, slice + HUB_REQUEST_TIMEOUT).await?;
+            let wait: RemoteWait = serde_json::from_value(value)?;
             match (wait.status.as_str(), wait.result) {
                 ("pending", _) => continue,
                 (_, Some(result)) => return Ok(WaitOutcome::Done(result)),
@@ -348,28 +346,31 @@ impl RemoteBackend {
     }
 
     pub async fn cancel(&self, id: &str) -> anyhow::Result<bool> {
-        let (status, value) = self
-            .request(::http::Method::POST, &format!("/agent/briefings/{id}/cancel"), None, Duration::from_secs(30))
+        let value = self
+            .request(::http::Method::POST, &format!("/agent/briefings/{id}/cancel"), None, HUB_REQUEST_TIMEOUT)
             .await?;
-        Ok(Self::check(status, value)?["cancelled"].as_bool().unwrap_or(false))
+        Ok(value["cancelled"].as_bool().unwrap_or(false))
     }
 
     pub async fn info(&self, id: &str) -> anyhow::Result<Option<BriefingInfo>> {
-        let (status, value) =
-            self.request(::http::Method::GET, &format!("/agent/briefings/{id}"), None, Duration::from_secs(30)).await?;
-        if status == ::http::StatusCode::NOT_FOUND {
-            return Ok(None);
+        match self.request(::http::Method::GET, &format!("/agent/briefings/{id}"), None, HUB_REQUEST_TIMEOUT).await {
+            Ok(value) => Ok(Some(serde_json::from_value(value)?)),
+            Err(error) if error.is::<NotFound>() => Ok(None),
+            Err(error) => Err(error),
         }
-        Ok(Some(serde_json::from_value(Self::check(status, value)?)?))
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<BriefingInfo>> {
-        let (status, value) =
-            self.request(::http::Method::GET, "/agent/briefings", None, Duration::from_secs(30)).await?;
-        let list: RemoteList = serde_json::from_value(Self::check(status, value)?)?;
+        let value = self.request(::http::Method::GET, "/agent/briefings", None, HUB_REQUEST_TIMEOUT).await?;
+        let list: RemoteList = serde_json::from_value(value)?;
         Ok(list.briefings)
     }
 }
+
+/// The hub answered 404.
+#[derive(Debug, thiserror::Error)]
+#[error("briefing not found on the hub")]
+struct NotFound;
 
 pub enum Backend {
     Local(LocalBackend),
@@ -377,13 +378,6 @@ pub enum Backend {
 }
 
 impl Backend {
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Backend::Local(_) => "local",
-            Backend::Remote(_) => "hub",
-        }
-    }
-
     pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
         match self {
             Backend::Local(local) => local.create(presentation, source).await,
@@ -393,14 +387,14 @@ impl Backend {
 
     pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<WaitOutcome> {
         match self {
-            Backend::Local(local) => Ok(local.hub().wait(id, timeout).await?),
+            Backend::Local(local) => local.wait(id, timeout).await,
             Backend::Remote(remote) => remote.wait(id, timeout).await,
         }
     }
 
     pub async fn cancel(&self, id: &str) -> anyhow::Result<bool> {
         match self {
-            Backend::Local(local) => Ok(local.hub().cancel(id)),
+            Backend::Local(local) => Ok(local.cancel(id)),
             Backend::Remote(remote) => remote.cancel(id).await,
         }
     }

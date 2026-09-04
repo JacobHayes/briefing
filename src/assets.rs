@@ -1,28 +1,20 @@
-//! Static assets embedded into the binary: the briefing page and the renderer libraries
-//! (installed from npm by `build.rs`).
+//! Static assets embedded into the binary: the briefing page, the hub dashboard, and the
+//! renderer libraries (installed from npm by `build.rs`).
 
 pub const PAGE_HTML: &str = include_str!("../assets/page.html");
 pub const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
 
-const JS: &str = "application/javascript; charset=utf-8";
-
-pub struct Asset {
-    pub path: &'static str,
-    pub content_type: &'static str,
-    pub bytes: &'static [u8],
-}
+/// URL prefix the page loads the vendored libraries from.
+pub const ASSET_PREFIX: &str = "/briefing-assets/";
 
 macro_rules! vendored {
     ($name:literal) => {
-        Asset {
-            path: concat!("/briefing-assets/", $name),
-            content_type: JS,
-            bytes: include_bytes!(concat!(env!("OUT_DIR"), "/vendor/", $name)),
-        }
+        ($name, include_bytes!(concat!(env!("OUT_DIR"), "/vendor/", $name)) as &[u8])
     };
 }
 
-pub static ASSETS: &[Asset] = &[
+/// `(file name, bytes)`; every entry is JavaScript.
+pub static ASSETS: &[(&str, &[u8])] = &[
     vendored!("marked.umd.js"),
     vendored!("purify.min.js"),
     vendored!("highlight.min.js"),
@@ -32,18 +24,13 @@ pub static ASSETS: &[Asset] = &[
     vendored!("vega-embed.min.js"),
 ];
 
-pub fn asset(path: &str) -> Option<&'static Asset> {
-    ASSETS.iter().find(|asset| asset.path == path)
+pub fn asset(name: &str) -> Option<&'static [u8]> {
+    ASSETS.iter().find(|(n, _)| *n == name).map(|(_, bytes)| *bytes)
 }
 
-/// The briefing page with the CSP nonce substituted in.
-pub fn render_page(nonce: &str) -> String {
-    PAGE_HTML.replace("{{NONCE}}", nonce)
-}
-
-/// The hub dashboard with the CSP nonce substituted in.
-pub fn render_dashboard(nonce: &str) -> String {
-    DASHBOARD_HTML.replace("{{NONCE}}", nonce)
+/// An embedded page with the CSP nonce substituted in.
+pub fn render(html: &str, nonce: &str) -> String {
+    html.replace("{{NONCE}}", nonce)
 }
 
 #[cfg(test)]
@@ -52,13 +39,13 @@ mod tests {
 
     #[test]
     fn page_and_assets_are_embedded() {
-        assert!(!render_page("abc").contains("{{NONCE}}"));
-        assert!(render_page("abc").contains("nonce=\"abc\""));
-        for asset in ASSETS {
-            assert!(asset.bytes.len() > 10_000, "{} looks empty", asset.path);
-            assert!(PAGE_HTML.contains(asset.path), "page does not reference {}", asset.path);
+        assert!(!render(PAGE_HTML, "abc").contains("{{NONCE}}"));
+        assert!(render(PAGE_HTML, "abc").contains("nonce=\"abc\""));
+        for (name, bytes) in ASSETS {
+            assert!(bytes.len() > 10_000, "{name} looks empty");
+            assert!(PAGE_HTML.contains(&format!("{ASSET_PREFIX}{name}")), "page does not reference {name}");
         }
-        assert!(asset("/briefing-assets/nope.js").is_none());
+        assert!(asset("nope.js").is_none());
     }
 
     /// The page came from a JS template literal; make sure it was unescaped (a raw copy

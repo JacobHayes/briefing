@@ -1,12 +1,7 @@
-//! reqwest is built without a bundled TLS provider (no aws-lc / cmake); install ring once.
+//! hyper-rustls and reqwest are built without a bundled TLS provider (no aws-lc / cmake).
 
-use std::sync::Once;
-
-static INIT: Once = Once::new();
-
-/// Install ring as the process-wide rustls crypto provider. Safe to call repeatedly.
+/// Install ring as the process-wide rustls crypto provider. Safe to call repeatedly: a
+/// second install is refused and the error ignored.
 pub fn init() {
-    INIT.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }

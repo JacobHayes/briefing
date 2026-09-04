@@ -3,10 +3,10 @@
 //! The same handler serves stdio (`briefing mcp`) and streamable HTTP
 //! (`briefing serve --mcp`).
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     BooleanSchema, CallToolResult, ClientResult, ElicitRequest, ElicitRequestParams, ElicitationAction,
@@ -19,15 +19,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, Created};
-use crate::content::Briefing;
-use crate::hub::WaitOutcome;
+use crate::content::{Briefing, schema_value};
+use crate::hub::{BriefingStatus, WaitOutcome};
 use crate::response::BriefingResponse;
 
-/// How to keep a long `brief_user` call alive while the human reads.
+/// How to keep a long `await_briefing` call alive while the human reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum HoldMode {
     /// Pick from the MCP client's `initialize` handshake (name + capabilities); see
-    /// `ClientProfile`.
+    /// `ClientProfile`. Never the resolved mode of a call.
     #[default]
     Auto,
     /// Send `notifications/progress` heartbeats while waiting (Claude Code resets its
@@ -117,8 +117,7 @@ pub struct CancelOutput {
 const MIN_PROTOCOL: &str = "2025-06-18";
 
 fn output_schema<T: JsonSchema>() -> Arc<rmcp::model::JsonObject> {
-    let schema = serde_json::to_value(schemars::schema_for!(T)).expect("schema serializes");
-    Arc::new(schema.as_object().cloned().expect("schema is an object"))
+    Arc::new(schema_value::<T>().as_object().cloned().expect("schema is an object"))
 }
 
 fn structured<T: Serialize>(text: String, value: &T) -> CallToolResult {
@@ -127,14 +126,12 @@ fn structured<T: Serialize>(text: String, value: &T) -> CallToolResult {
     result
 }
 
-#[derive(Clone)]
 pub struct BriefingMcp {
     backend: Arc<Backend>,
     hold: HoldMode,
     /// Explicit budget; `None` means pick per client.
     max_wait: Option<Duration>,
-    /// Adopted briefings whose fresh link has already been handed to the model.
-    reopened: Arc<Mutex<HashSet<String>>>,
+    tool_router: ToolRouter<Self>,
 }
 
 /// What a known MCP client can tolerate, derived from `clientInfo.name` and the advertised
@@ -142,64 +139,75 @@ pub struct BriefingMcp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientProfile {
     pub name: &'static str,
+    /// Case-insensitive substrings of `clientInfo.name` that select this profile; a
+    /// leading `=` means the whole name must match.
+    needles: &'static [&'static str],
     /// Preferred hold when the client supports it.
     pub hold: HoldMode,
     /// Longest a single call may block before returning `pending`.
     pub budget: Duration,
 }
 
-fn resolve_hold(mode: HoldMode, supports_elicitation: bool) -> Hold {
-    match mode {
-        HoldMode::None => Hold::None,
-        HoldMode::Progress | HoldMode::Auto => Hold::Progress,
-        HoldMode::Elicitation if supports_elicitation => Hold::Elicitation,
-        HoldMode::Elicitation => {
-            tracing::warn!("client does not support elicitation; using progress heartbeats");
-            Hold::Progress
-        }
-    }
-}
-
 const HOURS_4: Duration = Duration::from_secs(4 * 60 * 60);
 /// Just under Claude Code's ~28 h wall-clock cap; its idle timer is reset by heartbeats.
 const HOURS_24: Duration = Duration::from_secs(24 * 60 * 60);
 
+const fn profile(
+    name: &'static str,
+    needles: &'static [&'static str],
+    hold: HoldMode,
+    budget: Duration,
+) -> ClientProfile {
+    ClientProfile { name, needles, hold, budget }
+}
+
+/// First match wins; the last entry is the fallback.
+static PROFILES: &[ClientProfile] = &[
+    // Wall-clock 300 s default that ignores progress but pauses during an elicitation.
+    profile("codex", &["codex"], HoldMode::Elicitation, Duration::from_secs(280)),
+    // Idle timer resets on progress; wall-clock cap is ~28 h.
+    profile("claude-code", &["claude"], HoldMode::Progress, HOURS_24),
+    profile("gemini-cli", &["gemini"], HoldMode::Progress, Duration::from_secs(570)),
+    profile("goose", &["goose"], HoldMode::Progress, Duration::from_secs(280)),
+    // No client-side timeout.
+    profile("vscode", &["vscode", "visual studio", "copilot"], HoldMode::Progress, HOURS_24),
+    // 60 s, no progress reset, often not configurable.
+    profile(
+        "sixty-second-client",
+        &["cursor", "cline", "zed", "continue", "opencode", "windsurf"],
+        HoldMode::Progress,
+        Duration::from_secs(50),
+    ),
+    profile("pi", &["=pi", "pi-mcp", "pi-coding-agent"], HoldMode::Progress, Duration::from_secs(50)),
+    profile("unknown", &[], HoldMode::Progress, Duration::from_secs(50)),
+];
+
 impl ClientProfile {
-    /// Match a client name (case-insensitive substring) to a profile.
     pub fn for_client(client_name: &str) -> ClientProfile {
         let name = client_name.to_ascii_lowercase();
-        let has = |needle: &str| name.contains(needle);
-        let profile = |name, hold, secs| ClientProfile { name, hold, budget: Duration::from_secs(secs) };
-        if has("codex") {
-            // Wall-clock 300 s default that ignores progress but pauses during an elicitation.
-            profile("codex", HoldMode::Elicitation, 280)
-        } else if has("claude") {
-            // Idle timer resets on progress; wall-clock cap is ~28 h.
-            ClientProfile { name: "claude-code", hold: HoldMode::Progress, budget: HOURS_24 }
-        } else if has("gemini") {
-            profile("gemini-cli", HoldMode::Progress, 570)
-        } else if has("goose") {
-            profile("goose", HoldMode::Progress, 280)
-        } else if has("vscode") || has("visual studio") || has("copilot") {
-            // No client-side timeout.
-            ClientProfile { name: "vscode", hold: HoldMode::Progress, budget: HOURS_24 }
-        } else if has("cursor") || has("cline") || has("zed") || has("continue") || has("opencode") || has("windsurf") {
-            // 60 s, no progress reset, often not configurable.
-            profile("sixty-second-client", HoldMode::Progress, 50)
-        } else if name == "pi" || has("pi-mcp") || has("pi-coding-agent") {
-            profile("pi", HoldMode::Progress, 50)
-        } else {
-            profile("unknown", HoldMode::Progress, 50)
-        }
+        let matches = |needle: &str| match needle.strip_prefix('=') {
+            Some(exact) => name == exact,
+            None => name.contains(needle),
+        };
+        *PROFILES.iter().find(|p| p.needles.iter().any(|n| matches(n))).unwrap_or(&PROFILES[PROFILES.len() - 1])
     }
 
-    /// Budget to use when the chosen hold is an elicitation: the client's timer is paused,
-    /// so the wall-clock budget can be long.
-    pub fn budget_for(&self, hold: Hold) -> Duration {
-        match hold {
-            Hold::Elicitation => HOURS_4,
-            _ => self.budget,
+    /// Budget for the resolved hold: an elicitation pauses the client's timer, so the
+    /// wall-clock budget can be long.
+    pub fn budget_for(&self, hold: HoldMode) -> Duration {
+        if hold == HoldMode::Elicitation { HOURS_4 } else { self.budget }
+    }
+}
+
+/// Turn a requested mode into one this client can take (never `Auto`).
+fn resolve_hold(mode: HoldMode, supports_elicitation: bool) -> HoldMode {
+    match mode {
+        HoldMode::Elicitation if !supports_elicitation => {
+            tracing::warn!("client does not support elicitation; using progress heartbeats");
+            HoldMode::Progress
         }
+        HoldMode::Auto => HoldMode::Progress,
+        mode => mode,
     }
 }
 
@@ -207,16 +215,18 @@ fn internal(error: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(error.to_string(), None)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hold {
-    Elicitation,
-    Progress,
-    None,
+fn cancelled_by_client(id: &str) -> ErrorData {
+    ErrorData::internal_error(
+        format!(
+            "await cancelled by the client; briefing {id} stays open, call await_briefing again or cancel_briefing"
+        ),
+        None,
+    )
 }
 
 impl BriefingMcp {
     pub fn new(backend: Arc<Backend>, hold: HoldMode, max_wait: Option<Duration>) -> Self {
-        Self { backend, hold, max_wait, reopened: Arc::new(Mutex::new(HashSet::new())) }
+        Self { backend, hold, max_wait, tool_router: Self::tool_router() }
     }
 
     /// `<client>@<host>`, shown on the dashboard and in `briefing status`.
@@ -231,7 +241,7 @@ impl BriefingMcp {
     }
 
     /// Hold + budget for this call: explicit flags win, otherwise the client profile.
-    fn plan(&self, ctx: &RequestContext<RoleServer>) -> (Hold, Duration) {
+    fn plan(&self, ctx: &RequestContext<RoleServer>) -> (HoldMode, Duration) {
         let supports_elicitation = ctx.peer.peer_info().is_some_and(|info| info.capabilities.elicitation.is_some());
         let profile = ClientProfile::for_client(&Self::client_name(ctx));
         let hold =
@@ -283,12 +293,7 @@ impl BriefingMcp {
                         done => return Ok(done),
                     }
                 }
-                _ = ctx.ct.cancelled() => {
-                    return Err(ErrorData::internal_error(
-                        format!("await cancelled by the client; briefing {id} stays open, call await_briefing again or cancel_briefing"),
-                        None,
-                    ));
-                }
+                _ = ctx.ct.cancelled() => return Err(cancelled_by_client(id)),
             }
         }
     }
@@ -337,7 +342,7 @@ impl BriefingMcp {
                         }
                         _ => {
                             let _ = self.backend.cancel(id).await;
-                            Ok(WaitOutcome::Done(BriefingResponse { cancelled: true, ..BriefingResponse::default() }))
+                            Ok(WaitOutcome::Done(BriefingResponse::cancelled()))
                         }
                     },
                     other => {
@@ -354,10 +359,7 @@ impl BriefingMcp {
             }
             _ = ctx.ct.cancelled() => {
                 let _ = handle.cancel(Some("await cancelled".into())).await;
-                Err(ErrorData::internal_error(
-                    format!("await cancelled by the client; briefing {id} stays open, call await_briefing again or cancel_briefing"),
-                    None,
-                ))
+                Err(cancelled_by_client(id))
             }
         }
     }
@@ -367,13 +369,13 @@ impl BriefingMcp {
         id: &str,
         url: &str,
         ctx: &RequestContext<RoleServer>,
-        hold: Hold,
+        hold: HoldMode,
         max_wait: Duration,
     ) -> Result<WaitOutcome, ErrorData> {
         match hold {
-            Hold::Elicitation => self.wait_with_elicitation(id, url, ctx, max_wait).await,
-            Hold::Progress => self.wait_with_progress(id, url, ctx, max_wait, true).await,
-            Hold::None => self.wait_with_progress(id, url, ctx, max_wait, false).await,
+            HoldMode::Elicitation => self.wait_with_elicitation(id, url, ctx, max_wait).await,
+            HoldMode::Progress | HoldMode::Auto => self.wait_with_progress(id, url, ctx, max_wait, true).await,
+            HoldMode::None => self.wait_with_progress(id, url, ctx, max_wait, false).await,
         }
     }
 
@@ -392,36 +394,23 @@ impl BriefingMcp {
                 },
             ),
             WaitOutcome::Done(response) => {
-                let cancelled = response.cancelled;
-                let instructions = if cancelled {
-                    "The user cancelled the briefing without submitting. Ask how they would like to proceed; do not reopen it unasked.".to_string()
+                let status = response.status();
+                let instructions = if response.cancelled {
+                    "The user cancelled the briefing without submitting. Ask how they would like to proceed; do not reopen it unasked."
                 } else {
-                    "Respond only to this feedback: answer checkpoint answers, act on decisions, address each comment (location + quoted passage + comment), follow up on sections flagged revisit. Do not repeat the presentation.".to_string()
+                    "Respond only to this feedback: answer checkpoint answers, act on decisions, address each comment (location + quoted passage + comment), follow up on sections flagged revisit. Do not repeat the presentation."
                 };
-                let summary = format!(
-                    "Briefing {id} {}: {} decisions, {} section responses, {} comments",
-                    if cancelled { "cancelled" } else { "completed" },
-                    response.decisions.iter().filter(|d| !d.selected.is_empty() || !d.note.is_empty()).count(),
-                    response
-                        .chunks
-                        .iter()
-                        .filter(|c| !c.note.is_empty()
-                            || !c.checkpoint.is_empty()
-                            || c.status == crate::response::ChunkStatus::Revisit)
-                        .count(),
-                    response.annotations.len()
-                );
                 let mut result = structured(
-                    summary,
+                    format!("Briefing {id} {status}: {}", response.counts()),
                     &AwaitOutput {
-                        status: if cancelled { "cancelled" } else { "completed" }.into(),
+                        status: status.to_string(),
                         briefing_id: id.into(),
                         url: None,
                         feedback: Some(response),
-                        instructions,
+                        instructions: instructions.into(),
                     },
                 );
-                result.is_error = Some(cancelled);
+                result.is_error = Some(status == BriefingStatus::Cancelled);
                 result
             }
         }
@@ -485,35 +474,32 @@ impl BriefingMcp {
         Parameters(input): Parameters<AwaitParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let id = input.briefing_id;
         let info = self
             .backend
-            .info(&input.briefing_id)
+            .info(&id)
             .await
             .map_err(internal)?
-            .ok_or_else(|| ErrorData::invalid_params(format!("unknown briefingId {}", input.briefing_id), None))?;
+            .ok_or_else(|| ErrorData::invalid_params(format!("unknown briefingId {id}"), None))?;
         let url = info.url.clone().unwrap_or_else(|| format!("(briefing {})", info.title));
-        if info.adopted
-            && info.status == crate::hub::BriefingStatus::Active
-            && self.reopened.lock().unwrap().insert(input.briefing_id.clone())
-        {
+        if info.reopened {
             return Ok(structured(
-                format!("Briefing {} reopened at {url}", input.briefing_id),
+                format!("Briefing {id} reopened at {url}"),
                 &AwaitOutput {
                     status: "reopened".into(),
-                    briefing_id: input.briefing_id.clone(),
+                    briefing_id: id.clone(),
                     url: Some(url.clone()),
                     feedback: None,
                     instructions: format!(
-                        "This briefing was created by an earlier process and is now served again at {url}; earlier links are dead. Put this exact link in your reply (the user's draft is preserved), then call await_briefing with briefingId \"{}\" to wait for their feedback.",
-                        input.briefing_id
+                        "This briefing was created by an earlier process and is now served again at {url}; earlier links are dead. Put this exact link in your reply (the user's draft is preserved), then call await_briefing with briefingId \"{id}\" to wait for their feedback."
                     ),
                 },
             ));
         }
         let (hold, budget) = self.plan(&ctx);
         let max_wait = input.wait_seconds.map(Duration::from_secs).unwrap_or(budget).min(budget);
-        let outcome = self.wait_for(&input.briefing_id, &url, &ctx, hold, max_wait).await?;
-        Ok(Self::outcome_result(&input.briefing_id, &url, outcome))
+        let outcome = self.wait_for(&id, &url, &ctx, hold, max_wait).await?;
+        Ok(Self::outcome_result(&id, &url, outcome))
     }
 
     /// Cancel an open briefing.
@@ -527,7 +513,7 @@ impl BriefingMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for BriefingMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -543,13 +529,15 @@ mod tests {
     #[test]
     fn client_profiles() {
         assert_eq!(ClientProfile::for_client("codex-mcp-client").hold, HoldMode::Elicitation);
-        assert_eq!(ClientProfile::for_client("codex").budget_for(Hold::Elicitation), HOURS_4);
-        assert_eq!(ClientProfile::for_client("codex").budget_for(Hold::Progress), Duration::from_secs(280));
+        assert_eq!(ClientProfile::for_client("codex").budget_for(HoldMode::Elicitation), HOURS_4);
+        assert_eq!(ClientProfile::for_client("codex").budget_for(HoldMode::Progress), Duration::from_secs(280));
         assert_eq!(ClientProfile::for_client("claude-code").budget, HOURS_24);
         assert_eq!(ClientProfile::for_client("Cursor").budget, Duration::from_secs(50));
+        assert_eq!(ClientProfile::for_client("pi").name, "pi");
+        assert_eq!(ClientProfile::for_client("copilot").name, "vscode");
         assert_eq!(ClientProfile::for_client("mcp-inspector").name, "unknown");
-        assert_eq!(resolve_hold(HoldMode::Elicitation, false), Hold::Progress);
-        assert_eq!(resolve_hold(HoldMode::Auto, true), Hold::Progress);
+        assert_eq!(resolve_hold(HoldMode::Elicitation, false), HoldMode::Progress);
+        assert_eq!(resolve_hold(HoldMode::Auto, true), HoldMode::Progress);
     }
 
     #[test]
@@ -560,11 +548,7 @@ mod tests {
         let done = BriefingMcp::outcome_result("r1", "http://x", WaitOutcome::Done(BriefingResponse::default()));
         assert_eq!(done.structured_content.as_ref().unwrap()["status"], "completed");
         assert_eq!(done.is_error, Some(false));
-        let cancelled = BriefingMcp::outcome_result(
-            "r1",
-            "http://x",
-            WaitOutcome::Done(BriefingResponse { cancelled: true, ..Default::default() }),
-        );
+        let cancelled = BriefingMcp::outcome_result("r1", "http://x", WaitOutcome::Done(BriefingResponse::cancelled()));
         assert_eq!(cancelled.is_error, Some(true));
     }
 }

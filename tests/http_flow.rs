@@ -16,6 +16,7 @@ async fn embedded_server_roundtrip() {
     briefing::tls::init();
     let backend = LocalBackend::new(BindMode::Local, false, None, HubConfig::default());
     let created = backend.create(demo(), Some("test".into())).await.unwrap();
+    assert!(!backend.info(&created.id).await.unwrap().unwrap().reopened, "created here: link unchanged");
     assert!(created.url.starts_with("http://127.0.0.1:"));
     assert_eq!(created.scope, "local");
     assert!(!created.opened_browser);
@@ -166,8 +167,9 @@ async fn briefing_recovered_by_another_process() {
     // Second process adopts it on `info`, starts serving it, and the page carries the draft.
     let second = LocalBackend::new(BindMode::Local, false, None, config());
     let info = second.info(&created.id).await.unwrap().unwrap();
-    assert!(info.adopted);
+    assert!(info.reopened, "first serve at a new link");
     let url2 = info.url.clone().unwrap();
+    assert!(!second.info(&created.id).await.unwrap().unwrap().reopened, "same link the second time");
     assert_ne!(url2, created.url);
     assert!(url2.ends_with(&format!("/briefing/{token}")));
     let origin2 = url2.rsplit_once("/briefing/").unwrap().0.to_string();

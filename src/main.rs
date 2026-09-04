@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use briefing::backend::{Backend, BindMode, Created, LocalBackend, RemoteBackend};
 use briefing::content::{self, Briefing};
-use briefing::http::{self, AppState, HttpConfig, OnCreateHook};
+use briefing::http::{self, AppState, HttpConfig};
 use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, WaitOutcome};
 use briefing::mcp::{BriefingMcp, HoldMode};
-use briefing::tailscale::{self, BindTarget};
+use briefing::store::Store;
 use clap::{Args, Parser, Subcommand};
 use rmcp::ServiceExt;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -64,26 +64,54 @@ struct HoldArgs {
     max_wait_secs: Option<u64>,
 }
 
+/// How to wait for and report a briefing's result.
+#[derive(Args, Clone)]
+struct WaitArgs {
+    /// Emit JSON events on stderr and the JSON result on stdout.
+    #[arg(long)]
+    json: bool,
+    /// Return after this many seconds even if the briefing is still open.
+    #[arg(long)]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    /// Port to listen on.
+    #[arg(long, env = "BRIEFING_PORT", default_value_t = 7789)]
+    port: u16,
+    /// Origin to put in briefing URLs when behind a reverse proxy (e.g. https://briefings.example).
+    #[arg(long, env = "BRIEFING_PUBLIC_ORIGIN")]
+    public_origin: Option<String>,
+    /// How long finished briefings stay fetchable (e.g. 6h, 90m, 2d).
+    #[arg(long, env = "BRIEFING_FINISHED_TTL", default_value = HubConfig::FINISHED_TTL_TEXT, value_parser = parse_duration)]
+    finished_ttl: Duration,
+    /// How long unanswered briefings stay open.
+    #[arg(long, env = "BRIEFING_ACTIVE_TTL", default_value = HubConfig::ACTIVE_TTL_TEXT, value_parser = parse_duration)]
+    active_ttl: Duration,
+    /// Also serve MCP (streamable HTTP) at /mcp.
+    #[arg(long)]
+    mcp: bool,
+    /// Try to open new briefings in this machine's browser.
+    #[arg(long)]
+    open: bool,
+    #[command(flatten)]
+    hold: HoldArgs,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Present a JSON presentation (file or stdin), wait, and print the result.
     Present {
         /// Path to the presentation JSON ("-" or omitted = stdin).
         file: Option<String>,
-        /// Emit JSON events on stderr and the JSON result on stdout.
-        #[arg(long)]
-        json: bool,
-        /// Return after this many seconds even if the briefing is still open.
-        #[arg(long)]
-        wait_seconds: Option<u64>,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
     /// Open the bundled demo presentation.
     Demo {
-        #[arg(long)]
-        json: bool,
-        /// Return after this many seconds even if the briefing is still open.
-        #[arg(long)]
-        wait_seconds: Option<u64>,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
     /// Run the MCP server over stdio.
     Mcp {
@@ -91,36 +119,13 @@ enum Command {
         hold: HoldArgs,
     },
     /// Run a long-lived hub: browser pages, an agent API, and optionally MCP over HTTP.
-    Serve {
-        /// Port to listen on.
-        #[arg(long, env = "BRIEFING_PORT", default_value_t = 7789)]
-        port: u16,
-        /// Origin to put in briefing URLs when behind a reverse proxy (e.g. https://briefings.example).
-        #[arg(long, env = "BRIEFING_PUBLIC_ORIGIN")]
-        public_origin: Option<String>,
-        /// How long finished briefings stay fetchable (e.g. 6h, 90m, 2d).
-        #[arg(long, env = "BRIEFING_FINISHED_TTL", default_value = "6h", value_parser = parse_duration)]
-        finished_ttl: Duration,
-        /// How long unanswered briefings stay open.
-        #[arg(long, env = "BRIEFING_ACTIVE_TTL", default_value = "14d", value_parser = parse_duration)]
-        active_ttl: Duration,
-        /// Also serve MCP (streamable HTTP) at /mcp.
-        #[arg(long)]
-        mcp: bool,
-        /// Try to open new briefings in this machine's browser.
-        #[arg(long)]
-        open: bool,
-        #[command(flatten)]
-        hold: HoldArgs,
-    },
+    Serve(ServeArgs),
     /// Wait for a briefing created earlier, in this or another process, and print its result.
     /// Prints a fresh link first when the briefing is still open.
     Await {
         briefing_id: String,
-        #[arg(long)]
-        json: bool,
-        #[arg(long)]
-        wait_seconds: Option<u64>,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
     /// Cancel an open briefing.
     Cancel { briefing_id: String },
@@ -160,7 +165,7 @@ fn backend(common: &Common) -> anyhow::Result<Backend> {
         None => Ok(Backend::Local(LocalBackend::new(
             common.bind,
             !common.no_open,
-            common.on_create.clone().map(OnCreateHook),
+            common.on_create.clone(),
             HubConfig::with_default_store(),
         ))),
     }
@@ -218,13 +223,9 @@ impl Reporter {
     }
 }
 
-async fn wait_and_print(
-    backend: &Backend,
-    id: &str,
-    wait_seconds: Option<u64>,
-    reporter: &Reporter,
-) -> anyhow::Result<i32> {
-    let timeout = wait_seconds.map(Duration::from_secs).unwrap_or(Duration::from_secs(365 * 24 * 60 * 60));
+async fn wait_and_print(backend: &Backend, id: &str, args: &WaitArgs) -> anyhow::Result<i32> {
+    let reporter = Reporter { json: args.json };
+    let timeout = args.wait_seconds.map(Duration::from_secs).unwrap_or(Duration::from_secs(365 * 24 * 60 * 60));
     let outcome = tokio::select! {
         outcome = backend.wait(id, timeout) => outcome?,
         _ = shutdown_signal() => {
@@ -243,7 +244,7 @@ async fn wait_and_print(
             Ok(EXIT_PENDING)
         }
         WaitOutcome::Done(result) => {
-            let status = if result.cancelled { "cancelled" } else { "completed" };
+            let status = result.status();
             reporter.event(json!({"event": status, "id": id}), format!("Briefing {status}"));
             if reporter.json {
                 writeln!(out, "{}", json!({"status": status, "briefingId": id, "result": result}))?;
@@ -271,18 +272,11 @@ async fn shutdown_signal() {
     }
 }
 
-async fn present(
-    common: &Common,
-    presentation: Briefing,
-    json: bool,
-    wait_seconds: Option<u64>,
-) -> anyhow::Result<i32> {
-    content::validate(&presentation)?;
-    let reporter = Reporter { json };
+async fn present(common: &Common, presentation: Briefing, args: &WaitArgs) -> anyhow::Result<i32> {
     let backend = backend(common)?;
     let created = backend.create(presentation, Some(cli_source())).await?;
-    reporter.ready(&created);
-    let code = wait_and_print(&backend, &created.id, wait_seconds, &reporter).await?;
+    Reporter { json: args.json }.ready(&created);
+    let code = wait_and_print(&backend, &created.id, args).await?;
     backend.shutdown().await;
     Ok(code)
 }
@@ -295,21 +289,8 @@ async fn run_mcp_stdio(common: &Common, hold: HoldArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct ServeArgs {
-    port: u16,
-    public_origin: Option<String>,
-    finished_ttl: Duration,
-    active_ttl: Duration,
-    mcp: bool,
-    open: bool,
-    hold: HoldArgs,
-}
-
 async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
-    let target: BindTarget = match common.bind {
-        BindMode::Local => BindTarget::local(None),
-        BindMode::Auto | BindMode::Tailscale => tailscale::detect_bind_target().await,
-    };
+    let target = common.bind.target().await;
     let listener = http::bind(&target.bind_host, args.port).await?;
     let bound_port = listener.local_addr()?.port();
     let origin = args
@@ -317,13 +298,8 @@ async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
         .map(|o| o.trim_end_matches('/').to_string())
         .unwrap_or_else(|| http::origin_for(&target.public_host, bound_port));
     let mut allowed_hosts = vec![target.public_host.clone()];
-    if let Ok(url) = url::Url::parse(&origin)
-        && let Some(host) = url.host_str()
-    {
-        allowed_hosts.push(match url.port() {
-            Some(p) => format!("{host}:{p}"),
-            None => host.to_string(),
-        });
+    if let Some(host) = url::Url::parse(&origin).ok().as_ref().and_then(http::host_with_port) {
+        allowed_hosts.push(host);
     }
     let hub = Arc::new(Hub::new(HubConfig {
         finished_ttl: args.finished_ttl,
@@ -336,21 +312,15 @@ async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
             public_origin: origin.clone(),
             allowed_hosts: allowed_hosts.clone(),
             agent_api: true,
-            on_create: common.on_create.clone().map(OnCreateHook),
+            on_create: common.on_create.clone(),
         }),
     };
 
     let mcp_router = if args.mcp {
-        let backend = Arc::new(Backend::Local(LocalBackend::attached(
-            state.clone(),
-            target.scope,
-            target.label.clone(),
-            target.bind_host.clone(),
-            args.open,
-        )));
+        let backend = Arc::new(Backend::Local(LocalBackend::attached(state.clone(), &target, args.open)));
         let hold = args.hold.hold;
         let max_wait = args.hold.max_wait_secs.map(Duration::from_secs);
-        let config = StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts.clone());
+        let config = StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts);
         let service = StreamableHttpService::new(
             move || Ok(BriefingMcp::new(backend.clone(), hold, max_wait)),
             Arc::new(LocalSessionManager::default()),
@@ -368,8 +338,8 @@ async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
         "dashboard: {origin}/  agent API: {origin}/agent/briefings{}",
         if args.mcp { format!("  MCP: {origin}/mcp") } else { String::new() }
     );
-    if let Some(store) = state_store_dir() {
-        eprintln!("records: {store}");
+    if let Some(dir) = Store::default_dir() {
+        eprintln!("records: {}", dir.display());
     }
     if let Some(diag) = &target.diagnostics {
         eprintln!("{diag}");
@@ -380,22 +350,15 @@ async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn state_store_dir() -> Option<String> {
-    briefing::store::Store::default_dir().map(|p| p.display().to_string())
-}
-
 fn print_status_table(infos: &[BriefingInfo]) {
     if infos.is_empty() {
         println!("no briefings");
         return;
     }
+    let now = briefing::store::now_secs();
     for info in infos {
-        let status = match info.status {
-            BriefingStatus::Active => "waiting",
-            BriefingStatus::Completed => "completed",
-            BriefingStatus::Cancelled => "cancelled",
-        };
-        let age = info.age_secs;
+        let status = if info.status == BriefingStatus::Active { "waiting" } else { info.status.as_str() };
+        let age = now.saturating_sub(info.created_at);
         let age =
             if age < 3600 { format!("{}m", age / 60) } else { format!("{}h{:02}m", age / 3600, (age % 3600) / 60) };
         let mut extras = Vec::new();
@@ -438,22 +401,21 @@ async fn main() {
 
 async fn run(cli: Cli) -> anyhow::Result<i32> {
     match cli.command {
-        Command::Present { file, json, wait_seconds } => {
+        Command::Present { file, wait } => {
             let presentation = read_presentation(file.as_deref())?;
-            present(&cli.common, presentation, json, wait_seconds).await
+            present(&cli.common, presentation, &wait).await
         }
-        Command::Demo { json, wait_seconds } => present(&cli.common, content::demo(), json, wait_seconds).await,
+        Command::Demo { wait } => present(&cli.common, content::demo(), &wait).await,
         Command::Mcp { hold } => {
             run_mcp_stdio(&cli.common, hold).await?;
             Ok(0)
         }
-        Command::Serve { port, public_origin, finished_ttl, active_ttl, mcp, open, hold } => {
-            serve(&cli.common, ServeArgs { port, public_origin, finished_ttl, active_ttl, mcp, open, hold }).await?;
+        Command::Serve(args) => {
+            serve(&cli.common, args).await?;
             Ok(0)
         }
-        Command::Await { briefing_id, json, wait_seconds } => {
+        Command::Await { briefing_id, wait } => {
             let backend = backend(&cli.common)?;
-            let reporter = Reporter { json };
             let Some(info) = backend.info(&briefing_id).await? else {
                 anyhow::bail!("briefing {briefing_id} not found (records expire a few hours after they finish)");
             };
@@ -461,9 +423,9 @@ async fn run(cli: Cli) -> anyhow::Result<i32> {
                 let url = info.url.clone().unwrap_or_default();
                 let mut value = serde_json::to_value(&info)?;
                 value["event"] = json!("ready");
-                reporter.event(value, format!("Open briefing: {url}"));
+                Reporter { json: wait.json }.event(value, format!("Open briefing: {url}"));
             }
-            let code = wait_and_print(&backend, &briefing_id, wait_seconds, &reporter).await?;
+            let code = wait_and_print(&backend, &briefing_id, &wait).await?;
             backend.shutdown().await;
             Ok(code)
         }
@@ -496,5 +458,18 @@ async fn run(cli: Cli) -> anyhow::Result<i32> {
             println!("{}", serde_json::to_string_pretty(&content::json_schema())?);
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ttl_flag_defaults_match_hub_defaults() {
+        assert_eq!(parse_duration(HubConfig::FINISHED_TTL_TEXT).unwrap(), HubConfig::FINISHED_TTL);
+        assert_eq!(parse_duration(HubConfig::ACTIVE_TTL_TEXT).unwrap(), HubConfig::ACTIVE_TTL);
+        assert_eq!(parse_duration("90").unwrap(), Duration::from_secs(90));
+        assert!(parse_duration("5w").is_err());
     }
 }

@@ -15,13 +15,13 @@ pub const MAX_ANNOTATION_TARGET_FIELD: usize = 500;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ChunkStatus {
-    Understood,
+    /// Flagged for follow-up.
     Revisit,
     Unmarked,
 }
 
 /// One section: the user's checkpoint answer, free note, and whether they flagged it for follow-up.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChunkResponse {
     pub title: String,
@@ -30,8 +30,15 @@ pub struct ChunkResponse {
     pub note: String,
 }
 
+impl ChunkResponse {
+    /// The user wrote something or flagged the section.
+    pub fn is_substantive(&self) -> bool {
+        self.status == ChunkStatus::Revisit || !self.note.is_empty() || !self.checkpoint.is_empty()
+    }
+}
+
 /// One decision: the selected option label (empty if none) and any written guidance.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DecisionResponse {
     pub question: String,
@@ -39,8 +46,14 @@ pub struct DecisionResponse {
     pub note: String,
 }
 
+impl DecisionResponse {
+    pub fn is_substantive(&self) -> bool {
+        !self.selected.is_empty() || !self.note.is_empty()
+    }
+}
+
 /// Structured target for comments on diagrams/charts (Mermaid node or edge, Vega chart).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AnnotationTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,7 +71,7 @@ pub struct AnnotationTarget {
 }
 
 /// An inline comment: where it was made, the exact quoted passage, and the comment.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Annotation {
     pub location: String,
@@ -69,7 +82,7 @@ pub struct Annotation {
 }
 
 /// Everything the user sent back from the briefing page.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BriefingResponse {
     pub cancelled: bool,
@@ -102,13 +115,7 @@ fn parse_target(value: Option<&Value>) -> Option<AnnotationTarget> {
         target_label: field("targetLabel"),
         source_excerpt: field("sourceExcerpt"),
     };
-    let empty = target.section.is_none()
-        && target.content_type.is_none()
-        && target.target_type.is_none()
-        && target.target_id.is_none()
-        && target.target_label.is_none()
-        && target.source_excerpt.is_none();
-    if empty { None } else { Some(target) }
+    (target != AnnotationTarget::default()).then_some(target)
 }
 
 fn parse_annotations(value: Option<&Value>) -> Vec<Annotation> {
@@ -149,7 +156,6 @@ pub fn parse_browser_result(value: &Value, cancelled: bool) -> BriefingResponse 
             let row = item.as_object()?;
             let title = non_empty(trimmed(row.get("title"), 500))?;
             let status = match row.get("status").and_then(Value::as_str) {
-                Some("understood") => ChunkStatus::Understood,
                 Some("revisit") => ChunkStatus::Revisit,
                 _ => ChunkStatus::Unmarked,
             };
@@ -211,12 +217,32 @@ fn format_target(target: &AnnotationTarget) -> Option<String> {
     Some(out)
 }
 
+/// How much the user sent back, for one-line summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedbackCounts {
+    pub decisions: usize,
+    pub sections: usize,
+    pub comments: usize,
+}
+
+impl std::fmt::Display for FeedbackCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} decisions, {} section responses, {} comments", self.decisions, self.sections, self.comments)
+    }
+}
+
 impl BriefingResponse {
-    pub fn has_substantive_feedback(&self) -> bool {
-        self.chunks.iter().any(|c| c.status == ChunkStatus::Revisit || !c.note.is_empty() || !c.checkpoint.is_empty())
-            || self.decisions.iter().any(|d| !d.selected.is_empty() || !d.note.is_empty())
-            || !self.annotations.is_empty()
-            || !self.overall_note.is_empty()
+    /// An empty, cancelled result.
+    pub fn cancelled() -> Self {
+        Self { cancelled: true, ..Self::default() }
+    }
+
+    pub fn counts(&self) -> FeedbackCounts {
+        FeedbackCounts {
+            decisions: self.decisions.iter().filter(|d| d.is_substantive()).count(),
+            sections: self.chunks.iter().filter(|c| c.is_substantive()).count(),
+            comments: self.annotations.len(),
+        }
     }
 
     /// The per-item lines shown to the model (no header).
@@ -306,7 +332,7 @@ mod tests {
         assert_eq!(result.annotations.len(), 1);
         let target = result.annotations[0].target.as_ref().unwrap();
         assert_eq!(target.content_type.as_deref(), Some("mermaid"));
-        assert!(result.has_substantive_feedback());
+        assert_eq!(result.counts().to_string(), "1 decisions, 1 section responses, 1 comments");
 
         let text = result.format_text();
         assert!(text.contains("Sections flagged for follow-up: First"));
@@ -318,8 +344,9 @@ mod tests {
     #[test]
     fn empty_and_cancelled_results() {
         let empty = parse_browser_result(&json!({}), false);
-        assert!(!empty.has_substantive_feedback());
+        assert_eq!(empty.counts(), FeedbackCounts { decisions: 0, sections: 0, comments: 0 });
         assert!(empty.format_text().contains("returned no notes"));
-        assert!(parse_browser_result(&json!(null), true).format_text().contains("cancelled"));
+        assert_eq!(parse_browser_result(&json!(null), true), BriefingResponse::cancelled());
+        assert!(BriefingResponse::cancelled().format_text().contains("cancelled"));
     }
 }
