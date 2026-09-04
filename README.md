@@ -45,11 +45,10 @@ release, so mise can install it straight from GitHub:
 mise use -g github:JacobHayes/briefing@latest          # newest build (vYYYY.MM.DD.N)
 ```
 
-(The repo is private for now, so mise needs a `GITHUB_TOKEN`, or `gh auth login`.) Or build
-from source:
+Or build from source:
 
 ```sh
-cargo install --git ssh://git@github.com/JacobHayes/briefing --locked
+cargo install --git https://github.com/JacobHayes/briefing --locked
 ```
 
 The build embeds the browser renderer libraries (marked, DOMPurify, highlight.js, Mermaid,
@@ -64,7 +63,7 @@ seven files. The result is a single static binary with no runtime dependencies a
 |---|---|---|
 | Claude Code | `claude mcp add --scope user briefing -- briefing mcp` | [integrations/claude-code.md](integrations/claude-code.md) |
 | Codex | `[mcp_servers.briefing]` with `tool_timeout_sec` raised | [integrations/codex.md](integrations/codex.md) |
-| Pi | `pi install ssh://git@github.com/JacobHayes/briefing` (extension + skill) | [integrations/pi](integrations/pi/briefing.ts) |
+| Pi | `pi install git:github.com/JacobHayes/briefing` (extension + skill) | [integrations/pi](integrations/pi/briefing.ts) |
 | Anything | `briefing present presentation.json` | below |
 
 Link `skills/briefing` into each harness's skills directory so the model gets the same
@@ -202,19 +201,9 @@ mise run assets:update
 cargo zigbuild --release --target aarch64-apple-darwin   # any release target, from Linux
 ```
 
-CI and releases run on [RWX](https://www.rwx.com):
-
-- `.rwx/ci.yml`: every push runs fmt, clippy, and tests, then cross-builds all three targets
-  with `cargo-zigbuild`. `rwx run .rwx/ci.yml --wait --init branch=main` runs it against the
-  working tree without pushing.
-- `.rwx/release.yml`: a daily cron publishes an immutable calver release `vYYYY.MM.DD.N`
-  (N counts builds within the day) when `main` moved; `rwx run .rwx/release.yml` publishes
-  one on demand (`--init force=true` even if `main` did not move). Publishing needs the vault
-  secret `BRIEFING_GITHUB_TOKEN` (fine-grained PAT, Contents read/write on this repo).
-- Build tasks filter their inputs to the files they read, so doc-only commits reuse cached
-  builds.
-
-Fresh releases are hidden by mise's `minimum_release_age` for a while;
+CI (`.rwx/ci.yml`) checks and cross-builds every push; releases (`.rwx/release.yml`) are
+immutable calver tags `vYYYY.MM.DD.N`, published daily when `main` moved. The workflow files
+carry the details. Fresh releases can be hidden by mise's `minimum_release_age` for a while;
 `MISE_MINIMUM_RELEASE_AGE=0` overrides. TLS is rustls + ring with bundled webpki roots, so no
 platform SDKs are needed to cross-compile.
 

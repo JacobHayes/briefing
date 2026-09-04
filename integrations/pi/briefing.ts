@@ -1,6 +1,6 @@
 // Pi extension: thin adapter over the `briefing` CLI.
 //
-// Install: `pi install ssh://git@github.com/JacobHayes/briefing` (the repo's package.json
+// Install: `pi install git:github.com/JacobHayes/briefing` (the repo's package.json
 // declares this extension and the skill). Requires the `briefing` binary on PATH.
 //
 // Pi has no tool timeout, so this is a single blocking tool: `brief_user` spawns
