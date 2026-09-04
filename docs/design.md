@@ -82,8 +82,8 @@ the same page serves every harness.
 | Pi extension | a single blocking `brief_user` that shows the link in Pi's UI | `/brief <request>`, `/brief-demo`, `/brief-reopen`, `/brief-cancel`, `/brief-result <id>`, `/brief-status` |
 | CLI | `briefing present spec.json`, `briefing demo`, `briefing await <id>`, `briefing status` | |
 
-Why the MCP shape is two calls, and how the wait survives client timeouts, is in
-[harness-timeouts.md](harness-timeouts.md).
+Why the MCP shape is two calls, and how the wait survives client timeouts, is in the
+README's "Long waits" section; the per-client budgets are `PROFILES` in `src/mcp.rs`.
 
 ## Content contract
 

@@ -1,4 +1,8 @@
 [tools]
+# Rust lives here (not rust-toolchain.toml) so `mise install` sets up everything the build
+# needs, locally and in CI: toolchain, clippy/rustfmt, the three release targets, zig +
+# cargo-zigbuild for cross builds, node for the asset embed.
+rust = { version = "1.98", profile = "minimal", components = ["clippy", "rustfmt"], targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"] }
 "ubi:rust-cross/cargo-zigbuild" = "0.23.4"
 node = "latest"
 zig = "0.16.0"

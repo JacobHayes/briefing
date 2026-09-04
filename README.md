@@ -101,21 +101,18 @@ content contract the agent follows, and the non-goals are in
 
 A briefing can take an hour; most MCP clients time out a tool call in a minute. The server
 reads `clientInfo.name` and capabilities from the MCP handshake and picks a hold strategy per
-client, with no extra tool parameters:
-
-| Client (from handshake) | Hold | Budget before returning `pending` |
-|---|---|---|
-| Codex | form elicitation (Codex pauses its tool timeout while one is open; the server cancels it when the browser submits, declining it cancels the briefing) | 4 h |
-| Claude Code, VS Code | `notifications/progress` every 10 s (Claude Code's idle timer resets on progress; VS Code has no timeout) | 24 h |
-| Gemini CLI | progress | 570 s |
-| Goose | progress | 280 s |
-| Cursor, Cline, Zed, Continue, OpenCode, Windsurf, Pi's MCP adapter, unknown | progress | 50 s |
+client, with no extra tool parameters: `notifications/progress` heartbeats every 10 s for
+clients whose timer resets on progress or that have no timeout (Claude Code, VS Code), a form
+elicitation for Codex (whose timer pauses while one is open; the server cancels it when the
+browser submits, declining it cancels the briefing), and a short budget (50 s) for the
+60-second clients (Cursor, Cline, Zed, Continue, OpenCode, Pi's MCP adapter, unknown).
 
 When the budget runs out the tool returns `status: "pending"` with the `briefingId` and the
 model calls `await_briefing` again; you never notice. Claude Code moves calls longer than
 two minutes into a background task and notifies the model on completion; the tool text tells
 the model to wait for that rather than poll. `--hold` and `--max-wait-secs` override the
-plan. Sources and per-client details: [docs/harness-timeouts.md](docs/harness-timeouts.md).
+plan. The per-client table, with sources, is `PROFILES` in
+[src/mcp.rs](src/mcp.rs).
 
 Pi's own extension has no timeout to work around, so it exposes a single blocking
 `brief_user` that shows the link in Pi's UI and returns the feedback directly.
@@ -214,6 +211,7 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
 ## Development
 
 ```sh
+mise install         # rust (+ clippy, rustfmt, release targets), zig, cargo-zigbuild, node
 mise run check       # fmt --check, clippy -D warnings, tests
 mise use -g github:JacobHayes/briefing@latest   # or: cargo install --path . --locked
 mise run assets:update

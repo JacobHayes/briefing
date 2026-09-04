@@ -27,7 +27,6 @@ tasks:
     filter:
       - Cargo.toml
       - Cargo.lock
-      - rust-toolchain.toml
       - mise.toml
       - build.rs
       - src/**/*

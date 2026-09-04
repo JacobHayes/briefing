@@ -134,7 +134,8 @@ pub struct BriefingMcp {
 }
 
 /// What a known MCP client can tolerate, derived from `clientInfo.name` and the advertised
-/// capabilities in `initialize` (no model involvement). See docs/harness-timeouts.md.
+/// capabilities in `initialize` (no model involvement). `PROFILES` below is the source of
+/// truth for per-client behaviour; the README summarises it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientProfile {
     pub name: &'static str,
@@ -160,17 +161,25 @@ const fn profile(
     ClientProfile { name, needles, hold, budget }
 }
 
-/// First match wins; the last entry is the fallback.
+/// First match wins; the last entry is the fallback. Budgets sit just under each client's
+/// tool-call timeout (research as of 2026-09; the MCP spec only says clients MAY reset their
+/// timer on `notifications/progress` and SHOULD enforce a maximum).
 static PROFILES: &[ClientProfile] = &[
-    // Wall-clock 300 s default that ignores progress but pauses during an elicitation.
+    // 300 s wall clock (openai/codex#28234; docs still say 60), `tool_timeout_sec` to raise.
+    // Progress does not reset it, but the timer pauses while an elicitation is outstanding
+    // (openai/codex#17566), hence the form hold.
     profile("codex", &["codex"], HoldMode::Elicitation, Duration::from_secs(280)),
-    // Idle timer resets on progress; wall-clock cap is ~28 h.
+    // ~28 h wall clock (`MCP_TOOL_TIMEOUT`) plus a 30 min stdio idle timer that progress
+    // resets; calls over 2 min are moved to a background task and the model is notified.
     profile("claude-code", &["claude"], HoldMode::Progress, HOURS_24),
+    // 600 s `timeout`, no progress reset, no elicitation (google-gemini/gemini-cli#22249).
     profile("gemini-cli", &["gemini"], HoldMode::Progress, Duration::from_secs(570)),
+    // 300 s extension `timeout`; its own elicitation dialog times out at 5 min.
     profile("goose", &["goose"], HoldMode::Progress, Duration::from_secs(280)),
-    // No client-side timeout.
+    // No client-side timeout (microsoft/vscode-copilot-release#14130).
     profile("vscode", &["vscode", "visual studio", "copilot"], HoldMode::Progress, HOURS_24),
-    // 60 s, no progress reset, often not configurable.
+    // 60 s SDK default, no progress reset (Cursor staff on forum.cursor.com/t/160548), often
+    // not configurable (Cursor) or only per server (Cline, Zed, Continue, OpenCode).
     profile(
         "sixty-second-client",
         &["cursor", "cline", "zed", "continue", "opencode", "windsurf"],
