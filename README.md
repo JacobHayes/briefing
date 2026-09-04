@@ -101,7 +101,9 @@ briefing demo                      # open the bundled demo
 briefing present spec.json         # print the user's feedback as text; --json for JSON
 briefing schema                    # JSON Schema for brief_user input
 briefing mcp                       # MCP over stdio
-briefing serve --mcp --token ...   # long-lived hub (see below)
+briefing serve --mcp               # long-lived hub (see below)
+briefing status                    # list known briefings (waiting / completed / cancelled)
+briefing await <briefingId>        # recover one: re-serve it if still open, print the result if not
 ```
 
 `present` prints the URL (and bind diagnostics) on stderr, or JSON events with `--json`, and
@@ -111,8 +113,26 @@ the result on stdout. Exit codes: 0 completed, 2 cancelled, 3 still pending afte
 Common flags / env: `--bind auto|local|tailscale` (`BRIEFING_BIND`), `--no-open`,
 `--on-create 'cmd'` (`BRIEFING_ON_CREATE`, runs with `BRIEFING_URL/ID/TITLE`, e.g. to push
 the link to ntfy from a headless box),
-`--hub URL` + `--hub-token` (`BRIEFING_HUB`, `BRIEFING_HUB_TOKEN`),
+`--hub URL` (`BRIEFING_HUB`), `BRIEFING_STATE_DIR` to move the record store,
 `BRIEFING_BROWSER` to override the opener, `BRIEFING_LOG` for tracing.
+
+## Recovery and hand-off
+
+Every briefing is mirrored to `$XDG_STATE_HOME/briefing/briefings/<id>.json` (default
+`~/.local/state/...`): the presentation, the user's in-progress draft, and the submitted
+result. Nothing depends on the process that created it staying alive:
+
+- **Agent disconnected after you submitted:** `await_briefing` (or `briefing await <id>`)
+  from any later process returns the stored result. Records are kept 6 h after they finish.
+- **Agent died before you submitted:** `await_briefing` with the id returns `status:
+  "reopened"` and a fresh link; the draft is intact. The old link is dead because each process
+  serves on its own port. The id is shown on the page's error banner and Submitted screen,
+  in `brief_user` output, and by `briefing status`.
+- **Switching devices mid-briefing:** the draft is saved server-side (debounced, with a
+  revision; the page adopts a newer draft on focus) and cached in localStorage, so opening the
+  same link elsewhere continues where you left off.
+
+Unanswered briefings expire after 24 h. There is no feedback history: one result per briefing.
 
 ## Hub mode (optional)
 
@@ -121,18 +141,21 @@ running elsewhere (Claude Code web, Codex cloud, a headless box), `briefing serv
 long-lived server that any harness on any machine can use:
 
 ```sh
-BRIEFING_HUB_TOKEN=$(openssl rand -base64 24) briefing serve --mcp \
-  --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-topic'
+briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-topic'
 ```
 
 - Binds to this node's Tailscale 100.x address when Tailscale is running, else loopback.
-- Serves briefing pages, a bearer-protected agent API (`/agent/briefings`), and with `--mcp` a
-  streamable-HTTP MCP endpoint at `/mcp`.
+- Serves briefing pages, a dashboard at `/` listing briefings awaiting feedback (with links and
+  progress) and recent results, the agent API (`/agent/briefings`), and with `--mcp` a
+  streamable-HTTP MCP endpoint at `/mcp`. There is no authentication: the tailnet is the
+  perimeter, and each briefing URL still carries its own capability token.
+- `--finished-ttl 6h` / `--active-ttl 24h` tune retention; the embedded server uses the same
+  defaults.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
 - `--on-create` runs a shell command with `BRIEFING_URL/ID/TITLE` so a remote session
   can push the URL to your phone (the hub cannot open your browser).
 - Clients either point the stdio server at it (`briefing mcp --hub URL`) or connect to
-  `/mcp` directly. `briefing await|cancel|status <briefingId>` work against a hub.
+  `/mcp` directly. `briefing --hub URL await|cancel|status` work against a hub.
 
 ## Security model
 
@@ -140,8 +163,10 @@ BRIEFING_HUB_TOKEN=$(openssl rand -base64 24) briefing serve --mcp \
 - Every briefing URL carries a random capability token; the agent side uses a separate id.
 - `Host` must match the bound origin on every request; `Origin` must match on browser POSTs.
 - Strict CSP with a per-page nonce; renderer libraries are served from the binary.
-- Presentation and feedback sizes are capped; nothing is written to disk.
-- Finished briefings expire after an hour, unanswered ones after a day.
+- Presentation and feedback sizes are capped. Records are written to the user's state
+  directory with owner-only permissions and deleted 6 h after finishing (24 h if never
+  answered).
+- No authentication on the hub's agent API or dashboard: run it on a private network.
 
 ## Development
 
@@ -158,6 +183,6 @@ publishes a release; a nightly cron publishes a `vX.Y.Z-nightly.YYYYMMDD` prerel
 `main` moved. `rwx run .rwx/ci.yml --wait` runs CI against the working tree without pushing.
 TLS is rustls + ring with bundled webpki roots, so no platform SDKs are needed to cross-compile.
 
-Tests cover validation, the hub state machine, host/origin checks, the full HTTP flow, and the
-MCP server driven over stdio (progress hold, pending/await/cancel, and the Codex elicitation
-hold).
+Tests cover validation, the hub state machine, the on-disk store, drafts, host/origin checks,
+the full HTTP flow, recovery of a briefing across processes, and the MCP server driven over
+stdio (progress hold, pending/await/cancel, the Codex elicitation hold, and recovery).

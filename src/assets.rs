@@ -2,6 +2,7 @@
 //! (installed from npm by `build.rs`).
 
 pub const PAGE_HTML: &str = include_str!("../assets/page.html");
+pub const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
 
 const JS: &str = "application/javascript; charset=utf-8";
 
@@ -40,6 +41,11 @@ pub fn render_page(nonce: &str) -> String {
     PAGE_HTML.replace("{{NONCE}}", nonce)
 }
 
+/// The hub dashboard with the CSP nonce substituted in.
+pub fn render_dashboard(nonce: &str) -> String {
+    DASHBOARD_HTML.replace("{{NONCE}}", nonce)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,14 +66,20 @@ mod tests {
     /// the inline script actually parses.
     #[test]
     fn inline_script_parses() {
+        for (name, html) in [("page", PAGE_HTML), ("dashboard", DASHBOARD_HTML)] {
+            check_inline_script(name, html);
+        }
+    }
+
+    fn check_inline_script(name: &str, html: &str) {
         let start =
-            PAGE_HTML.find("<script nonce=\"{{NONCE}}\">").expect("script tag") + "<script nonce=\"{{NONCE}}\">".len();
-        let end = PAGE_HTML[start..].find("</script>").expect("script end") + start;
-        let script = &PAGE_HTML[start..end];
-        assert!(!script.contains("\\\\/"), "page script still contains template-literal escapes");
+            html.find("<script nonce=\"{{NONCE}}\">").expect("script tag") + "<script nonce=\"{{NONCE}}\">".len();
+        let end = html[start..].find("</script>").expect("script end") + start;
+        let script = &html[start..end];
+        assert!(!script.contains("\\\\/"), "{name} script still contains template-literal escapes");
         let dir = std::env::temp_dir().join(format!("briefing-page-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("page.js");
+        let file = dir.join(format!("{name}.js"));
         std::fs::write(&file, script).unwrap();
         match std::process::Command::new("node").arg("--check").arg(&file).output() {
             Ok(output) => assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr)),

@@ -32,6 +32,7 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/package.json");
     println!("cargo:rerun-if-changed=assets/package-lock.json");
     println!("cargo:rerun-if-changed=assets/page.html");
+    println!("cargo:rerun-if-changed=assets/dashboard.html");
     println!("cargo:rerun-if-changed=assets/demo.json");
     println!("cargo:rerun-if-env-changed=BRIEFING_VENDOR_DIR");
 

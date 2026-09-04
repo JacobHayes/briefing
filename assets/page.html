@@ -198,6 +198,10 @@
     .done-icon { width: 52px; height: 52px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 50%; color: var(--bg); background: var(--accent); font-size: 1.5rem; }
     .done h1 { margin: 0 0 10px; font-size: 1.5rem; }
     .done p { margin: 0; color: var(--muted); }
+    .done p + p { margin-top: 12px; font-size: .9rem; }
+    .done code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; user-select: all; }
+    .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--fg, #1d1d1f); color: var(--bg, #fff); padding: 10px 16px; border-radius: 10px; font-size: .9rem; box-shadow: 0 6px 24px rgba(0,0,0,.2); z-index: 60; opacity: 0; transition: opacity .2s; pointer-events: none; }
+    .toast.visible { opacity: 1; }
 
     /* Inline annotation highlights */
     .comment-quote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); white-space: pre-wrap; font-style: italic; }
@@ -698,23 +702,93 @@
     }
 
     const list = (items, className) => el("ul", { class: className }, items.map(item => mdInline("li", {}, item)));
+    // --- Draft persistence: the server holds the draft (so another device or a restarted
+    // agent process can pick it up); localStorage is a write-through cache for flaky links.
     const storageKey = () => "briefing:" + presentation.id;
-    const save = () => localStorage.setItem(storageKey(), JSON.stringify({ current, state, disclosures: disclosureState }));
-    const restore = () => {
-      try {
-        const saved = JSON.parse(localStorage.getItem(storageKey()) || "null");
-        if (saved && Number.isInteger(saved.current) && saved.state) {
-          current = Math.max(0, Math.min(saved.current, screens.length));
-          state = saved.state;
-          disclosureState = saved.disclosures;
-        }
-      } catch { /* Ignore corrupt browser-local draft state. */ }
+    let draftRevision = 0;
+    let syncTimer = null;
+    let syncing = false;
+    let syncQueued = false;
+    let toastTimer = null;
+    const snapshot = () => ({ current, state, disclosures: disclosureState, updatedAt: Date.now() });
+    const cacheLocally = draft => { try { localStorage.setItem(storageKey(), JSON.stringify(draft)); } catch { /* storage unavailable */ } };
+    const save = () => {
+      cacheLocally(snapshot());
+      clearTimeout(syncTimer);
+      syncTimer = setTimeout(() => { void syncDraft(); }, 500);
+    };
+    function toast(message) {
+      let node = document.getElementById("toast");
+      if (!node) { node = el("div", { id: "toast", class: "toast", role: "status" }); document.body.append(node); }
+      node.textContent = message;
+      node.classList.add("visible");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => node.classList.remove("visible"), 3500);
+    }
+    function applyDraft(saved) {
+      if (saved && Number.isInteger(saved.current) && saved.state) {
+        current = Math.max(0, Math.min(saved.current, screens.length));
+        state = saved.state;
+        disclosureState = saved.disclosures;
+      }
       if (!state || typeof state !== "object") state = { chunks: {}, decisions: {}, annotations: [], overallNote: "" };
       if (!state.chunks) state.chunks = {};
       if (!state.decisions) state.decisions = {};
       if (!Array.isArray(state.annotations)) state.annotations = [];
       if (!disclosureState || typeof disclosureState !== "object" || Array.isArray(disclosureState)) disclosureState = {};
+    }
+    function adoptServerDraft(draft, revision, message) {
+      draftRevision = revision;
+      applyDraft(draft);
+      cacheLocally(snapshot());
+      if (message) toast(message);
+      if (!submitted) render();
+    }
+    async function syncDraft(flush = false) {
+      if (submitted) return;
+      if (syncing) { syncQueued = true; return; }
+      syncing = true;
+      clearTimeout(syncTimer);
+      try {
+        const response = await fetch("/api/" + presentation.token + "/draft", {
+          method: "PUT", headers: { "content-type": "application/json" }, keepalive: flush,
+          body: JSON.stringify({ baseRevision: draftRevision, draft: snapshot() }),
+        });
+        if (response.status === 409) {
+          const body = await response.json();
+          if (body.draft) adoptServerDraft(body.draft, body.revision, "Loaded a newer draft from another device");
+        } else if (response.ok) {
+          draftRevision = (await response.json()).revision;
+        }
+      } catch { /* Offline: the local copy stands and is retried on the next change or focus. */ }
+      finally {
+        syncing = false;
+        if (syncQueued) { syncQueued = false; save(); }
+      }
+    }
+    async function refreshFromServer() {
+      if (submitted) return;
+      try {
+        const response = await fetch("/api/" + presentation.token + "/presentation", { cache: "no-store" });
+        if (!response.ok) return;
+        const latest = await response.json();
+        if (latest.status !== "active") { submitted = true; renderDone(latest.status === "cancelled"); return; }
+        if ((latest.draftRevision || 0) > draftRevision && latest.draft) adoptServerDraft(latest.draft, latest.draftRevision, "Loaded a newer draft from another device");
+        else if (syncQueued || syncTimer) void syncDraft();
+      } catch { /* Server unreachable; keep the local draft. */ }
+    }
+    const restore = () => {
+      let local = null;
+      try { local = JSON.parse(localStorage.getItem(storageKey()) || "null"); } catch { /* Ignore corrupt browser-local draft state. */ }
+      const server = presentation.draft && typeof presentation.draft === "object" ? presentation.draft : null;
+      draftRevision = presentation.draftRevision || 0;
+      const useServer = server && (!local || (server.updatedAt || 0) >= (local.updatedAt || 0));
+      applyDraft(useServer ? server : local);
+      if (!useServer && local) save();
     };
+    document.addEventListener("visibilitychange", () => { if (document.hidden) void syncDraft(true); else void refreshFromServer(); });
+    window.addEventListener("focus", () => { void refreshFromServer(); });
+    window.addEventListener("pagehide", () => { if (syncTimer) void syncDraft(true); });
     const chunkState = index => state.chunks[index] ||= { note: "", checkpoint: "", status: "" };
     const decisionState = index => state.decisions[index] ||= { selected: "", note: "" };
     const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -1449,7 +1523,7 @@
       overall.value = state.overallNote || "";
       overall.addEventListener("input", () => { state.overallNote = overall.value; save(); });
       frag.append(disclosure("Overall response", overall, "", "review:overall"));
-      frag.append(el("div", { class: "error", id: "submit-error", role: "alert", text: "Could not submit this briefing. The server may have stopped." }));
+      frag.append(el("div", { class: "error", id: "submit-error", role: "alert", text: "Could not submit this briefing. Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to reopen this briefing." }));
       return frag;
     }
 
@@ -1517,8 +1591,12 @@
         localStorage.removeItem(storageKey());
         submitted = true;
         render();
-      } catch {
-        document.getElementById("submit-error")?.classList.add("visible");
+      } catch (error) {
+        const banner = document.getElementById("submit-error");
+        if (banner) {
+          banner.textContent = "Could not submit this briefing (" + (error && error.message ? error.message : error) + "). Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to reopen this briefing.";
+          banner.classList.add("visible");
+        }
       }
     }
 
@@ -1537,10 +1615,12 @@
       closeComposer(false);
       hidePopover();
       cleanupExternalRenderArtifacts();
+      const idLine = el("p", {}, [document.createTextNode("Briefing id "), el("code", { text: presentation.id }), document.createTextNode(cancelled ? "." : ". If the agent lost track, ask it to run await_briefing with this id; the response is kept for a few hours.")]);
       app.replaceChildren(el("div", { class: "done" }, el("div", { class: "done-card" }, [
         el("div", { class: "done-icon", text: cancelled ? "×" : "✓" }),
         el("h1", { text: cancelled ? "Briefing cancelled" : "Submitted" }),
         el("p", { text: cancelled ? "You can close this tab." : "Your response has been submitted. You can close this tab." }),
+        idLine,
       ])));
     }
 

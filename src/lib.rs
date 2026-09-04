@@ -9,6 +9,7 @@ pub mod http;
 pub mod hub;
 pub mod mcp;
 pub mod response;
+pub mod store;
 pub mod tailscale;
 pub mod tls;
 

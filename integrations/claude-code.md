@@ -8,11 +8,17 @@ claude mcp add --scope user briefing -- briefing mcp
 mkdir -p ~/.claude/skills && ln -s "$(pwd)/skills/briefing" ~/.claude/skills/briefing
 ```
 
-Claude Code's per-call MCP timeout resets on progress notifications, and the server sends one
-every 10 seconds while a briefing is open, so a long briefing does not time out. If your build
-enforces a hard cap, raise it with `MCP_TOOL_TIMEOUT` (milliseconds) in the server's `env`
-block in `~/.claude.json`, or set `--max-wait-secs` so the tool returns `pending` before the
-cap and the model continues with `await_briefing`.
+Claude Code's idle timeout for MCP calls (30 min on stdio) is reset by progress notifications,
+and the server sends one every 10 seconds while a briefing is open, so `await_briefing` can
+block for as long as you take (the wall-clock cap is about 28 h; the server returns `pending`
+after 24 h and the model calls again). Claude Code moves any MCP call over 2 minutes into a
+background task and notifies the model when it completes; the tool text tells the model not
+to poll in the meantime. Set `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0` if you would rather the
+call stay in the foreground.
+
+If a session dies or is restarted, ask the new session to call `await_briefing` with the
+briefing id (shown on the page and in the earlier tool output): it returns the stored feedback
+if you already submitted, or a fresh link with your draft intact if not.
 
 ## Headless box, browser elsewhere
 
@@ -30,18 +36,20 @@ Run a hub on a box you can reach from both the agent and your browser, then poin
 
 ```sh
 # on the hub box (Tailscale address is picked automatically)
-BRIEFING_HUB_TOKEN=... briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" ntfy.sh/your-topic'
+briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" ntfy.sh/your-topic'
 
 # on the agent side, either stdio with a remote backend...
-claude mcp add --scope user briefing -e BRIEFING_HUB=http://100.x.y.z:7789 -e BRIEFING_HUB_TOKEN=... -- briefing mcp
+claude mcp add --scope user briefing -e BRIEFING_HUB=http://100.x.y.z:7789 -- briefing mcp
 # ...or the hub's MCP endpoint directly
-claude mcp add --scope user --transport http briefing http://100.x.y.z:7789/mcp --header "Authorization: Bearer ..."
+claude mcp add --scope user --transport http briefing http://100.x.y.z:7789/mcp
 ```
+
+The hub's `/` page lists briefings awaiting feedback with their links.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
 | `brief_user` | Validate, open the briefing, return `url` + `briefingId` immediately (the model shows you the link). |
-| `await_briefing` | Block until you submit and return `feedback` (or `pending` after the client's budget; the model calls it again). |
+| `await_briefing` | Block until you submit and return `feedback` (or `pending` after the client's budget; the model calls it again). With an id from an earlier session it returns the stored feedback, or `reopened` plus a fresh link. |
 | `cancel_briefing` | Cancel an open briefing. |

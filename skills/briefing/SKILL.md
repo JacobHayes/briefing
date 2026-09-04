@@ -25,6 +25,12 @@ note}], annotations[{location, quote, comment, target?}], overallNote}`; `status
 marks a section flagged for follow-up. MCP results are structured JSON with an
 `instructions` field.
 
+Briefings outlive the process that created them (hours). If the harness backgrounds
+`await_briefing`, wait for its completion notification rather than polling. If a session was
+interrupted, or the user hands you a briefing id, call `await_briefing` with it: it returns the
+stored feedback if they already submitted, or `status: "reopened"` with a fresh link to relay
+(their draft is preserved). In Pi, `/brief-result <id>` does the same.
+
 ## When to use it
 
 Use it proactively, without waiting to be asked, when an answer crosses a complexity threshold:

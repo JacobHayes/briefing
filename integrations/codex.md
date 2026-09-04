@@ -33,13 +33,19 @@ with `--hold progress` and a large `tool_timeout_sec`.
 
 ## Remote / hub
 
-Codex supports streamable HTTP MCP servers with a bearer token:
+Codex supports streamable HTTP MCP servers:
 
 ```toml
 [mcp_servers.briefing]
 url = "http://100.x.y.z:7789/mcp"   # hub started with: briefing serve --mcp
-bearer_token_env_var = "BRIEFING_HUB_TOKEN"
 tool_timeout_sec = 14400
 ```
 
-Run the hub with `briefing serve --mcp` (see the README).
+Run the hub with `briefing serve --mcp` (see the README). Its `/` page lists briefings
+awaiting feedback.
+
+## Recovery
+
+If Codex loses the tool call (timeout, restart), ask it to call `await_briefing` with the
+briefing id shown on the page: it returns the stored feedback if you already submitted, or a
+fresh link with your draft intact if not.

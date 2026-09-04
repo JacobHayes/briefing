@@ -3,7 +3,8 @@
 //! The same handler serves stdio (`briefing mcp`) and streamable HTTP
 //! (`briefing serve --mcp`).
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rmcp::handler::server::wrapper::Parameters;
@@ -47,7 +48,9 @@ Briefing presents complex information in a paced browser interface and returns t
 
 Use brief_user proactively whenever an answer crosses a complexity threshold: substantial research with dependent findings, multi-part explanations, or decisions that need context. Keep short and simple answers as normal chat. Finish the research and reasoning first, then call brief_user once with 3-8 semantic chunks in dependency order (one main idea per chunk, 3-5 keyPoints each, focused details, stable context in tray, 2-4 distinct decision options with the recommended one first and marked). Text fields accept Markdown, GFM tables, fenced code, Mermaid fences, and Vega-Lite fences; use them only when they clarify.
 
-Results are returned as structuredContent. brief_user returns immediately with the briefing link and a briefingId; put that exact link in your reply so the user can open it (they may be on a different machine from the agent), then call await_briefing with the briefingId; it blocks until they submit and returns their feedback. If await_briefing returns status \"pending\", call it again. After the feedback arrives, respond only to it; do not repeat the presentation as a chat message.";
+Results are returned as structuredContent. brief_user returns immediately with the briefing link and a briefingId; put that exact link in your reply so the user can open it (they may be on a different machine from the agent), then call await_briefing with the briefingId; it blocks until they submit and returns their feedback. If await_briefing returns status \"pending\", call it again. If your harness moves the call to the background, stop and wait for its completion notification; do not poll. After the feedback arrives, respond only to it; do not repeat the presentation as a chat message.
+
+Briefings outlive the process that created them for several hours. If a session was interrupted, or the user gives you a briefingId, call await_briefing with it: it returns the stored feedback if they already submitted, or reopens the briefing (status \"reopened\" with a fresh link to relay) if not.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -87,7 +90,8 @@ pub struct OpenOutput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AwaitOutput {
-    /// "completed", "cancelled", or "pending".
+    /// "completed", "cancelled", "pending", or "reopened" (a briefing from an earlier
+    /// process is being served again at `url`; relay the link, then call await_briefing again).
     pub status: String,
     pub briefing_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,6 +133,8 @@ pub struct BriefingMcp {
     hold: HoldMode,
     /// Explicit budget; `None` means pick per client.
     max_wait: Option<Duration>,
+    /// Adopted briefings whose fresh link has already been handed to the model.
+    reopened: Arc<Mutex<HashSet<String>>>,
 }
 
 /// What a known MCP client can tolerate, derived from `clientInfo.name` and the advertised
@@ -155,6 +161,8 @@ fn resolve_hold(mode: HoldMode, supports_elicitation: bool) -> Hold {
 }
 
 const HOURS_4: Duration = Duration::from_secs(4 * 60 * 60);
+/// Just under Claude Code's ~28 h wall-clock cap; its idle timer is reset by heartbeats.
+const HOURS_24: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl ClientProfile {
     /// Match a client name (case-insensitive substring) to a profile.
@@ -167,14 +175,14 @@ impl ClientProfile {
             profile("codex", HoldMode::Elicitation, 280)
         } else if has("claude") {
             // Idle timer resets on progress; wall-clock cap is ~28 h.
-            ClientProfile { name: "claude-code", hold: HoldMode::Progress, budget: HOURS_4 }
+            ClientProfile { name: "claude-code", hold: HoldMode::Progress, budget: HOURS_24 }
         } else if has("gemini") {
             profile("gemini-cli", HoldMode::Progress, 570)
         } else if has("goose") {
             profile("goose", HoldMode::Progress, 280)
         } else if has("vscode") || has("visual studio") || has("copilot") {
             // No client-side timeout.
-            ClientProfile { name: "vscode", hold: HoldMode::Progress, budget: HOURS_4 }
+            ClientProfile { name: "vscode", hold: HoldMode::Progress, budget: HOURS_24 }
         } else if has("cursor") || has("cline") || has("zed") || has("continue") || has("opencode") || has("windsurf") {
             // 60 s, no progress reset, often not configurable.
             profile("sixty-second-client", HoldMode::Progress, 50)
@@ -208,7 +216,14 @@ pub enum Hold {
 
 impl BriefingMcp {
     pub fn new(backend: Arc<Backend>, hold: HoldMode, max_wait: Option<Duration>) -> Self {
-        Self { backend, hold, max_wait }
+        Self { backend, hold, max_wait, reopened: Arc::new(Mutex::new(HashSet::new())) }
+    }
+
+    /// `<client>@<host>`, shown on the dashboard and in `briefing status`.
+    fn source(ctx: &RequestContext<RoleServer>) -> String {
+        let client = Self::client_name(ctx);
+        let client = if client.trim().is_empty() { "mcp".to_string() } else { client };
+        format!("{client}@{}", crate::backend::hostname())
     }
 
     fn client_name(ctx: &RequestContext<RoleServer>) -> String {
@@ -269,8 +284,10 @@ impl BriefingMcp {
                     }
                 }
                 _ = ctx.ct.cancelled() => {
-                    let _ = self.backend.cancel(id).await;
-                    return Err(ErrorData::internal_error("brief_user cancelled by the client", None));
+                    return Err(ErrorData::internal_error(
+                        format!("await cancelled by the client; briefing {id} stays open, call await_briefing again or cancel_briefing"),
+                        None,
+                    ));
                 }
             }
         }
@@ -336,9 +353,11 @@ impl BriefingMcp {
                 outcome.map_err(internal)
             }
             _ = ctx.ct.cancelled() => {
-                let _ = handle.cancel(Some("brief_user cancelled".into())).await;
-                let _ = self.backend.cancel(id).await;
-                Err(ErrorData::internal_error("brief_user cancelled by the client", None))
+                let _ = handle.cancel(Some("await cancelled".into())).await;
+                Err(ErrorData::internal_error(
+                    format!("await cancelled by the client; briefing {id} stays open, call await_briefing again or cancel_briefing"),
+                    None,
+                ))
             }
         }
     }
@@ -424,7 +443,7 @@ impl BriefingMcp {
 
 #[tool_router]
 impl BriefingMcp {
-    /// Open a paced browser briefing for the user. Returns the link and a briefingId immediately; relay the link to the user, then call await_briefing to collect their notes, comments, decisions, and follow-up markers.
+    /// Open a paced browser briefing for the user. Returns the link and a briefingId immediately; put the link in your reply, then call await_briefing to collect their notes, comments, decisions, and follow-up markers.
     #[tool(name = "brief_user", output_schema = output_schema::<OpenOutput>())]
     async fn brief_user(
         &self,
@@ -432,8 +451,11 @@ impl BriefingMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         Self::require_structured_content(&ctx)?;
-        let created: Created =
-            self.backend.create(input).await.map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
+        let created: Created = self
+            .backend
+            .create(input, Some(Self::source(&ctx)))
+            .await
+            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         let opened = if created.opened_browser {
             "A browser was opened on the server's machine, but still show the user the link."
         } else {
@@ -444,7 +466,7 @@ impl BriefingMcp {
             &OpenOutput {
                 status: "open".into(),
                 instructions: format!(
-                    "Put this exact link in your reply so the user can open it: {url}. {opened} Then call await_briefing with briefingId \"{id}\"; it blocks until the user submits and returns their feedback.",
+                    "Put this exact link in your reply so the user can open it: {url}. {opened} Then call await_briefing with briefingId \"{id}\"; it blocks until the user submits and returns their feedback. If the call is moved to the background, wait for its completion notification instead of polling. The briefing survives this session; await_briefing with the same briefingId recovers it later.",
                     url = created.url,
                     id = created.id,
                 ),
@@ -456,7 +478,7 @@ impl BriefingMcp {
         ))
     }
 
-    /// Wait for the user to submit a briefing opened by brief_user. Blocks; may return status "pending" (call it again with the same briefingId).
+    /// Wait for the user to submit a briefing opened by brief_user (this session or an earlier one). Blocks until they submit; may return "pending" (call again) or "reopened" (relay the fresh link, then call again). Do not poll if the harness backgrounds it.
     #[tool(name = "await_briefing", output_schema = output_schema::<AwaitOutput>())]
     async fn await_briefing(
         &self,
@@ -469,9 +491,27 @@ impl BriefingMcp {
             .await
             .map_err(internal)?
             .ok_or_else(|| ErrorData::invalid_params(format!("unknown briefingId {}", input.briefing_id), None))?;
+        let url = info.url.clone().unwrap_or_else(|| format!("(briefing {})", info.title));
+        if info.adopted
+            && info.status == crate::hub::BriefingStatus::Active
+            && self.reopened.lock().unwrap().insert(input.briefing_id.clone())
+        {
+            return Ok(structured(
+                format!("Briefing {} reopened at {url}", input.briefing_id),
+                &AwaitOutput {
+                    status: "reopened".into(),
+                    briefing_id: input.briefing_id.clone(),
+                    url: Some(url.clone()),
+                    feedback: None,
+                    instructions: format!(
+                        "This briefing was created by an earlier process and is now served again at {url}; earlier links are dead. Put this exact link in your reply (the user's draft is preserved), then call await_briefing with briefingId \"{}\" to wait for their feedback.",
+                        input.briefing_id
+                    ),
+                },
+            ));
+        }
         let (hold, budget) = self.plan(&ctx);
         let max_wait = input.wait_seconds.map(Duration::from_secs).unwrap_or(budget).min(budget);
-        let url = info.url.clone().unwrap_or_else(|| format!("(briefing {})", info.title));
         let outcome = self.wait_for(&input.briefing_id, &url, &ctx, hold, max_wait).await?;
         Ok(Self::outcome_result(&input.briefing_id, &url, outcome))
     }
@@ -505,7 +545,7 @@ mod tests {
         assert_eq!(ClientProfile::for_client("codex-mcp-client").hold, HoldMode::Elicitation);
         assert_eq!(ClientProfile::for_client("codex").budget_for(Hold::Elicitation), HOURS_4);
         assert_eq!(ClientProfile::for_client("codex").budget_for(Hold::Progress), Duration::from_secs(280));
-        assert_eq!(ClientProfile::for_client("claude-code").budget, HOURS_4);
+        assert_eq!(ClientProfile::for_client("claude-code").budget, HOURS_24);
         assert_eq!(ClientProfile::for_client("Cursor").budget, Duration::from_secs(50));
         assert_eq!(ClientProfile::for_client("mcp-inspector").name, "unknown");
         assert_eq!(resolve_hold(HoldMode::Elicitation, false), Hold::Progress);

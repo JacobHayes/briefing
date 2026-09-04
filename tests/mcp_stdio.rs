@@ -14,12 +14,19 @@ struct McpClient {
     stdout: BufReader<ChildStdout>,
 }
 
+/// One temp state dir per test binary run so tests never touch the real store.
+fn state_dir() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path().to_path_buf()
+}
+
 impl McpClient {
     fn spawn(args: &[&str], client_name: &str, elicitation: bool) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_briefing"))
             .args(args)
             .env("BRIEFING_BIND", "local")
             .env("BRIEFING_NO_OPEN", "1")
+            .env("BRIEFING_STATE_DIR", state_dir())
             .env_remove("BRIEFING_HUB")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -230,4 +237,39 @@ fn elicitation_hold_for_codex() {
         }
     });
     assert_eq!(response["result"]["structuredContent"]["status"], "cancelled", "{response}");
+}
+
+/// A briefing opened by one MCP server process can be recovered by a fresh one: it is
+/// re-served with a new link ("reopened"), and after the browser submits the feedback comes
+/// back through the second process.
+#[test]
+fn recover_briefing_in_new_process() {
+    let mut first = McpClient::spawn(&["mcp"], "mcp-inspector", false);
+    let opened = first.request(2, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
+    let id = opened["result"]["structuredContent"]["briefingId"].as_str().unwrap().to_string();
+    let first_url = opened["result"]["structuredContent"]["url"].as_str().unwrap().to_string();
+    assert!(opened["result"]["structuredContent"]["instructions"].as_str().unwrap().contains("survives"));
+    drop(first);
+
+    let mut second = McpClient::spawn(&["mcp", "--max-wait-secs", "30"], "mcp-inspector", false);
+    let reopened = second.request(3, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
+    let content = &reopened["result"]["structuredContent"];
+    assert_eq!(content["status"], "reopened", "{reopened}");
+    let url = content["url"].as_str().unwrap().to_string();
+    assert_ne!(url, first_url);
+    assert_eq!(url.rsplit('/').next(), first_url.rsplit('/').next(), "same capability token");
+    assert!(content["instructions"].as_str().unwrap().contains(&url));
+
+    // Second await blocks; submit through the new link while it waits.
+    second.send_request(4, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
+    submit(&url, json!({"overallNote": "recovered"}));
+    let done = second.read_response(4, |_, _| {});
+    assert_eq!(done["result"]["structuredContent"]["status"], "completed", "{done}");
+    assert_eq!(done["result"]["structuredContent"]["feedback"]["overallNote"], "recovered");
+
+    // A third process gets the stored result straight away.
+    let mut third = McpClient::spawn(&["mcp"], "mcp-inspector", false);
+    let stored = third.request(5, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
+    assert_eq!(stored["result"]["structuredContent"]["status"], "completed");
+    assert_eq!(stored["result"]["structuredContent"]["feedback"]["overallNote"], "recovered");
 }

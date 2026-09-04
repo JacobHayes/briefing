@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Briefings</title>
+  <style>
+    :root { color-scheme: light dark; --fg: #1d1d1f; --muted: #6e6e73; --bg: #f5f5f7; --card: #fff; --line: #d2d2d7; --accent: #0a66c2; --warn: #b45309; }
+    @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --muted: #a1a1a6; --bg: #111; --card: #1c1c1e; --line: #333; --accent: #6cb4ff; --warn: #fbbf24; } }
+    body { margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: var(--fg); background: var(--bg); }
+    main { max-width: 960px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 32px 0 8px; }
+    .sub { color: var(--muted); margin: 0 0 8px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: start; }
+    .title { font-weight: 600; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .url { grid-column: 1 / -1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; }
+    a { color: var(--accent); }
+    .status { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+    .status.active { color: var(--warn); border-color: currentColor; }
+    .empty { color: var(--muted); font-style: italic; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Briefings</h1>
+    <p class="sub" id="summary">Loading…</p>
+    <h2>Awaiting feedback</h2>
+    <div id="active"><p class="empty">None</p></div>
+    <h2>Recent</h2>
+    <div id="finished"><p class="empty">None</p></div>
+  </main>
+  <script nonce="{{NONCE}}">
+    "use strict";
+    const el = (tag, attrs = {}, children = []) => {
+      const node = document.createElement(tag);
+      for (const [key, value] of Object.entries(attrs)) {
+        if (key === "text") node.textContent = value;
+        else if (key === "class") node.className = value;
+        else node.setAttribute(key, value);
+      }
+      for (const child of [].concat(children)) if (child) node.append(child);
+      return node;
+    };
+    const ago = secs => secs < 60 ? `${secs}s ago` : secs < 3600 ? `${Math.floor(secs / 60)}m ago` : secs < 86400 ? `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago` : `${Math.floor(secs / 86400)}d ago`;
+    const now = () => Math.floor(Date.now() / 1000);
+
+    function card(b) {
+      const meta = [];
+      if (b.source) meta.push(b.source);
+      meta.push(`created ${ago(b.ageSecs)}`);
+      if (b.finishedAt) meta.push(`${b.status} ${ago(Math.max(0, now() - b.finishedAt))}`);
+      if (b.draft) {
+        const parts = [`screen ${b.draft.screen}/${b.draft.screens}`];
+        if (b.draft.annotations) parts.push(`${b.draft.annotations} comment${b.draft.annotations === 1 ? "" : "s"}`);
+        if (b.draft.sectionNotes) parts.push(`${b.draft.sectionNotes} section note${b.draft.sectionNotes === 1 ? "" : "s"}`);
+        if (b.draft.decisions) parts.push(`${b.draft.decisions} decision${b.draft.decisions === 1 ? "" : "s"}`);
+        meta.push(parts.join(", "));
+      }
+      if (b.onDiskOnly && b.status === "active") meta.push("served by another process; the link may be stale");
+      const children = [
+        el("div", { class: "title", text: b.title }),
+        el("span", { class: `status ${b.status}`, text: b.status === "active" ? "waiting" : b.status }),
+        el("div", { class: "meta" }, [document.createTextNode(meta.join(" · ") + " · id "), el("code", { text: b.id })]),
+      ];
+      if (b.url && b.status === "active") children.push(el("div", { class: "url" }, el("a", { href: b.url, target: "_blank", rel: "noopener", text: b.url })));
+      return el("div", { class: "card" }, children);
+    }
+
+    function fill(id, items) {
+      const root = document.getElementById(id);
+      root.replaceChildren(...(items.length ? items.map(card) : [el("p", { class: "empty", text: "None" })]));
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/agent/briefings", { cache: "no-store" });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const { briefings } = await response.json();
+        const active = briefings.filter(b => b.status === "active");
+        const finished = briefings.filter(b => b.status !== "active");
+        fill("active", active);
+        fill("finished", finished);
+        document.getElementById("summary").textContent = `${active.length} awaiting feedback, ${finished.length} recent · refreshed ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        document.getElementById("summary").textContent = "Could not load briefings: " + (error.message || error);
+      }
+    }
+    refresh();
+    setInterval(refresh, 5000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+  </script>
+</body>
+</html>
