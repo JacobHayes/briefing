@@ -1,14 +1,16 @@
 # Publishes GitHub releases with prebuilt binaries.
 #
-# - Tag push `vX.Y.Z`  -> release for that tag (must match Cargo.toml).
-# - Daily cron         -> plain (non-prerelease) calver release `vYYYY.M.D` at main HEAD,
-#                         skipped when main has not moved since the last daily release. A
-#                         second run on the same day replaces that day's release.
-# - `rwx run .rwx/release.yml --init kind=daily` to publish from the CLI.
+# Releases are calver with a per-day counter: `vYYYY.M.D.N` (N starts at 1). Every release
+# is a plain, immutable release; a second build on the same day gets the next N rather than
+# replacing anything. Plain (non-prerelease) tags mean `mise use
+# github:JacobHayes/briefing@latest` resolves them without --prerelease.
 #
-# Calver rather than `-nightly.N` suffixes so `mise use github:JacobHayes/briefing@latest`
-# resolves them without --prerelease. Assets are named `briefing-<target>.tar.gz` (plus
-# sha256 sums) so mise autodetects the right one.
+# - Daily cron -> a release at main HEAD, skipped when main has not moved since the last one.
+# - `rwx run .rwx/release.yml` publishes from the CLI (use `--init
+#   force=true` to publish even if main has not moved).
+#
+# Assets are named `briefing-<target>.tar.gz` (plus sha256 sums) so mise autodetects the
+# right one.
 #
 # RWX's GitHub App token can clone and read releases but cannot create them, so `publish`
 # uses the vault secret BRIEFING_GITHUB_TOKEN: a fine-grained PAT with Contents: read/write on
@@ -18,22 +20,13 @@ on:
   cli:
     init:
       commit-sha: ${{ event.git.sha }}
-      tag: ""
-      kind: daily
-  github:
-    push:
-      if: ${{ event.git.tag != '' }}
-      init:
-        commit-sha: ${{ event.git.sha }}
-        tag: ${{ event.git.tag }}
-        kind: tag
+      force: "false"
   cron:
     - key: daily
       schedule: '0 9 * * *' # 09:00 UTC daily
       init:
         commit-sha: ${{ event.git.sha }}
-        tag: ""
-        kind: daily
+        force: "false"
 
 concurrency-pools:
   - id: JacobHayes/briefing:release
@@ -67,34 +60,29 @@ tasks:
       - mise.toml
       - rust-toolchain.toml
 
-  # Decide the version/tag for this run and whether anything needs publishing.
+  # Decide the tag for this run and whether anything needs publishing.
   - key: plan
     use: [tools]
     cache: false
     env:
-      KIND: ${{ init.kind }}
-      TAG: ${{ init.tag }}
+      FORCE: ${{ init.force }}
       GH_TOKEN: ${{ github.token }}
     run: |
       set -euo pipefail
-      cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
       sha="$(git rev-parse HEAD)"
-      case "$KIND" in
-        tag)
-          version="${TAG#v}"
-          [ "$version" = "$cargo_version" ] || { echo "tag $TAG does not match Cargo.toml version $cargo_version" >&2; exit 1; }
-          release_tag="$TAG"; prerelease=false; publish=true ;;
-        daily)
-          release_tag="v$(date -u +%Y.%-m.%-d)"; prerelease=false; publish=true
-          # Skip when the newest daily release already points at this commit.
-          last="$(gh api repos/JacobHayes/briefing/releases \
-            --jq '[.[] | select(.tag_name | test("^v[0-9]{4}\\.[0-9]{1,2}\\.[0-9]{1,2}$"))][0].target_commitish // ""')"
-          if [ "$last" = "$sha" ]; then echo "main unchanged since last daily release ($sha); nothing to publish"; publish=false; fi ;;
-        *) echo "unknown kind $KIND" >&2; exit 1 ;;
-      esac
-      echo "release_tag=$release_tag prerelease=$prerelease publish=$publish sha=$sha"
+      day="$(date -u +%Y.%-m.%-d)"
+      releases="$(gh api --paginate repos/JacobHayes/briefing/releases --jq '.[] | select(.tag_name | test("^v[0-9]{4}\\.[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]+$")) | [.tag_name, .target_commitish] | @tsv')"
+      publish=true
+      # Skip when the newest release already points at this commit.
+      last="$(printf '%s\n' "$releases" | head -n1 | cut -f2)"
+      if [ "$last" = "$sha" ] && [ "$FORCE" != "true" ]; then
+        echo "main unchanged since the last release ($sha); nothing to publish"; publish=false
+      fi
+      # Next counter for today: one past the highest existing vYYYY.M.D.N.
+      n="$(printf '%s\n' "$releases" | cut -f1 | { grep -E "^v${day//./\\.}\.[0-9]+$" || true; } | sed 's/.*\.//' | sort -n | tail -n1)"
+      release_tag="v${day}.$(( ${n:-0} + 1 ))"
+      echo "release_tag=$release_tag publish=$publish sha=$sha"
       echo "$release_tag" > "$RWX_VALUES/release-tag"
-      echo "$prerelease" > "$RWX_VALUES/prerelease"
       echo "$publish" > "$RWX_VALUES/publish"
       echo "$sha" > "$RWX_VALUES/sha"
 
@@ -130,21 +118,15 @@ tasks:
         value: ${{ secrets.BRIEFING_GITHUB_TOKEN }}
         cache-key: excluded
       RELEASE_TAG: ${{ tasks.plan.values.release-tag }}
-      PRERELEASE: ${{ tasks.plan.values.prerelease }}
       SHA: ${{ tasks.plan.values.sha }}
       ASSETS: ${{ tasks.build.artifacts.dist }}
     run: |
       set -euo pipefail
       files="$(find "$ASSETS" -type f \( -name '*.tar.gz' -o -name '*.sha256' \))"
-      flags=(--repo JacobHayes/briefing --target "$SHA" --title "briefing $RELEASE_TAG")
-      if [ "$PRERELEASE" = "true" ]; then
-        flags+=(--prerelease)
-      fi
-      flags+=(--notes "Build of main at $SHA.")
-      # Same tag already published (a second run today, or a re-run): replace it so the
-      # release and its tag point at this commit.
       if gh release view "$RELEASE_TAG" --repo JacobHayes/briefing >/dev/null 2>&1; then
-        gh release delete "$RELEASE_TAG" --repo JacobHayes/briefing --cleanup-tag --yes
+        echo "$RELEASE_TAG already exists; releases are immutable, re-run to get the next counter" >&2
+        exit 1
       fi
-      gh release create "$RELEASE_TAG" "${flags[@]}" $files
+      gh release create "$RELEASE_TAG" --repo JacobHayes/briefing --target "$SHA" \
+        --title "briefing $RELEASE_TAG" --notes "Build of main at $SHA." $files
       echo "published $RELEASE_TAG"
