@@ -13,8 +13,8 @@
 # Assets are named `briefing-<target>.tar.gz` (plus sha256 sums) so mise autodetects the
 # right one.
 #
-# RWX's GitHub App token can clone and read releases but cannot create them, so `publish`
-# uses the vault secret BRIEFING_GITHUB_TOKEN: a fine-grained PAT with Contents: read/write on
+# Cloning and listing releases need no token (public repo). Creating releases does, so
+# `publish` uses the vault secret BRIEFING_GITHUB_TOKEN: a fine-grained PAT with Contents: read/write on
 # JacobHayes/briefing (`rwx vaults secrets set BRIEFING_GITHUB_TOKEN=...`).
 
 on:
@@ -44,7 +44,6 @@ tasks:
     with:
       repository: https://github.com/JacobHayes/briefing.git
       ref: ${{ init.commit-sha }}
-      github-token: ${{ github.token }}
 
   - key: tools
     use: [code]
@@ -67,12 +66,13 @@ tasks:
     env:
       FORCE: ${{ init.force }}
       SHA: ${{ init.commit-sha }}
-      GH_TOKEN: ${{ github.token }}
     run: |
       set -euo pipefail
       sha="$SHA"
       day="$(date -u +%Y.%m.%d)"
-      releases="$(gh api --paginate repos/JacobHayes/briefing/releases --jq '.[] | select(.tag_name | test("^v[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.[0-9]+$")) | [.tag_name, .target_commitish] | @tsv')"
+      # Public repo: the releases list needs no token.
+      releases="$(curl -fsSL -H 'Accept: application/vnd.github+json' 'https://api.github.com/repos/JacobHayes/briefing/releases?per_page=100' \
+        | jq -r '.[] | select(.tag_name | test("^v[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}\\.[0-9]+$")) | [.tag_name, .target_commitish] | @tsv')"
       publish=true
       # Skip when the newest release already points at this commit.
       last="$(printf '%s\n' "$releases" | head -n1 | cut -f2)"

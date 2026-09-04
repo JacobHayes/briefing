@@ -26,7 +26,6 @@ tasks:
     with:
       repository: https://github.com/JacobHayes/briefing.git
       ref: ${{ init.commit-sha }}
-      github-token: ${{ github.token }}
 
   # Rust + mise tools (node for the asset embed, zig + cargo-zigbuild for cross builds).
   - key: tools
