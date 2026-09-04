@@ -3,7 +3,7 @@
 ## Install
 
 ```sh
-cargo install --git https://github.com/JacobHayes/briefing --locked   # or: mise run install
+mise use -g github:JacobHayes/briefing@latest   # or: cargo install --git https://github.com/JacobHayes/briefing --locked
 claude mcp add --scope user briefing -- briefing mcp
 mkdir -p ~/.claude/skills && ln -s "$(pwd)/skills/briefing" ~/.claude/skills/briefing
 ```

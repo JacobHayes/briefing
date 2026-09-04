@@ -40,18 +40,20 @@ type CliResult = { status: "completed" | "cancelled" | "pending"; briefingId: st
 
 type Active = { child: ChildProcess; url?: string };
 
-async function loadSchema(): Promise<any> {
-  const text = await new Promise<string>((resolve, reject) => {
-    const child = spawn(BINARY, ["schema"], { stdio: ["ignore", "pipe", "pipe"] });
+/** Run the CLI and return its stdout; rejects with stderr on a non-zero exit. */
+function runCapture(args: string[]): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(BINARY, args, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
     child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(err || `briefing schema exited ${code}`))));
+    child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(err || `briefing ${args[0]} exited ${code}`))));
   });
-  return JSON.parse(text);
 }
+
+const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 function summary(feedback: Feedback): string {
   const decisions = feedback.decisions.filter((d) => d.selected || d.note).length;
@@ -126,9 +128,9 @@ export default function briefingExtension(pi: ExtensionAPI) {
     if (ctx.mode !== "tui") return;
     let schema: any;
     try {
-      schema = await loadSchema();
+      schema = JSON.parse(await runCapture(["schema"]));
     } catch (error) {
-      ctx.ui.notify(`briefing binary unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      ctx.ui.notify(`briefing binary unavailable: ${describe(error)}`, "warning");
       return;
     }
 
@@ -143,7 +145,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
         "Finish the research first, then call brief_user once with 3-8 semantic chunks in dependency order, 3-5 keyPoints each, stable context in tray, and 2-4 distinct decision options with the recommended one first and marked.",
         "Every prose field accepts Markdown: GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, and ```vega-lite fences for charts; use them only when they clarify.",
         "brief_user shows the link in Pi's UI and blocks until the user submits; respond only to the returned feedback and do not repeat the presentation.",
-        "Briefings survive restarts for a few hours; if the user gives you a briefing id from an interrupted session, tell them to run /brief-result <id> to recover it.",
+        "Briefings outlive the Pi session (unanswered ones for two weeks, results for 6 hours); if the user gives you a briefing id from an interrupted session, tell them to run /brief-result <id> to recover it.",
       ],
       executionMode: "sequential",
       parameters: schema,
@@ -206,54 +208,39 @@ export default function briefingExtension(pi: ExtensionAPI) {
     },
   });
 
+  /** Run a briefing outside a tool call and hand its feedback to Pi as a user message. */
+  async function briefToMessage(args: string[], label: string, preface: string, ctx: ExtensionContext) {
+    if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
+    try {
+      const result = await run(args, undefined, ctx);
+      if (result.status === "completed" && result.result && !result.result.cancelled) {
+        pi.sendUserMessage(`${preface}\n\n${JSON.stringify(result.result, null, 2)}`);
+      } else {
+        ctx.ui.notify(`${label} ${result.status}`, "info");
+      }
+    } catch (error) {
+      ctx.ui.notify(describe(error), "error");
+    }
+  }
+
   pi.registerCommand("brief-demo", {
     description: "Open the bundled briefing demo; feedback is sent to Pi as a message",
-    handler: async (_args, ctx) => {
-      if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
-      try {
-        const result = await run(["demo", "--json"], undefined, ctx);
-        if (result.status === "completed" && result.result) {
-          pi.sendUserMessage(`I just reviewed the briefing demo. Here is my structured feedback from it:\n\n${JSON.stringify(result.result, null, 2)}`);
-        } else {
-          ctx.ui.notify(`Briefing demo ${result.status}`, "info");
-        }
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      }
-    },
+    handler: (_args, ctx) => briefToMessage(["demo", "--json"], "Briefing demo", "I just reviewed the briefing demo. Here is my structured feedback from it:", ctx),
   });
 
   pi.registerCommand("brief-result", {
     description: "Recover a briefing by id: fetch its stored feedback, or reopen it with a fresh link",
     handler: async (args, ctx) => {
-      if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
       const id = args.trim();
       if (!id) return ctx.ui.notify("Usage: /brief-result <briefingId>", "warning");
-      try {
-        const result = await run(["await", id, "--json"], undefined, ctx);
-        if (result.status === "completed" && result.result && !result.result.cancelled) {
-          pi.sendUserMessage(`Here is my feedback from briefing ${id} (recovered after the earlier session was interrupted); respond to it:\n\n${JSON.stringify(result.result, null, 2)}`);
-        } else {
-          ctx.ui.notify(`Briefing ${id} ${result.status}`, "info");
-        }
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      }
+      return briefToMessage(["await", id, "--json"], `Briefing ${id}`, `Here is my feedback from briefing ${id} (recovered after the earlier session was interrupted); respond to it:`, ctx);
     },
   });
 
   pi.registerCommand("brief-status", {
     description: "List known briefings (waiting, completed, cancelled)",
     handler: async (_args, ctx) => {
-      const text = await new Promise<string>((resolve, reject) => {
-        const child = spawn(BINARY, ["status"], { stdio: ["ignore", "pipe", "pipe"] });
-        let out = "";
-        let err = "";
-        child.stdout.on("data", (d) => (out += d));
-        child.stderr.on("data", (d) => (err += d));
-        child.on("error", reject);
-        child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(err || `briefing status exited ${code}`))));
-      }).catch((error) => `error: ${error instanceof Error ? error.message : String(error)}`);
+      const text = await runCapture(["status"]).catch((error) => `error: ${describe(error)}`);
       ctx.ui.notify(text.trim() || "no briefings", "info");
     },
   });

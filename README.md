@@ -201,7 +201,7 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
 
 ```sh
 mise run check       # fmt --check, clippy -D warnings, tests
-mise run install     # cargo install --path .
+mise use -g github:JacobHayes/briefing@latest   # or: cargo install --path . --locked
 mise run assets:update
 cargo zigbuild --release --target aarch64-apple-darwin   # any release target, from Linux
 ```
