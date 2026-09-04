@@ -203,7 +203,7 @@ pub struct HubConfig {
 
 impl HubConfig {
     pub const FINISHED_TTL: Duration = Duration::from_secs(6 * 60 * 60);
-    pub const ACTIVE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+    pub const ACTIVE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
     /// Default TTLs plus the default on-disk store.
     pub fn with_default_store() -> Self {

@@ -118,7 +118,7 @@ pub struct Tray {
     pub open_questions: Option<Vec<String>>,
 }
 
-/// A paced browser briefing: semantic chunks in dependency order, optional context panel, and decisions.
+/// A paced browser briefing: semantic chunks in dependency order, optional context panel, and decisions. Every prose field accepts Markdown (GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, ```vega-lite fences for charts); use them only when they clarify.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Briefing {

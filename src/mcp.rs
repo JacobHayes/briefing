@@ -50,7 +50,7 @@ Use brief_user proactively whenever an answer crosses a complexity threshold: su
 
 Results are returned as structuredContent. brief_user returns immediately with the briefing link and a briefingId; put that exact link in your reply so the user can open it (they may be on a different machine from the agent), then call await_briefing with the briefingId; it blocks until they submit and returns their feedback. If await_briefing returns status \"pending\", call it again. If your harness moves the call to the background, stop and wait for its completion notification; do not poll. After the feedback arrives, respond only to it; do not repeat the presentation as a chat message.
 
-Briefings outlive the process that created them for several hours. If a session was interrupted, or the user gives you a briefingId, call await_briefing with it: it returns the stored feedback if they already submitted, or reopens the briefing (status \"reopened\" with a fresh link to relay) if not.";
+Briefings outlive the process that created them (unanswered ones for two weeks, results for 6 h). If a session was interrupted, or the user gives you a briefingId, call await_briefing with it: it returns the stored feedback if they already submitted, or reopens the briefing (status \"reopened\" with a fresh link to relay) if not.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

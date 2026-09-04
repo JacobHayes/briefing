@@ -132,7 +132,7 @@ result. Nothing depends on the process that created it staying alive:
   revision; the page adopts a newer draft on focus) and cached in localStorage, so opening the
   same link elsewhere continues where you left off.
 
-Unanswered briefings expire after 24 h. There is no feedback history: one result per briefing.
+Unanswered briefings expire after 14 days. There is no feedback history: one result per briefing.
 
 ## Hub mode (optional)
 
@@ -149,7 +149,7 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
   progress) and recent results, the agent API (`/agent/briefings`), and with `--mcp` a
   streamable-HTTP MCP endpoint at `/mcp`. There is no authentication: the tailnet is the
   perimeter, and each briefing URL still carries its own capability token.
-- `--finished-ttl 6h` / `--active-ttl 24h` tune retention; the embedded server uses the same
+- `--finished-ttl 6h` / `--active-ttl 14d` tune retention; the embedded server uses the same
   defaults.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
 - `--on-create` runs a shell command with `BRIEFING_URL/ID/TITLE` so a remote session
@@ -164,7 +164,7 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
 - `Host` must match the bound origin on every request; `Origin` must match on browser POSTs.
 - Strict CSP with a per-page nonce; renderer libraries are served from the binary.
 - Presentation and feedback sizes are capped. Records are written to the user's state
-  directory with owner-only permissions and deleted 6 h after finishing (24 h if never
+  directory with owner-only permissions and deleted 6 h after finishing (14 days if never
   answered).
 - No authentication on the hub's agent API or dashboard: run it on a private network.
 

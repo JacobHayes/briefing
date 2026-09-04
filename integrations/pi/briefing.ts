@@ -141,6 +141,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       promptGuidelines: [
         "Proactively use brief_user whenever an answer crosses a complexity threshold (substantial research, multi-part explanations, decisions that need context). Use normal concise responses for simple answers.",
         "Finish the research first, then call brief_user once with 3-8 semantic chunks in dependency order, 3-5 keyPoints each, stable context in tray, and 2-4 distinct decision options with the recommended one first and marked.",
+        "Every prose field accepts Markdown: GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, and ```vega-lite fences for charts; use them only when they clarify.",
         "brief_user shows the link in Pi's UI and blocks until the user submits; respond only to the returned feedback and do not repeat the presentation.",
         "Briefings survive restarts for a few hours; if the user gives you a briefing id from an interrupted session, tell them to run /brief-result <id> to recover it.",
       ],

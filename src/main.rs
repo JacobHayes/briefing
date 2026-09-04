@@ -102,7 +102,7 @@ enum Command {
         #[arg(long, env = "BRIEFING_FINISHED_TTL", default_value = "6h", value_parser = parse_duration)]
         finished_ttl: Duration,
         /// How long unanswered briefings stay open.
-        #[arg(long, env = "BRIEFING_ACTIVE_TTL", default_value = "24h", value_parser = parse_duration)]
+        #[arg(long, env = "BRIEFING_ACTIVE_TTL", default_value = "14d", value_parser = parse_duration)]
         active_ttl: Duration,
         /// Also serve MCP (streamable HTTP) at /mcp.
         #[arg(long)]
