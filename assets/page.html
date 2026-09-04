@@ -274,6 +274,7 @@
     const MARGIN_RAIL_WIDTH = 300;
     const MARGIN_RAIL_GAP = 28;
     const MARGIN_RAIL_MIN_USABLE = 150;
+    const TOUCH_CALLOUT_CLEARANCE = 60;
     const DELETE_ARM_MS = 5000;
     const errorMessage = error => errorMessage(error);
 
@@ -1035,6 +1036,32 @@
       requestAnimationFrame(() => clampBelowAbove(node, rect));
     }
 
+    // Touch browsers draw their own selection callout (Copy / Look Up / ...)
+    // right where clampBelowAbove would put the Comment action. iOS 26 Safari
+    // puts the callout on the side of the selection with more room: below it
+    // in the upper half of the viewport, above it in the lower half, in a band
+    // roughly TOUCH_CALLOUT_CLEARANCE tall under the selection. Keep the
+    // action below the selection (never above, where the callout and the
+    // start handle live) and clear the callout's band when it is expected
+    // below. Mouse selection keeps the tight below/above placement.
+    const coarsePointer = window.matchMedia("(pointer: coarse)");
+    function positionCommentButton(rect, bounds) {
+      if (!coarsePointer.matches) { positionOverlay(commentButton, rect); return; }
+      commentButton.style.left = "0px";
+      commentButton.style.top = "0px";
+      requestAnimationFrame(() => {
+        const margin = 8;
+        const w = commentButton.offsetWidth;
+        const h = commentButton.offsetHeight;
+        const calloutBelow = bounds.top + bounds.bottom < window.innerHeight;
+        let top = rect.bottom + margin + (calloutBelow ? TOUCH_CALLOUT_CLEARANCE : 0);
+        if (top + h > window.innerHeight - margin) top = rect.bottom + margin;
+        top = Math.max(margin, Math.min(top, window.innerHeight - h - margin));
+        commentButton.style.left = Math.max(margin, Math.min(rect.left, window.innerWidth - w - margin)) + "px";
+        commentButton.style.top = top + "px";
+      });
+    }
+
     // Saved comments become true book-like margin notes when the viewport can
     // hold the content column, gap, and a useful rail. The note is anchored to
     // the column edge rather than the selected words, so it never covers reading
@@ -1125,7 +1152,7 @@
       // action so it can never sit above the add-comment affordance.
       hidePopover();
       commentButton.hidden = false;
-      positionOverlay(commentButton, rect);
+      positionCommentButton(rect, range.getBoundingClientRect());
     }
 
     function addAnnotation(sel, comment) {
