@@ -21,8 +21,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::assets;
+use crate::backend::Site;
 use crate::content::{self, Briefing};
-use crate::hub::{BriefingInfo, DraftSave, Hub, HubError, Provenance, WaitOutcome, random_token};
+use crate::hub::{DraftSave, HubError, random_token};
+use crate::response::BriefingOutcome;
 
 /// Browser submission cap: 500 annotations of 2 KB quote + 4 KB comment plus notes fits well inside.
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
@@ -30,6 +32,7 @@ pub const MAX_AGENT_REQUEST_BYTES: usize = content::MAX_PRESENTATION_BYTES + 64 
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone)]
 pub struct HttpConfig {
     /// Origin used to build briefing URLs, e.g. `http://127.0.0.1:41234` or `https://briefings.example`.
     pub public_origin: String,
@@ -37,9 +40,6 @@ pub struct HttpConfig {
     pub allowed_hosts: Vec<String>,
     /// Serve the dashboard at `/` and the agent API under `/agent/*` (hub mode).
     pub agent_api: bool,
-    /// Shell command run when a briefing is created; receives `BRIEFING_URL`, `BRIEFING_ID`,
-    /// `BRIEFING_TITLE`.
-    pub on_create: Option<String>,
 }
 
 /// `host` or `host:port` as it appears in a Host header, for a parsed URL.
@@ -52,6 +52,19 @@ pub fn host_with_port(url: &url::Url) -> Option<String> {
 }
 
 impl HttpConfig {
+    /// Accept the host we bind on and, when `public_origin` names another host (a reverse
+    /// proxy), that one too.
+    pub fn new(public_origin: String, bind_host: &str, agent_api: bool) -> Self {
+        let mut allowed_hosts = vec![bind_host.to_string()];
+        if let Ok(url) = url::Url::parse(&public_origin)
+            && url.host_str().is_some_and(|host| !host.eq_ignore_ascii_case(bind_host))
+            && let Some(host) = host_with_port(&url)
+        {
+            allowed_hosts.push(host);
+        }
+        Self { public_origin, allowed_hosts, agent_api }
+    }
+
     pub fn host_allowed(&self, host: &str) -> bool {
         let host = host.trim();
         let bare = host
@@ -78,11 +91,7 @@ impl HttpConfig {
     }
 }
 
-#[derive(Clone)]
-pub struct AppState {
-    pub hub: Arc<Hub>,
-    pub config: Arc<HttpConfig>,
-}
+type AppState = Arc<Site>;
 
 fn text(status: StatusCode, body: &'static str) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store"), (header::X_CONTENT_TYPE_OPTIONS, "nosniff")], body).into_response()
@@ -247,76 +256,25 @@ pub struct CreateRequest {
     pub source: Option<String>,
 }
 
-fn run_on_create_hook(command: &str, url: &str, id: &str, title: &str) {
-    let command = command.to_string();
-    let (url, id, title) = (url.to_string(), id.to_string(), title.to_string());
-    tokio::spawn(async move {
-        let result = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .env("BRIEFING_URL", url)
-            .env("BRIEFING_ID", id)
-            .env("BRIEFING_TITLE", title)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await;
-        match result {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                tracing::warn!(status = %output.status, stderr = %String::from_utf8_lossy(&output.stderr), "on-create hook failed")
-            }
-            Err(error) => tracing::warn!(%error, "on-create hook could not start"),
+async fn agent_create(State(site): State<AppState>, Json(body): Json<CreateRequest>) -> Response {
+    match site.create(body.presentation, body.source).await {
+        Ok(created) => json_response(StatusCode::CREATED, json!({"id": created.id, "url": created.url})),
+        Err(error) if error.is::<content::ValidationError>() => {
+            json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()}))
         }
-    });
-}
-
-/// Register a presentation and return `{ id, url }`. Shared by the HTTP agent API and
-/// the in-process backends.
-pub fn create_briefing(
-    state: &AppState,
-    input: Briefing,
-    source: Option<String>,
-) -> Result<(String, String), content::ValidationError> {
-    let validated = content::validate(&input)?;
-    let title = validated.title.clone();
-    let created = state.hub.create(validated, source);
-    let url = state.config.briefing_url(&created.token);
-    state.hub.set_url(&created.id, &url);
-    if let Some(hook) = &state.config.on_create {
-        run_on_create_hook(hook, &url, &created.id, &title);
-    }
-    Ok((created.id, url))
-}
-
-/// URL at which this server serves briefing `id` (its origin plus the record's token).
-pub fn url_for(state: &AppState, id: &str) -> Option<String> {
-    let token = state.hub.token_for(id)?;
-    Some(state.config.briefing_url(&token))
-}
-
-/// Point every record this server holds at this server's link.
-pub fn with_live_urls(state: &AppState, infos: &mut [BriefingInfo]) {
-    for info in infos.iter_mut().filter(|info| info.provenance != Provenance::DiskOnly) {
-        info.url = url_for(state, &info.id);
+        Err(error) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": error.to_string()})),
     }
 }
 
-async fn agent_create(State(state): State<AppState>, Json(body): Json<CreateRequest>) -> Response {
-    match create_briefing(&state, body.presentation, body.source) {
-        Ok((id, url)) => json_response(StatusCode::CREATED, json!({"id": id, "url": url})),
-        Err(error) => json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()})),
-    }
-}
-
-async fn agent_list(State(state): State<AppState>) -> Response {
-    let mut briefings = state.hub.list();
-    with_live_urls(&state, &mut briefings);
+async fn agent_list(State(site): State<AppState>) -> Response {
+    let mut briefings = site.hub.list();
+    site.with_live_urls(&mut briefings);
     json_response(StatusCode::OK, json!({"briefings": briefings}))
 }
 
-async fn agent_info(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response, HubError> {
-    let mut info = state.hub.info(&id).ok_or(HubError::NotFound)?;
-    info.url = url_for(&state, &id);
+async fn agent_info(State(site): State<AppState>, Path(id): Path<String>) -> Result<Response, HubError> {
+    let mut info = site.hub.info(&id).ok_or(HubError::NotFound)?;
+    info.url = site.url_for(&id);
     Ok(json_response(StatusCode::OK, serde_json::to_value(info).unwrap_or_default()))
 }
 
@@ -330,17 +288,15 @@ pub fn clamp_wait(requested: Option<u64>) -> Duration {
     requested.map(Duration::from_secs).unwrap_or(DEFAULT_WAIT).min(MAX_WAIT)
 }
 
+/// `GET /agent/briefings/{id}/wait`: a [`BriefingOutcome`], `pending` once the timeout passes.
 async fn agent_wait(
-    State(state): State<AppState>,
+    State(site): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<WaitQuery>,
 ) -> Result<Response, HubError> {
-    Ok(match state.hub.wait(&id, clamp_wait(query.timeout_secs)).await? {
-        WaitOutcome::Pending => json_response(StatusCode::OK, json!({"status": "pending"})),
-        WaitOutcome::Done(result) => {
-            json_response(StatusCode::OK, json!({"status": result.status(), "result": result}))
-        }
-    })
+    let outcome = site.hub.wait(&id, clamp_wait(query.timeout_secs)).await?;
+    let body = serde_json::to_value(BriefingOutcome { briefing_id: id, outcome }).unwrap_or_default();
+    Ok(json_response(StatusCode::OK, body))
 }
 
 async fn agent_cancel(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response, HubError> {
@@ -350,7 +306,8 @@ async fn agent_cancel(State(state): State<AppState>, Path(id): Path<String>) -> 
 
 /// Build the router. `mcp` is an optional router (e.g. one that nests an MCP service at
 /// `/mcp`); it is only mounted when the agent API is enabled.
-pub fn router(state: AppState, mcp: Option<Router<AppState>>) -> Router {
+pub fn router(site: Arc<Site>, mcp: Option<Router<Arc<Site>>>) -> Router {
+    let state = site;
     let mut app = Router::new()
         .route("/healthz", get(healthz))
         .route(&format!("{}{{name}}", assets::ASSET_PREFIX), get(asset))
@@ -426,7 +383,6 @@ mod tests {
             public_origin: "http://127.0.0.1:4000".into(),
             allowed_hosts: vec!["127.0.0.1".into(), "briefings.example".into()],
             agent_api: false,
-            on_create: None,
         }
     }
 
@@ -447,5 +403,15 @@ mod tests {
         assert_eq!(origin_for("fd7a::1", 8), "http://[fd7a::1]:8");
         assert_eq!(clamp_wait(Some(10_000)), MAX_WAIT);
         assert_eq!(clamp_wait(None), DEFAULT_WAIT);
+    }
+
+    #[test]
+    fn allowed_hosts_follow_the_public_origin() {
+        let plain = HttpConfig::new("http://127.0.0.1:4000".into(), "127.0.0.1", false);
+        assert_eq!(plain.allowed_hosts, vec!["127.0.0.1".to_string()]);
+        let proxied = HttpConfig::new("https://briefings.example".into(), "100.64.0.1", true);
+        assert_eq!(proxied.allowed_hosts, vec!["100.64.0.1".to_string(), "briefings.example".to_string()]);
+        assert!(proxied.host_allowed("briefings.example"));
+        assert!(proxied.origin_allowed("https://briefings.example"));
     }
 }

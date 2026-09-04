@@ -152,8 +152,16 @@ briefing await <briefingId>        # recover one: re-serve it if still open, pri
 ```
 
 `present` prints the URL (and bind diagnostics) on stderr, or JSON events with `--json`, and
-the result on stdout. Exit codes: 0 completed, 2 cancelled, 3 still pending after
-`--wait-seconds`, 130 interrupted.
+the result on stdout. With `--json` the result is one line, the same `status` shape the MCP
+tool and the hub API return:
+
+```jsonc
+{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "completed", "feedback": { "chunks": [], "decisions": [], "annotations": [], "overallNote": "..." } }
+{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "cancelled", "feedback": { "..." : "..." } }
+{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "pending" }
+```
+
+Exit codes: 0 completed, 2 cancelled, 3 still pending after `--wait-seconds`, 130 interrupted.
 
 | Flag / env | Meaning |
 |---|---|
@@ -183,7 +191,12 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
   defaults.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
 - `--on-create` runs a shell command with `BRIEFING_URL/ID/TITLE` so a remote session
-  can push the URL to your phone (the hub cannot open your browser).
+  can push the URL to your phone (the hub cannot open your browser); `--open` opens each new
+  briefing in the hub machine's own browser instead. Both apply however the briefing was
+  created: the agent API, `/mcp`, or a CLI pointed at the hub.
+- `GET /agent/briefings/{id}/wait?timeout_secs=N` answers with the same
+  `{ "briefingId", "status": "completed" | "cancelled" | "pending", "feedback"? }` shape as
+  the CLI's `--json` output.
 - Clients either point the stdio server at it (`briefing mcp --hub URL`) or connect to
   `/mcp` directly. `briefing --hub URL await|cancel|status` work against a hub.
 

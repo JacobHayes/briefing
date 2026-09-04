@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::content::Briefing;
-use crate::response::{BriefingResponse, parse_browser_result};
+use crate::response::{BriefingResponse, Outcome, parse_browser_result};
 use crate::store::{Store, StoredRecord, now_secs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,17 +46,24 @@ impl fmt::Display for BriefingStatus {
     }
 }
 
-impl BriefingResponse {
-    /// The status a finished briefing carries for this result.
+impl Outcome {
+    /// The record status behind this outcome.
     pub fn status(&self) -> BriefingStatus {
-        if self.cancelled { BriefingStatus::Cancelled } else { BriefingStatus::Completed }
+        match self {
+            Outcome::Pending => BriefingStatus::Active,
+            Outcome::Completed { .. } => BriefingStatus::Completed,
+            Outcome::Cancelled { .. } => BriefingStatus::Cancelled,
+        }
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WaitOutcome {
-    Pending,
-    Done(BriefingResponse),
+    fn of(status: BriefingStatus, result: Option<BriefingResponse>) -> Self {
+        let feedback = result.unwrap_or_default();
+        match status {
+            BriefingStatus::Active => Outcome::Pending,
+            BriefingStatus::Completed => Outcome::Completed { feedback },
+            BriefingStatus::Cancelled => Outcome::Cancelled { feedback },
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -341,8 +348,7 @@ impl Hub {
         if let Some(stored) = store.load(id)
             && stored.status != BriefingStatus::Active
         {
-            let result = stored.result.unwrap_or_else(BriefingResponse::cancelled);
-            let _ = self.finish(id, result, stored.status);
+            let _ = self.finish(id, stored.result.unwrap_or_default(), stored.status);
         }
     }
 
@@ -417,15 +423,14 @@ impl Hub {
     /// Browser submission (`complete` or `cancel`) for the presentation behind `token`.
     pub fn submit_by_token(&self, token: &str, body: &Value, cancelled: bool) -> Result<(), HubError> {
         let id = self.id_for_token(token).ok_or(HubError::NotFound)?;
-        let result = parse_browser_result(body, cancelled);
-        let status = result.status();
-        self.finish(&id, result, status)
+        let status = if cancelled { BriefingStatus::Cancelled } else { BriefingStatus::Completed };
+        self.finish(&id, parse_browser_result(body), status)
     }
 
     /// Agent-side cancellation. Returns false when the briefing was not active.
     pub fn cancel(&self, id: &str) -> bool {
         self.ensure_loaded(id);
-        self.finish(id, BriefingResponse::cancelled(), BriefingStatus::Cancelled).is_ok()
+        self.finish(id, BriefingResponse::default(), BriefingStatus::Cancelled).is_ok()
     }
 
     pub fn status(&self, id: &str) -> Option<BriefingStatus> {
@@ -459,33 +464,30 @@ impl Hub {
         self.records.lock().unwrap().get(id).map(|r| r.stored.token.clone())
     }
 
-    fn snapshot(&self, id: &str) -> Result<(watch::Receiver<BriefingStatus>, Option<BriefingResponse>), HubError> {
+    fn snapshot(&self, id: &str) -> Result<(watch::Receiver<BriefingStatus>, Outcome), HubError> {
         let records = self.records.lock().unwrap();
         let record = records.get(id).ok_or(HubError::NotFound)?;
-        Ok((record.status.subscribe(), record.stored.result.clone()))
+        Ok((record.status.subscribe(), Outcome::of(record.stored.status, record.stored.result.clone())))
     }
 
     /// Wait up to `timeout` for the briefing to finish. Periodically re-reads the on-disk
     /// record so a submission served by another process is picked up too.
-    pub async fn wait(&self, id: &str, timeout: Duration) -> Result<WaitOutcome, HubError> {
+    pub async fn wait(&self, id: &str, timeout: Duration) -> Result<Outcome, HubError> {
         self.ensure_loaded(id);
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             self.reconcile(id);
-            let (mut rx, result) = self.snapshot(id)?;
-            if *rx.borrow() != BriefingStatus::Active {
-                return Ok(WaitOutcome::Done(result.unwrap_or_default()));
+            let (mut rx, outcome) = self.snapshot(id)?;
+            if outcome != Outcome::Pending {
+                return Ok(outcome);
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Ok(WaitOutcome::Pending);
+                return Ok(Outcome::Pending);
             }
             let slice = if self.config.store.is_some() { remaining.min(RECONCILE_EVERY) } else { remaining };
             match tokio::time::timeout(slice, rx.wait_for(|s| *s != BriefingStatus::Active)).await {
-                Ok(Ok(_)) => {
-                    let (_, result) = self.snapshot(id)?;
-                    return Ok(WaitOutcome::Done(result.unwrap_or_default()));
-                }
+                Ok(Ok(_)) => return Ok(self.snapshot(id)?.1),
                 Ok(Err(_)) => return Err(HubError::NotFound),
                 Err(_) => continue,
             }
@@ -536,11 +538,11 @@ mod tests {
         assert_eq!(page["draft"], Value::Null);
         assert!(hub.page_payload("nope").is_none());
 
-        assert_eq!(hub.wait(&created.id, Duration::from_millis(20)).await, Ok(WaitOutcome::Pending));
+        assert_eq!(hub.wait(&created.id, Duration::from_millis(20)).await, Ok(Outcome::Pending));
 
         hub.submit_by_token(&created.token, &json!({"overallNote": "great"}), false).unwrap();
         match hub.wait(&created.id, Duration::from_secs(1)).await.unwrap() {
-            WaitOutcome::Done(result) => assert_eq!(result.overall_note, "great"),
+            Outcome::Completed { feedback } => assert_eq!(feedback.overall_note, "great"),
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(
@@ -587,10 +589,7 @@ mod tests {
         };
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(hub.cancel(&created.id));
-        match waiter.await.unwrap().unwrap() {
-            WaitOutcome::Done(result) => assert!(result.cancelled),
-            other => panic!("unexpected {other:?}"),
-        }
+        assert_eq!(waiter.await.unwrap().unwrap(), Outcome::cancelled());
         assert_eq!(hub.page_payload(&created.token).unwrap()["status"], "cancelled");
     }
 
@@ -628,14 +627,14 @@ mod tests {
         let c = Hub::new(config());
         c.submit_by_token(&created.token, &json!({"overallNote": "done"}), false).unwrap();
         match b.wait(&created.id, Duration::from_secs(1)).await.unwrap() {
-            WaitOutcome::Done(result) => assert_eq!(result.overall_note, "done"),
+            Outcome::Completed { feedback } => assert_eq!(feedback.overall_note, "done"),
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(b.status(&created.id), Some(BriefingStatus::Completed));
 
         // A brand-new process can fetch the result with no live record at all.
         let d = Hub::new(config());
-        assert!(matches!(d.wait(&created.id, Duration::from_millis(1)).await, Ok(WaitOutcome::Done(_))));
+        assert!(matches!(d.wait(&created.id, Duration::from_millis(1)).await, Ok(Outcome::Completed { .. })));
         let listed = d.list();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].provenance, Provenance::Live);

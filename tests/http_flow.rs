@@ -4,17 +4,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use briefing::backend::{BindMode, LocalBackend};
+use briefing::backend::{BindMode, LocalBackend, Site, SiteOptions};
 use briefing::content::demo;
-use briefing::http::{self, AppState, HttpConfig};
-use briefing::hub::{Hub, HubConfig, Provenance, WaitOutcome};
+use briefing::hub::{Hub, HubConfig, Provenance};
+use briefing::response::Outcome;
 use briefing::store::Store;
+use briefing::tailscale::BindTarget;
 use serde_json::{Value, json};
+
+fn local(config: HubConfig) -> LocalBackend {
+    LocalBackend::new(BindMode::Local, SiteOptions::default(), config)
+}
 
 #[tokio::test]
 async fn embedded_server_roundtrip() {
     briefing::tls::init();
-    let backend = LocalBackend::new(BindMode::Local, false, None, HubConfig::default());
+    let backend = local(HubConfig::default());
     let created = backend.create(demo(), Some("test".into())).await.unwrap();
     assert_eq!(backend.info(&created.id).await.unwrap().unwrap().provenance, Provenance::Live, "created here");
     assert!(created.url.starts_with("http://127.0.0.1:"));
@@ -107,16 +112,17 @@ async fn embedded_server_roundtrip() {
         .await
         .unwrap();
     assert_eq!(ok.status(), 200);
-    match waiter.await.unwrap() {
-        WaitOutcome::Done(result) => {
-            assert!(!result.cancelled);
-            assert_eq!(result.overall_note, "ship it");
-            assert_eq!(result.annotations.len(), 1);
-            let text = result.format_text();
-            assert!(text.contains("Decision - How should briefing be triggered by default?: Always proactive"));
+    let outcome = waiter.await.unwrap();
+    match &outcome {
+        Outcome::Completed { feedback } => {
+            assert_eq!(feedback.overall_note, "ship it");
+            assert_eq!(feedback.annotations.len(), 1);
         }
         other => panic!("unexpected {other:?}"),
     }
+    assert!(
+        outcome.format_text().contains("Decision - How should briefing be triggered by default?: Always proactive")
+    );
     // Second submission conflicts; the page now reports completed.
     let again = client
         .post(format!("{origin}/api/{token}/complete"))
@@ -143,7 +149,7 @@ async fn briefing_recovered_by_another_process() {
     let config = || HubConfig { store: Some(Store::open(dir.path()).unwrap()), ..HubConfig::default() };
     let client = reqwest::Client::new();
 
-    let first = LocalBackend::new(BindMode::Local, false, None, config());
+    let first = local(config());
     let created = first.create(demo(), Some("first".into())).await.unwrap();
     let (origin1, token) = created.url.rsplit_once("/briefing/").unwrap();
     let draft = json!({"current": 1, "state": {"chunks": {}, "decisions": {}, "annotations": [], "overallNote": ""}, "updatedAt": 7});
@@ -158,14 +164,14 @@ async fn briefing_recovered_by_another_process() {
     first.shutdown().await;
 
     // Nothing running: status still lists it from disk, without a live URL.
-    let idle = LocalBackend::new(BindMode::Local, false, None, config());
+    let idle = local(config());
     let listed = idle.list();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].provenance, Provenance::DiskOnly);
     assert_eq!(listed[0].source.as_deref(), Some("first"));
 
     // Second process adopts it on `info`, starts serving it, and the page carries the draft.
-    let second = LocalBackend::new(BindMode::Local, false, None, config());
+    let second = local(config());
     let info = second.info(&created.id).await.unwrap().unwrap();
     assert_eq!(info.provenance, Provenance::Reopened, "first serve at a new link");
     let url2 = info.url.clone().unwrap();
@@ -179,7 +185,7 @@ async fn briefing_recovered_by_another_process() {
     assert_eq!(page["draftRevision"], 1);
 
     // Third process waits; the browser submits to the second; the third sees it via disk.
-    let third = LocalBackend::new(BindMode::Local, false, None, config());
+    let third = local(config());
     let waiter = {
         let hub = third.hub().clone();
         let id = created.id.clone();
@@ -194,33 +200,36 @@ async fn briefing_recovered_by_another_process() {
         .unwrap();
     assert_eq!(ok.status(), 200);
     match waiter.await.unwrap() {
-        WaitOutcome::Done(result) => assert_eq!(result.overall_note, "recovered"),
+        Outcome::Completed { feedback } => assert_eq!(feedback.overall_note, "recovered"),
         other => panic!("unexpected {other:?}"),
     }
     // And a fourth, brand-new process gets the stored result immediately, no server needed.
-    let fourth = LocalBackend::new(BindMode::Local, false, None, config());
+    let fourth = local(config());
     let info = fourth.info(&created.id).await.unwrap().unwrap();
     assert_eq!(info.status, briefing::hub::BriefingStatus::Completed);
-    assert!(matches!(fourth.hub().wait(&created.id, Duration::from_millis(1)).await.unwrap(), WaitOutcome::Done(_)));
+    assert!(matches!(
+        fourth.hub().wait(&created.id, Duration::from_millis(1)).await.unwrap(),
+        Outcome::Completed { .. }
+    ));
     second.shutdown().await;
 }
 
+/// The hub agent API creates briefings through the same path as the CLI and MCP, so the
+/// on-create hook runs for it too.
 #[tokio::test]
 async fn hub_agent_api_and_dashboard() {
     briefing::tls::init();
-    let listener = http::bind("127.0.0.1", 0).await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let origin = format!("http://127.0.0.1:{port}");
-    let state = AppState {
-        hub: Arc::new(Hub::new(HubConfig::default())),
-        config: Arc::new(HttpConfig {
-            public_origin: origin.clone(),
-            allowed_hosts: vec!["127.0.0.1".into()],
-            agent_api: true,
-            on_create: None,
-        }),
+    let hook_dir = tempfile::tempdir().unwrap();
+    let hook_file = hook_dir.path().join("hook.txt");
+    let options = SiteOptions {
+        agent_api: true,
+        on_create: Some(format!("echo \"$BRIEFING_ID $BRIEFING_URL $BRIEFING_TITLE\" > {}", hook_file.display())),
+        ..SiteOptions::default()
     };
-    let running = http::serve_listener(http::router(state, None), listener).unwrap();
+    let hub = Arc::new(Hub::new(HubConfig::default()));
+    let (site, running) = Site::start(hub, BindTarget::local(None), 0, options, |_| None).await.unwrap();
+    let origin = site.config.public_origin.clone();
+    assert_eq!(origin, format!("http://127.0.0.1:{}", running.local_addr.port()));
     let client = reqwest::Client::new();
 
     let dashboard = client.get(format!("{origin}/")).send().await.unwrap();
@@ -257,6 +266,16 @@ async fn hub_agent_api_and_dashboard() {
     assert_eq!(info["url"], url);
     assert_eq!(info["source"], "codex@laptop");
 
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let hook = loop {
+        if let Ok(text) = std::fs::read_to_string(&hook_file) {
+            break text;
+        }
+        assert!(std::time::Instant::now() < deadline, "on-create hook did not run");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(hook.trim(), format!("{id} {url} {}", demo().title));
+
     let pending: Value = client
         .get(format!("{origin}/agent/briefings/{id}/wait?timeout_secs=0"))
         .send()
@@ -265,7 +284,7 @@ async fn hub_agent_api_and_dashboard() {
         .json()
         .await
         .unwrap();
-    assert_eq!(pending["status"], "pending");
+    assert_eq!(pending, json!({"briefingId": id, "status": "pending"}));
 
     // Browser cancels -> wait reports cancelled.
     let token = url.rsplit('/').next().unwrap();
@@ -280,7 +299,9 @@ async fn hub_agent_api_and_dashboard() {
     let done: Value =
         client.get(format!("{origin}/agent/briefings/{id}/wait")).send().await.unwrap().json().await.unwrap();
     assert_eq!(done["status"], "cancelled");
-    assert_eq!(done["result"]["cancelled"], true);
+    assert_eq!(done["briefingId"], id);
+    assert_eq!(done["feedback"]["overallNote"], "");
+    assert!(done.get("result").is_none());
 
     let listed: Value = client.get(format!("{origin}/agent/briefings")).send().await.unwrap().json().await.unwrap();
     assert_eq!(listed["briefings"].as_array().unwrap().len(), 1);

@@ -125,7 +125,13 @@ and 300-character location; other user text 20 000 characters; request body 8 Mi
 - Sanitize any HTML in content: no scripts, event handlers, dangerous URLs, or styles that
   could break the page.
 - The embedded server starts lazily on the first briefing, not at process start, and serves
-  for the life of the process. Records are written to the user's state directory with
+  for the life of the process. Every way of creating a briefing (CLI, MCP over stdio or HTTP,
+  the hub's agent API) goes through the one site's create path, so validation, the recorded
+  link, `--on-create`, and `--open` behave the same everywhere; a briefing whose browser
+  opener fails is cancelled rather than left dangling.
+- A wait ends in exactly one of `pending`, `completed`, or `cancelled`, carried as a tagged
+  `status` with the feedback alongside; the CLI's `--json` output, the hub API, and the MCP
+  `await_briefing` result all use that shape (MCP adds `reopened` for a recovered briefing). Records are written to the user's state directory with
   owner-only permissions and swept 6 hours after finishing (14 days if never answered).
 - The hub has no authentication of its own: run it on a private network.
 - Fail visibly when the browser cannot be opened and the link cannot be shown.

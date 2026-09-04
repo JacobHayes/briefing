@@ -3,14 +3,15 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use axum::Router;
 use serde::Serialize;
 use tokio::sync::OnceCell;
 
 use crate::browser;
-use crate::content::Briefing;
-use crate::http::{self, AppState, HttpConfig};
-use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance, WaitOutcome};
-use crate::response::BriefingResponse;
+use crate::content::{self, Briefing};
+use crate::http::{self, HttpConfig, RunningServer};
+use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance};
+use crate::response::Outcome;
 use crate::tailscale::{self, BindScope, BindTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -70,124 +71,199 @@ pub fn hostname() -> &'static str {
     })
 }
 
-pub struct LocalServer {
-    pub state: AppState,
-    pub scope: BindScope,
-    pub label: String,
-    pub bind_host: String,
-    pub diagnostics: Option<String>,
-    running: Option<http::RunningServer>,
+/// How a [`Site`] is exposed and what it does when a briefing is created.
+#[derive(Debug, Clone, Default)]
+pub struct SiteOptions {
+    /// Serve the dashboard at `/` and the agent API under `/agent/*` (hub mode).
+    pub agent_api: bool,
+    /// Origin to put in briefing URLs when behind a reverse proxy; by default the bound address.
+    pub public_origin: Option<String>,
+    /// Try to open new briefings in this machine's browser.
+    pub open_browser: bool,
+    /// Shell command run when a briefing is created; receives `BRIEFING_URL`, `BRIEFING_ID`,
+    /// `BRIEFING_TITLE`.
+    pub on_create: Option<String>,
 }
 
-/// Embedded server: starts lazily on the first presentation (or the first adopted active
-/// briefing) and stays up for the life of the process.
-pub struct LocalBackend {
-    hub: Arc<Hub>,
-    bind: BindMode,
+/// One briefing server: the registry, how it is reached, and the side effects of creating a
+/// briefing. Every entry point (CLI, MCP over stdio or HTTP, the hub agent API) creates
+/// briefings through [`Site::create`], so they all honour `--open` and `--on-create` alike.
+pub struct Site {
+    pub hub: Arc<Hub>,
+    pub config: HttpConfig,
+    pub target: BindTarget,
     open_browser: bool,
     on_create: Option<String>,
-    server: OnceCell<LocalServer>,
+}
+
+impl Site {
+    /// Bind `target` on `port` (0 = ephemeral) and serve it. `mcp` may add routes (an MCP
+    /// service under `/mcp`) once the site exists; they are mounted only with the agent API.
+    pub async fn start(
+        hub: Arc<Hub>,
+        target: BindTarget,
+        port: u16,
+        options: SiteOptions,
+        mcp: impl FnOnce(&Arc<Site>) -> Option<Router<Arc<Site>>>,
+    ) -> anyhow::Result<(Arc<Site>, RunningServer)> {
+        let listener = http::bind(&target.bind_host, port)
+            .await
+            .map_err(|error| anyhow::anyhow!("{} bind failed: {error}", target.label))?;
+        let port = listener.local_addr()?.port();
+        let public_origin = options
+            .public_origin
+            .map(|origin| origin.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| http::origin_for(&target.public_host, port));
+        let site = Arc::new(Site {
+            hub,
+            config: HttpConfig::new(public_origin, &target.public_host, options.agent_api),
+            target,
+            open_browser: options.open_browser,
+            on_create: options.on_create,
+        });
+        let running = http::serve_listener(http::router(site.clone(), mcp(&site)), listener)?;
+        Ok((site, running))
+    }
+
+    /// Validate and register a presentation, remember its link, run the on-create hook, and
+    /// open the browser when configured. A browser opener that fails cancels the briefing.
+    pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
+        let validated = content::validate(&presentation)?;
+        let title = validated.title.clone();
+        let created = self.hub.create(validated, source);
+        let url = self.config.briefing_url(&created.token);
+        self.hub.set_url(&created.id, &url);
+        if let Some(hook) = &self.on_create {
+            run_on_create_hook(hook, &url, &created.id, &title);
+        }
+        let mut opened = false;
+        if self.open_browser {
+            match browser::open_url(&url).await {
+                Ok(did_open) => opened = did_open,
+                Err(error) => {
+                    self.hub.cancel(&created.id);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Created {
+            id: created.id,
+            url,
+            scope: self.target.scope.label().to_string(),
+            label: self.target.label.clone(),
+            bind_host: Some(self.target.bind_host.clone()),
+            diagnostics: self.target.diagnostics.clone(),
+            opened_browser: opened,
+        })
+    }
+
+    /// URL at which this site serves briefing `id` (its origin plus the record's token).
+    pub fn url_for(&self, id: &str) -> Option<String> {
+        let token = self.hub.token_for(id)?;
+        Some(self.config.briefing_url(&token))
+    }
+
+    /// Point every record this site holds at this site's link.
+    pub fn with_live_urls(&self, infos: &mut [BriefingInfo]) {
+        for info in infos.iter_mut().filter(|info| info.provenance != Provenance::DiskOnly) {
+            info.url = self.url_for(&info.id);
+        }
+    }
+}
+
+fn run_on_create_hook(command: &str, url: &str, id: &str, title: &str) {
+    let command = command.to_string();
+    let (url, id, title) = (url.to_string(), id.to_string(), title.to_string());
+    tokio::spawn(async move {
+        let result = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .env("BRIEFING_URL", url)
+            .env("BRIEFING_ID", id)
+            .env("BRIEFING_TITLE", title)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await;
+        match result {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                tracing::warn!(status = %output.status, stderr = %String::from_utf8_lossy(&output.stderr), "on-create hook failed")
+            }
+            Err(error) => tracing::warn!(%error, "on-create hook could not start"),
+        }
+    });
+}
+
+enum Server {
+    /// Starts on the first presentation (or the first adopted active briefing) and stays up
+    /// for the life of the process.
+    Lazy { bind: BindMode, options: SiteOptions, started: OnceCell<(Arc<Site>, RunningServer)> },
+    /// Hub mode: this process already serves the site.
+    Attached(Arc<Site>),
+}
+
+/// Briefings served by this process.
+pub struct LocalBackend {
+    hub: Arc<Hub>,
+    server: Server,
 }
 
 impl LocalBackend {
-    pub fn new(bind: BindMode, open_browser: bool, on_create: Option<String>, config: HubConfig) -> Self {
-        Self { hub: Arc::new(Hub::new(config)), bind, open_browser, on_create, server: OnceCell::new() }
+    pub fn new(bind: BindMode, options: SiteOptions, config: HubConfig) -> Self {
+        Self { hub: Arc::new(Hub::new(config)), server: Server::Lazy { bind, options, started: OnceCell::new() } }
     }
 
-    /// Use an already-running server (hub mode) instead of starting one.
-    pub fn attached(state: AppState, target: &BindTarget, open_browser: bool) -> Self {
-        let hub = state.hub.clone();
-        let server = LocalServer {
-            state,
-            scope: target.scope,
-            label: target.label.clone(),
-            bind_host: target.bind_host.clone(),
-            diagnostics: None,
-            running: None,
-        };
-        let cell = OnceCell::new();
-        cell.set(server).ok();
-        Self { hub, bind: BindMode::Local, open_browser, on_create: None, server: cell }
+    /// Use an already-running site (hub mode) instead of starting one.
+    pub fn attached(site: Arc<Site>) -> Self {
+        Self { hub: site.hub.clone(), server: Server::Attached(site) }
     }
 
     pub fn hub(&self) -> &Arc<Hub> {
         &self.hub
     }
 
-    async fn start(&self, target: BindTarget) -> anyhow::Result<LocalServer> {
-        let listener = http::bind(&target.bind_host, 0)
-            .await
-            .map_err(|error| anyhow::anyhow!("{} bind failed: {error}", target.label))?;
-        let port = listener.local_addr()?.port();
-        let state = AppState {
-            hub: self.hub.clone(),
-            config: Arc::new(HttpConfig {
-                public_origin: http::origin_for(&target.public_host, port),
-                allowed_hosts: vec![target.public_host.clone()],
-                agent_api: false,
-                on_create: self.on_create.clone(),
-            }),
-        };
-        let running = http::serve_listener(http::router(state.clone(), None), listener)?;
-        Ok(LocalServer {
-            state,
-            scope: target.scope,
-            label: target.label,
-            bind_host: target.bind_host,
-            diagnostics: target.diagnostics,
-            running: Some(running),
-        })
+    fn site(&self) -> Option<&Arc<Site>> {
+        match &self.server {
+            Server::Lazy { started, .. } => started.get().map(|(site, _)| site),
+            Server::Attached(site) => Some(site),
+        }
     }
 
-    async fn ensure_server(&self) -> anyhow::Result<&LocalServer> {
-        self.server
+    async fn ensure_site(&self) -> anyhow::Result<&Arc<Site>> {
+        let (bind, options, started) = match &self.server {
+            Server::Attached(site) => return Ok(site),
+            Server::Lazy { bind, options, started } => (*bind, options, started),
+        };
+        let start = |target| Site::start(self.hub.clone(), target, 0, options.clone(), |_| None);
+        started
             .get_or_try_init(|| async {
-                let preferred = self.bind.target().await?;
-                let fallback = (self.bind == BindMode::Auto && preferred.scope == BindScope::Tailnet).then(|| {
+                let preferred = bind.target().await?;
+                let fallback = (bind == BindMode::Auto && preferred.scope == BindScope::Tailnet).then(|| {
                     BindTarget::local(Some(format!(
                         "Fell back to local loopback after {} bind failed",
                         preferred.label
                     )))
                 });
-                match self.start(preferred).await {
-                    Ok(server) => Ok(server),
+                match start(preferred).await {
+                    Ok(started) => Ok(started),
                     Err(error) => match fallback {
                         Some(fallback) => {
                             tracing::warn!(%error, "falling back to loopback");
-                            self.start(fallback).await
+                            start(fallback).await
                         }
                         None => Err(error),
                     },
                 }
             })
             .await
+            .map(|(site, _)| site)
     }
 
     pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
-        let server = self.ensure_server().await?;
-        let (id, url) = http::create_briefing(&server.state, presentation, source)?;
-        let mut opened = false;
-        if self.open_browser {
-            match browser::open_url(&url).await {
-                Ok(did_open) => opened = did_open,
-                Err(error) => {
-                    self.hub.cancel(&id);
-                    return Err(error);
-                }
-            }
-        }
-        Ok(Created {
-            id,
-            url,
-            scope: server.scope.label().to_string(),
-            label: server.label.clone(),
-            bind_host: Some(server.bind_host.clone()),
-            diagnostics: server.diagnostics.clone(),
-            opened_browser: opened,
-        })
+        self.ensure_site().await?.create(presentation, source).await
     }
 
-    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<WaitOutcome> {
+    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
         Ok(self.hub.wait(id, timeout).await?)
     }
 
@@ -202,29 +278,28 @@ impl LocalBackend {
         let Some(mut info) = self.hub.info(id) else {
             return Ok(None);
         };
-        if info.status == BriefingStatus::Active {
-            let server = self.ensure_server().await?;
-            if let Some(url) = http::url_for(&server.state, id) {
-                if self.hub.set_url(id, &url) {
-                    info.provenance = Provenance::Reopened;
-                }
-                info.url = Some(url);
+        if info.status == BriefingStatus::Active
+            && let Some(url) = self.ensure_site().await?.url_for(id)
+        {
+            if self.hub.set_url(id, &url) {
+                info.provenance = Provenance::Reopened;
             }
+            info.url = Some(url);
         }
         Ok(Some(info))
     }
 
     pub fn list(&self) -> Vec<BriefingInfo> {
         let mut infos = self.hub.list();
-        if let Some(server) = self.server.get() {
-            http::with_live_urls(&server.state, &mut infos);
+        if let Some(site) = self.site() {
+            site.with_live_urls(&mut infos);
         }
         infos
     }
 
     pub async fn shutdown(self) {
-        if let Some(server) = self.server.into_inner()
-            && let Some(running) = server.running
+        if let Server::Lazy { started, .. } = self.server
+            && let Some((_, running)) = started.into_inner()
         {
             running.stop().await;
         }
@@ -247,13 +322,6 @@ pub struct RemoteBackend {
 struct RemoteCreated {
     id: String,
     url: String,
-}
-
-#[derive(serde::Deserialize)]
-struct RemoteWait {
-    status: String,
-    #[serde(default)]
-    result: Option<BriefingResponse>,
 }
 
 #[derive(serde::Deserialize)]
@@ -332,21 +400,19 @@ impl RemoteBackend {
         })
     }
 
-    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<WaitOutcome> {
+    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Ok(WaitOutcome::Pending);
+                return Ok(Outcome::Pending);
             }
             let slice = remaining.min(http::MAX_WAIT);
             let path = format!("/agent/briefings/{id}/wait?timeout_secs={}", slice.as_secs().max(1));
             let value = self.request(::http::Method::GET, &path, None, slice + HUB_REQUEST_TIMEOUT).await?;
-            let wait: RemoteWait = serde_json::from_value(value)?;
-            match (wait.status.as_str(), wait.result) {
-                ("pending", _) => continue,
-                (_, Some(result)) => return Ok(WaitOutcome::Done(result)),
-                (status, None) => anyhow::bail!("hub returned status {status} without a result"),
+            match serde_json::from_value(value)? {
+                Outcome::Pending => continue,
+                done => return Ok(done),
             }
         }
     }
@@ -391,7 +457,7 @@ impl Backend {
         }
     }
 
-    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<WaitOutcome> {
+    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
         match self {
             Backend::Local(local) => local.wait(id, timeout).await,
             Backend::Remote(remote) => remote.wait(id, timeout).await,

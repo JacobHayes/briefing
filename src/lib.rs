@@ -14,7 +14,7 @@ pub mod store;
 pub mod tailscale;
 pub mod tls;
 
-pub use backend::{Backend, BindMode, Created, LocalBackend, RemoteBackend};
+pub use backend::{Backend, BindMode, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
 pub use content::Briefing;
-pub use hub::{BriefingStatus, Hub, HubConfig, WaitOutcome};
-pub use response::BriefingResponse;
+pub use hub::{BriefingStatus, Hub, HubConfig};
+pub use response::{BriefingOutcome, BriefingResponse, Outcome};

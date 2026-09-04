@@ -85,11 +85,32 @@ pub struct Annotation {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BriefingResponse {
-    pub cancelled: bool,
     pub chunks: Vec<ChunkResponse>,
     pub decisions: Vec<DecisionResponse>,
     pub annotations: Vec<Annotation>,
     pub overall_note: String,
+}
+
+/// How a wait on a briefing ended. This is the one shape every wire carries under
+/// `status`: the hub agent API, the CLI's `--json` stdout, and MCP `await_briefing`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum Outcome {
+    /// The user has not submitted yet; wait again.
+    Pending,
+    /// The user submitted their feedback.
+    Completed { feedback: BriefingResponse },
+    /// The user (or the agent) cancelled; `feedback` holds whatever was captured, usually nothing.
+    Cancelled { feedback: BriefingResponse },
+}
+
+/// A wait result addressed to its briefing: `{"briefingId": ..., "status": ..., ...}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BriefingOutcome {
+    pub briefing_id: String,
+    #[serde(flatten)]
+    pub outcome: Outcome,
 }
 
 fn trimmed(value: Option<&Value>, max: usize) -> String {
@@ -140,7 +161,7 @@ fn parse_annotations(value: Option<&Value>) -> Vec<Annotation> {
 }
 
 /// Clamp and normalize whatever the browser posted into a `BriefingResponse`.
-pub fn parse_browser_result(value: &Value, cancelled: bool) -> BriefingResponse {
+pub fn parse_browser_result(value: &Value) -> BriefingResponse {
     let empty = serde_json::Map::new();
     let input = value.as_object().unwrap_or(&empty);
     let rows = |name: &str| -> Vec<&Value> {
@@ -182,7 +203,6 @@ pub fn parse_browser_result(value: &Value, cancelled: bool) -> BriefingResponse 
         .collect();
 
     BriefingResponse {
-        cancelled,
         chunks,
         decisions,
         annotations: parse_annotations(input.get("annotations")),
@@ -232,11 +252,6 @@ impl std::fmt::Display for FeedbackCounts {
 }
 
 impl BriefingResponse {
-    /// An empty, cancelled result.
-    pub fn cancelled() -> Self {
-        Self { cancelled: true, ..Self::default() }
-    }
-
     pub fn counts(&self) -> FeedbackCounts {
         FeedbackCounts {
             decisions: self.decisions.iter().filter(|d| d.is_substantive()).count(),
@@ -286,18 +301,28 @@ impl BriefingResponse {
         }
         lines
     }
+}
+
+impl Outcome {
+    /// An empty, cancelled result.
+    pub fn cancelled() -> Self {
+        Outcome::Cancelled { feedback: BriefingResponse::default() }
+    }
 
     /// The text handed back to the model as the tool result.
     pub fn format_text(&self) -> String {
-        if self.cancelled {
-            return "The user cancelled the briefing without submitting feedback.".to_string();
+        match self {
+            Outcome::Pending => "The briefing is still open; the user has not submitted.".to_string(),
+            Outcome::Cancelled { .. } => "The user cancelled the briefing without submitting feedback.".to_string(),
+            Outcome::Completed { feedback } => {
+                let mut lines = vec!["User completed the briefing.".to_string()];
+                lines.extend(feedback.detail_lines());
+                if lines.len() == 1 {
+                    lines.push("The user returned no notes, checkpoints, decisions, or comments.".to_string());
+                }
+                lines.join("\n")
+            }
         }
-        let mut lines = vec!["User completed the briefing.".to_string()];
-        lines.extend(self.detail_lines());
-        if lines.len() == 1 {
-            lines.push("The user returned no notes, checkpoints, decisions, or comments.".to_string());
-        }
-        lines.join("\n")
     }
 }
 
@@ -308,22 +333,19 @@ mod tests {
 
     #[test]
     fn parses_and_clamps_browser_payload() {
-        let result = parse_browser_result(
-            &json!({
-                "chunks": [
-                    {"title": "First", "status": "revisit", "checkpoint": "  answer ", "note": ""},
-                    {"title": "", "status": "understood"},
-                    {"title": "Second", "status": "bogus"}
-                ],
-                "decisions": [{"question": "Q", "selected": "A", "note": "why"}],
-                "annotations": [
-                    {"location": "First", "quote": "q", "comment": "c", "target": {"contentType": "mermaid", "targetId": "n1", "bogus": "x"}},
-                    {"location": "x", "quote": "", "comment": "no quote"}
-                ],
-                "overallNote": "done"
-            }),
-            false,
-        );
+        let result = parse_browser_result(&json!({
+            "chunks": [
+                {"title": "First", "status": "revisit", "checkpoint": "  answer ", "note": ""},
+                {"title": "", "status": "understood"},
+                {"title": "Second", "status": "bogus"}
+            ],
+            "decisions": [{"question": "Q", "selected": "A", "note": "why"}],
+            "annotations": [
+                {"location": "First", "quote": "q", "comment": "c", "target": {"contentType": "mermaid", "targetId": "n1", "bogus": "x"}},
+                {"location": "x", "quote": "", "comment": "no quote"}
+            ],
+            "overallNote": "done"
+        }));
         assert_eq!(result.chunks.len(), 2);
         assert_eq!(result.chunks[0].status, ChunkStatus::Revisit);
         assert_eq!(result.chunks[0].checkpoint, "answer");
@@ -334,7 +356,7 @@ mod tests {
         assert_eq!(target.content_type.as_deref(), Some("mermaid"));
         assert_eq!(result.counts().to_string(), "1 decisions, 1 section responses, 1 comments");
 
-        let text = result.format_text();
+        let text = Outcome::Completed { feedback: result }.format_text();
         assert!(text.contains("Sections flagged for follow-up: First"));
         assert!(text.contains("Target: content=mermaid, id=n1"));
         assert!(text.contains("> q\nComment: c"));
@@ -343,10 +365,29 @@ mod tests {
 
     #[test]
     fn empty_and_cancelled_results() {
-        let empty = parse_browser_result(&json!({}), false);
+        let empty = parse_browser_result(&json!({}));
         assert_eq!(empty.counts(), FeedbackCounts { decisions: 0, sections: 0, comments: 0 });
-        assert!(empty.format_text().contains("returned no notes"));
-        assert_eq!(parse_browser_result(&json!(null), true), BriefingResponse::cancelled());
-        assert!(BriefingResponse::cancelled().format_text().contains("cancelled"));
+        assert!(Outcome::Completed { feedback: empty }.format_text().contains("returned no notes"));
+        assert_eq!(parse_browser_result(&json!(null)), BriefingResponse::default());
+        assert!(Outcome::cancelled().format_text().contains("cancelled"));
+    }
+
+    #[test]
+    fn outcome_wire_shape() {
+        let pending = BriefingOutcome { briefing_id: "b1".into(), outcome: Outcome::Pending };
+        assert_eq!(serde_json::to_value(&pending).unwrap(), json!({"briefingId": "b1", "status": "pending"}));
+        let done = BriefingOutcome { briefing_id: "b1".into(), outcome: Outcome::cancelled() };
+        let value = serde_json::to_value(&done).unwrap();
+        assert_eq!(value["status"], "cancelled");
+        assert_eq!(value["feedback"]["annotations"], json!([]));
+        assert!(value.get("cancelled").is_none());
+        // Round trips, and a bare `Outcome` reads the addressed form too (extra keys are ignored).
+        assert_eq!(serde_json::from_value::<BriefingOutcome>(value.clone()).unwrap(), done);
+        assert_eq!(serde_json::from_value::<Outcome>(value).unwrap(), done.outcome);
+        assert_eq!(
+            serde_json::from_value::<Outcome>(json!({"briefingId": "b1", "status": "pending"})).unwrap(),
+            Outcome::Pending
+        );
+        assert!(serde_json::from_value::<Outcome>(json!({"status": "completed"})).is_err());
     }
 }

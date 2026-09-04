@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, Created};
 use crate::content::{Briefing, schema_value};
-use crate::hub::{BriefingStatus, Provenance, WaitOutcome};
-use crate::response::BriefingResponse;
+use crate::hub::Provenance;
+use crate::response::Outcome;
 
 /// How to keep a long `await_briefing` call alive while the human reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -77,19 +77,27 @@ pub struct OpenOutput {
     pub instructions: String,
 }
 
+/// What `await_briefing` reports under `status`: a wait [`Outcome`], or `reopened`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum AwaitStatus {
+    /// A briefing from an earlier process is being served again at `url`; relay the link,
+    /// then call await_briefing again.
+    Reopened,
+    #[serde(untagged)]
+    Outcome(Outcome),
+}
+
 /// `await_briefing` output.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AwaitOutput {
-    /// "completed", "cancelled", "pending", or "reopened" (a briefing from an earlier
-    /// process is being served again at `url`; relay the link, then call await_briefing again).
-    pub status: String,
     pub briefing_id: String,
+    #[serde(flatten)]
+    pub status: AwaitStatus,
+    /// The link, while the briefing is still open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// The user's feedback; absent while pending.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub feedback: Option<BriefingResponse>,
     /// What the model should do next.
     pub instructions: String,
 }
@@ -261,20 +269,20 @@ impl BriefingMcp {
         ctx: &RequestContext<RoleServer>,
         max_wait: Duration,
         heartbeat: bool,
-    ) -> Result<WaitOutcome, ErrorData> {
+    ) -> Result<Outcome, ErrorData> {
         let started = tokio::time::Instant::now();
         let deadline = started + max_wait;
         let mut tick: u64 = 0;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Ok(WaitOutcome::Pending);
+                return Ok(Outcome::Pending);
             }
             let slice = if heartbeat { remaining.min(HEARTBEAT) } else { remaining };
             tokio::select! {
                 outcome = self.backend.wait(id, slice) => {
                     match outcome.map_err(internal)? {
-                        WaitOutcome::Pending => {
+                        Outcome::Pending => {
                             tick += 1;
                             if heartbeat {
                                 let elapsed = started.elapsed().as_secs();
@@ -296,7 +304,7 @@ impl BriefingMcp {
         url: &str,
         ctx: &RequestContext<RoleServer>,
         max_wait: Duration,
-    ) -> Result<WaitOutcome, ErrorData> {
+    ) -> Result<Outcome, ErrorData> {
         let schema = ElicitationSchema::builder()
             .required_property(
                 "submitted",
@@ -327,13 +335,13 @@ impl BriefingMcp {
                             // The user says they submitted; give the submission a moment to land,
                             // then fall back to a plain wait if it has not.
                             match self.backend.wait(id, Duration::from_secs(5)).await.map_err(internal)? {
-                                WaitOutcome::Pending => self.wait_with_progress(id, url, ctx, max_wait, true).await,
+                                Outcome::Pending => self.wait_with_progress(id, url, ctx, max_wait, true).await,
                                 done => Ok(done),
                             }
                         }
                         _ => {
                             let _ = self.backend.cancel(id).await;
-                            Ok(WaitOutcome::Done(BriefingResponse::cancelled()))
+                            Ok(Outcome::cancelled())
                         }
                     },
                     other => {
@@ -362,7 +370,7 @@ impl BriefingMcp {
         ctx: &RequestContext<RoleServer>,
         hold: HoldMode,
         max_wait: Duration,
-    ) -> Result<WaitOutcome, ErrorData> {
+    ) -> Result<Outcome, ErrorData> {
         match hold {
             HoldMode::Elicitation => self.wait_with_elicitation(id, url, ctx, max_wait).await,
             HoldMode::Progress | HoldMode::Auto => self.wait_with_progress(id, url, ctx, max_wait, true).await,
@@ -370,41 +378,35 @@ impl BriefingMcp {
         }
     }
 
-    fn outcome_result(id: &str, url: &str, outcome: WaitOutcome) -> CallToolResult {
-        match outcome {
-            WaitOutcome::Pending => structured(
+    fn outcome_result(id: &str, url: &str, outcome: Outcome) -> CallToolResult {
+        let (text, url, instructions, is_error) = match &outcome {
+            Outcome::Pending => (
                 format!("Briefing {id} still open at {url}"),
-                &AwaitOutput {
-                    status: "pending".into(),
-                    briefing_id: id.into(),
-                    url: Some(url.into()),
-                    feedback: None,
-                    instructions: format!(
-                        "The user has not submitted yet. Call await_briefing again with briefingId \"{id}\" to keep waiting (remind the user of the link {url} if they seem stuck), or cancel_briefing to stop."
-                    ),
-                },
+                Some(url.to_string()),
+                format!(
+                    "The user has not submitted yet. Call await_briefing again with briefingId \"{id}\" to keep waiting (remind the user of the link {url} if they seem stuck), or cancel_briefing to stop."
+                ),
+                false,
             ),
-            WaitOutcome::Done(response) => {
-                let status = response.status();
-                let instructions = if response.cancelled {
-                    "The user cancelled the briefing without submitting. Ask how they would like to proceed; do not reopen it unasked."
-                } else {
-                    "Respond only to this feedback: answer checkpoint answers, act on decisions, address each comment (location + quoted passage + comment), follow up on sections flagged revisit. Do not repeat the presentation."
-                };
-                let mut result = structured(
-                    format!("Briefing {id} {status}: {}", response.counts()),
-                    &AwaitOutput {
-                        status: status.to_string(),
-                        briefing_id: id.into(),
-                        url: None,
-                        feedback: Some(response),
-                        instructions: instructions.into(),
-                    },
-                );
-                result.is_error = Some(status == BriefingStatus::Cancelled);
-                result
-            }
-        }
+            Outcome::Completed { feedback } => (
+                format!("Briefing {id} completed: {}", feedback.counts()),
+                None,
+                "Respond only to this feedback: answer checkpoint answers, act on decisions, address each comment (location + quoted passage + comment), follow up on sections flagged revisit. Do not repeat the presentation.".to_string(),
+                false,
+            ),
+            Outcome::Cancelled { feedback } => (
+                format!("Briefing {id} cancelled: {}", feedback.counts()),
+                None,
+                "The user cancelled the briefing without submitting. Ask how they would like to proceed; do not reopen it unasked.".to_string(),
+                true,
+            ),
+        };
+        let mut result = structured(
+            text,
+            &AwaitOutput { briefing_id: id.into(), status: AwaitStatus::Outcome(outcome), url, instructions },
+        );
+        result.is_error = Some(is_error);
+        result
     }
 
     fn require_structured_content(ctx: &RequestContext<RoleServer>) -> Result<(), ErrorData> {
@@ -477,10 +479,9 @@ impl BriefingMcp {
             return Ok(structured(
                 format!("Briefing {id} reopened at {url}"),
                 &AwaitOutput {
-                    status: "reopened".into(),
                     briefing_id: id.clone(),
+                    status: AwaitStatus::Reopened,
                     url: Some(url.clone()),
-                    feedback: None,
                     instructions: format!(
                         "This briefing was created by an earlier process and is now served again at {url}; earlier links are dead. Put this exact link in your reply (the user's draft is preserved), then call await_briefing with briefingId \"{id}\" to wait for their feedback."
                     ),
@@ -533,13 +534,30 @@ mod tests {
 
     #[test]
     fn pending_and_done_results() {
-        let pending = BriefingMcp::outcome_result("r1", "http://x", WaitOutcome::Pending);
-        assert_eq!(pending.structured_content.as_ref().unwrap()["status"], "pending");
-        assert!(output_schema::<AwaitOutput>()["properties"].get("feedback").is_some());
-        let done = BriefingMcp::outcome_result("r1", "http://x", WaitOutcome::Done(BriefingResponse::default()));
-        assert_eq!(done.structured_content.as_ref().unwrap()["status"], "completed");
+        let pending = BriefingMcp::outcome_result("r1", "http://x", Outcome::Pending);
+        let content = pending.structured_content.as_ref().unwrap();
+        assert_eq!(content["status"], "pending");
+        assert_eq!(content["url"], "http://x");
+        assert!(content.get("feedback").is_none());
+        let done = BriefingMcp::outcome_result("r1", "http://x", Outcome::Completed { feedback: Default::default() });
+        let content = done.structured_content.as_ref().unwrap();
+        assert_eq!(content["status"], "completed");
+        assert_eq!(content["feedback"]["annotations"], serde_json::json!([]));
+        assert!(content.get("url").is_none());
         assert_eq!(done.is_error, Some(false));
-        let cancelled = BriefingMcp::outcome_result("r1", "http://x", WaitOutcome::Done(BriefingResponse::cancelled()));
+        let cancelled = BriefingMcp::outcome_result("r1", "http://x", Outcome::cancelled());
+        assert_eq!(cancelled.structured_content.as_ref().unwrap()["status"], "cancelled");
         assert_eq!(cancelled.is_error, Some(true));
+    }
+
+    /// The output schema names every status the tool can return.
+    #[test]
+    fn await_output_schema_lists_statuses() {
+        let schema = serde_json::to_string(&*output_schema::<AwaitOutput>()).unwrap();
+        for status in ["pending", "completed", "cancelled", "reopened"] {
+            assert!(schema.contains(&format!("\"{status}\"")), "{status} missing from {schema}");
+        }
+        assert!(schema.contains("briefingId"));
+        assert!(schema.contains("feedback"));
     }
 }

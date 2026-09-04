@@ -2,11 +2,11 @@ use std::io::{IsTerminal, Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
-use briefing::backend::{Backend, BindMode, Created, LocalBackend, RemoteBackend};
+use briefing::backend::{Backend, BindMode, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
 use briefing::content::{self, Briefing};
-use briefing::http::{self, AppState, HttpConfig};
-use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance, WaitOutcome};
+use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance};
 use briefing::mcp::{BriefingMcp, HoldMode};
+use briefing::response::{BriefingOutcome, Outcome};
 use briefing::store::Store;
 use clap::{Args, Parser, Subcommand};
 use rmcp::ServiceExt;
@@ -164,12 +164,14 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 fn backend(common: &Common) -> anyhow::Result<Backend> {
     match &common.hub {
         Some(hub) => Ok(Backend::Remote(RemoteBackend::new(hub)?)),
-        None => Ok(Backend::Local(LocalBackend::new(
-            common.bind,
-            !common.no_open,
-            common.on_create.clone(),
-            HubConfig::with_default_store(),
-        ))),
+        None => {
+            let options = SiteOptions {
+                open_browser: !common.no_open,
+                on_create: common.on_create.clone(),
+                ..Default::default()
+            };
+            Ok(Backend::Local(LocalBackend::new(common.bind, options, HubConfig::with_default_store())))
+        }
     }
 }
 
@@ -236,26 +238,22 @@ async fn wait_and_print(backend: &Backend, id: &str, args: &WaitArgs) -> anyhow:
             return Ok(EXIT_INTERRUPTED);
         }
     };
+    let (code, event) = match &outcome {
+        Outcome::Pending => (EXIT_PENDING, "pending"),
+        Outcome::Completed { .. } => (0, "completed"),
+        Outcome::Cancelled { .. } => (EXIT_CANCELLED, "cancelled"),
+    };
+    let human =
+        if outcome == Outcome::Pending { format!("Briefing {id} is still open") } else { format!("Briefing {event}") };
+    reporter.event(json!({"event": event, "id": id}), human);
     let mut out = std::io::stdout().lock();
-    match outcome {
-        WaitOutcome::Pending => {
-            reporter.event(json!({"event": "pending", "id": id}), format!("Briefing {id} is still open"));
-            if reporter.json {
-                writeln!(out, "{}", json!({"status": "pending", "briefingId": id}))?;
-            }
-            Ok(EXIT_PENDING)
-        }
-        WaitOutcome::Done(result) => {
-            let status = result.status();
-            reporter.event(json!({"event": status, "id": id}), format!("Briefing {status}"));
-            if reporter.json {
-                writeln!(out, "{}", json!({"status": status, "briefingId": id, "result": result}))?;
-            } else {
-                writeln!(out, "{}", result.format_text())?;
-            }
-            Ok(if result.cancelled { EXIT_CANCELLED } else { 0 })
-        }
+    if reporter.json {
+        let result = BriefingOutcome { briefing_id: id.to_string(), outcome };
+        writeln!(out, "{}", serde_json::to_string(&result)?)?;
+    } else if outcome != Outcome::Pending {
+        writeln!(out, "{}", outcome.format_text())?;
     }
+    Ok(code)
 }
 
 async fn shutdown_signal() {
@@ -291,50 +289,36 @@ async fn run_mcp_stdio(common: &Common, hold: HoldArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// MCP over streamable HTTP at `/mcp`, backed by the site this process serves.
+fn mcp_router(site: &Arc<Site>, hold: &HoldArgs) -> axum::Router<Arc<Site>> {
+    let backend = Arc::new(Backend::Local(LocalBackend::attached(site.clone())));
+    let (hold, max_wait) = (hold.hold, hold.max_wait_secs.map(Duration::from_secs));
+    let config = StreamableHttpServerConfig::default().with_allowed_hosts(site.config.allowed_hosts.clone());
+    let service = StreamableHttpService::new(
+        move || Ok(BriefingMcp::new(backend.clone(), hold, max_wait)),
+        Arc::new(LocalSessionManager::default()),
+        config,
+    );
+    axum::Router::new().nest_service("/mcp", service)
+}
+
 async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
     let target = common.bind.target().await?;
-    let listener = http::bind(&target.bind_host, args.port).await?;
-    let bound_port = listener.local_addr()?.port();
-    let origin = args
-        .public_origin
-        .map(|o| o.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| http::origin_for(&target.public_host, bound_port));
-    let mut allowed_hosts = vec![target.public_host.clone()];
-    if let Some(host) = url::Url::parse(&origin).ok().as_ref().and_then(http::host_with_port) {
-        allowed_hosts.push(host);
-    }
     let hub = Arc::new(Hub::new(HubConfig {
         finished_ttl: args.finished_ttl,
         active_ttl: args.active_ttl,
         ..HubConfig::with_default_store()
     }));
-    let state = AppState {
-        hub,
-        config: Arc::new(HttpConfig {
-            public_origin: origin.clone(),
-            allowed_hosts: allowed_hosts.clone(),
-            agent_api: true,
-            on_create: common.on_create.clone(),
-        }),
+    let options = SiteOptions {
+        agent_api: true,
+        public_origin: args.public_origin,
+        open_browser: args.open,
+        on_create: common.on_create.clone(),
     };
-
-    let mcp_router = if args.mcp {
-        let backend = Arc::new(Backend::Local(LocalBackend::attached(state.clone(), &target, args.open)));
-        let hold = args.hold.hold;
-        let max_wait = args.hold.max_wait_secs.map(Duration::from_secs);
-        let config = StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts);
-        let service = StreamableHttpService::new(
-            move || Ok(BriefingMcp::new(backend.clone(), hold, max_wait)),
-            Arc::new(LocalSessionManager::default()),
-            config,
-        );
-        Some(axum::Router::new().nest_service("/mcp", service))
-    } else {
-        None
-    };
-
-    let running = http::serve_listener(http::router(state, mcp_router), listener)?;
-    eprintln!("briefing hub listening on {} ({})", running.local_addr, target.label);
+    let (site, running) =
+        Site::start(hub, target, args.port, options, |site| args.mcp.then(|| mcp_router(site, &args.hold))).await?;
+    let origin = &site.config.public_origin;
+    eprintln!("briefing hub listening on {} ({})", running.local_addr, site.target.label);
     eprintln!("briefing URLs use origin {origin}");
     eprintln!(
         "dashboard: {origin}/  agent API: {origin}/agent/briefings{}",
@@ -343,7 +327,7 @@ async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
     if let Some(dir) = Store::default_dir() {
         eprintln!("records: {}", dir.display());
     }
-    if let Some(diag) = &target.diagnostics {
+    if let Some(diag) = &site.target.diagnostics {
         eprintln!("{diag}");
     }
     shutdown_signal().await;

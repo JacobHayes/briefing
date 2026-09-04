@@ -29,14 +29,18 @@ type ReadyEvent = {
 };
 
 type Feedback = {
-  cancelled: boolean;
   chunks: Array<{ title: string; status: string; checkpoint: string; note: string }>;
   decisions: Array<{ question: string; selected: string; note: string }>;
   annotations: Array<{ location: string; quote: string; comment: string; target?: Record<string, string> }>;
   overallNote: string;
 };
 
-type CliResult = { status: "completed" | "cancelled" | "pending"; briefingId: string; result?: Feedback };
+/** What `briefing present|demo|await --json` prints on stdout. */
+type CliResult = { briefingId: string } & (
+  | { status: "pending" }
+  | { status: "completed"; feedback: Feedback }
+  | { status: "cancelled"; feedback: Feedback }
+);
 
 type Active = { child: ChildProcess; url?: string };
 
@@ -157,11 +161,11 @@ export default function briefingExtension(pi: ExtensionAPI) {
             details: { status: "open", briefingId: ready.id, url: ready.url, scope: ready.scope },
           });
         });
-        if (result.status !== "completed" || !result.result || result.result.cancelled) {
+        if (result.status !== "completed") {
           toolCtx.abort();
           throw new Error("Briefing cancelled by user");
         }
-        const feedback = result.result;
+        const feedback = result.feedback;
         return {
           content: [{ type: "text", text: JSON.stringify({ status: "completed", briefingId: result.briefingId, feedback }) }],
           details: { status: "completed", briefingId: result.briefingId, feedback },
@@ -213,8 +217,8 @@ export default function briefingExtension(pi: ExtensionAPI) {
     if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
     try {
       const result = await run(args, undefined, ctx);
-      if (result.status === "completed" && result.result && !result.result.cancelled) {
-        pi.sendUserMessage(`${preface}\n\n${JSON.stringify(result.result, null, 2)}`);
+      if (result.status === "completed") {
+        pi.sendUserMessage(`${preface}\n\n${JSON.stringify(result.feedback, null, 2)}`);
       } else {
         ctx.ui.notify(`${label} ${result.status}`, "info");
       }
