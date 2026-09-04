@@ -26,7 +26,7 @@ on:
       force: "false"
   cron:
     - key: daily
-      schedule: '18 14 * * *' # TEMPORARY: verify the cron trigger can read the vault; restore to '0 9 * * *'
+      schedule: '0 9 * * *' # 09:00 UTC daily
       init:
         commit-sha: ${{ event.git.sha }}
         force: "false"
