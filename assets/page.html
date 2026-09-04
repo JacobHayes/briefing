@@ -821,11 +821,6 @@
       event.stopPropagation();
       openComposer();
     });
-    commentButton.addEventListener("touchstart", event => {
-      event.preventDefault();
-      event.stopPropagation();
-      openComposer();
-    }, { passive: false });
     commentButton.addEventListener("click", event => {
       event.preventDefault();
       openComposer();
@@ -1333,9 +1328,7 @@
     }
 
     document.addEventListener("selectionchange", () => scheduleEvaluateSelection(80));
-    document.addEventListener("mouseup", () => scheduleEvaluateSelection(0));
     document.addEventListener("pointerup", () => scheduleEvaluateSelection(40));
-    document.addEventListener("touchend", () => scheduleEvaluateSelection(100), { passive: true });
     document.addEventListener("keyup", event => { if (event.shiftKey || event.key.indexOf("Arrow") === 0) scheduleEvaluateSelection(0); });
     function handleSelectionPointerStart(event) {
       if (event.target === commentButton) return;
@@ -1345,9 +1338,7 @@
       // on a highlight; unpin only when clicking elsewhere.
       if (popover.pinned && !tooltip.contains(event.target) && !(event.target.closest && event.target.closest(".anno-mark"))) hidePopover();
     }
-    document.addEventListener("mousedown", handleSelectionPointerStart);
     document.addEventListener("pointerdown", handleSelectionPointerStart);
-    document.addEventListener("touchstart", handleSelectionPointerStart, { passive: true });
     document.addEventListener("keydown", event => {
       if (openComposerFromShortcut(event)) return;
       if (event.key !== "Escape") return;
