@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::assets;
 use crate::content::{self, Briefing};
-use crate::hub::{BriefingInfo, DraftSave, Hub, HubError, WaitOutcome, random_token};
+use crate::hub::{BriefingInfo, DraftSave, Hub, HubError, Provenance, WaitOutcome, random_token};
 
 /// Browser submission cap: 500 annotations of 2 KB quote + 4 KB comment plus notes fits well inside.
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
@@ -296,7 +296,7 @@ pub fn url_for(state: &AppState, id: &str) -> Option<String> {
 
 /// Point every record this server holds at this server's link.
 pub fn with_live_urls(state: &AppState, infos: &mut [BriefingInfo]) {
-    for info in infos.iter_mut().filter(|info| !info.on_disk_only) {
+    for info in infos.iter_mut().filter(|info| info.provenance != Provenance::DiskOnly) {
         info.url = url_for(state, &info.id);
     }
 }

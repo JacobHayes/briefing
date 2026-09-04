@@ -7,7 +7,7 @@ use std::time::Duration;
 use briefing::backend::{BindMode, LocalBackend};
 use briefing::content::demo;
 use briefing::http::{self, AppState, HttpConfig};
-use briefing::hub::{Hub, HubConfig, WaitOutcome};
+use briefing::hub::{Hub, HubConfig, Provenance, WaitOutcome};
 use briefing::store::Store;
 use serde_json::{Value, json};
 
@@ -16,7 +16,7 @@ async fn embedded_server_roundtrip() {
     briefing::tls::init();
     let backend = LocalBackend::new(BindMode::Local, false, None, HubConfig::default());
     let created = backend.create(demo(), Some("test".into())).await.unwrap();
-    assert!(!backend.info(&created.id).await.unwrap().unwrap().reopened, "created here: link unchanged");
+    assert_eq!(backend.info(&created.id).await.unwrap().unwrap().provenance, Provenance::Live, "created here");
     assert!(created.url.starts_with("http://127.0.0.1:"));
     assert_eq!(created.scope, "local");
     assert!(!created.opened_browser);
@@ -161,15 +161,15 @@ async fn briefing_recovered_by_another_process() {
     let idle = LocalBackend::new(BindMode::Local, false, None, config());
     let listed = idle.list();
     assert_eq!(listed.len(), 1);
-    assert!(listed[0].on_disk_only);
+    assert_eq!(listed[0].provenance, Provenance::DiskOnly);
     assert_eq!(listed[0].source.as_deref(), Some("first"));
 
     // Second process adopts it on `info`, starts serving it, and the page carries the draft.
     let second = LocalBackend::new(BindMode::Local, false, None, config());
     let info = second.info(&created.id).await.unwrap().unwrap();
-    assert!(info.reopened, "first serve at a new link");
+    assert_eq!(info.provenance, Provenance::Reopened, "first serve at a new link");
     let url2 = info.url.clone().unwrap();
-    assert!(!second.info(&created.id).await.unwrap().unwrap().reopened, "same link the second time");
+    assert_eq!(second.info(&created.id).await.unwrap().unwrap().provenance, Provenance::Live, "same link again");
     assert_ne!(url2, created.url);
     assert!(url2.ends_with(&format!("/briefing/{token}")));
     let origin2 = url2.rsplit_once("/briefing/").unwrap().0.to_string();

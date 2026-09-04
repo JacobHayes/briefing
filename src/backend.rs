@@ -9,7 +9,7 @@ use tokio::sync::OnceCell;
 use crate::browser;
 use crate::content::Briefing;
 use crate::http::{self, AppState, HttpConfig};
-use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, WaitOutcome};
+use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance, WaitOutcome};
 use crate::response::BriefingResponse;
 use crate::tailscale::{self, BindScope, BindTarget};
 
@@ -20,15 +20,13 @@ pub enum BindMode {
     Auto,
     /// 127.0.0.1 only.
     Local,
-    /// Require the Tailscale address; fall back to loopback with a diagnostic if unavailable.
-    Tailscale,
 }
 
 impl BindMode {
     pub async fn target(self) -> BindTarget {
         match self {
             BindMode::Local => BindTarget::local(None),
-            BindMode::Auto | BindMode::Tailscale => tailscale::detect_bind_target().await,
+            BindMode::Auto => tailscale::detect_bind_target().await,
         }
     }
 }
@@ -193,7 +191,7 @@ impl LocalBackend {
 
     /// Status of a briefing. An active briefing is served by this process (starting the
     /// embedded server if needed), so the returned URL is live even for adopted records;
-    /// `reopened` is set the first time that link differs from the one on record.
+    /// the provenance is `Reopened` the first time that link differs from the one on record.
     pub async fn info(&self, id: &str) -> anyhow::Result<Option<BriefingInfo>> {
         let Some(mut info) = self.hub.info(id) else {
             return Ok(None);
@@ -201,7 +199,9 @@ impl LocalBackend {
         if info.status == BriefingStatus::Active {
             let server = self.ensure_server().await?;
             if let Some(url) = http::url_for(&server.state, id) {
-                info.reopened = self.hub.set_url(id, &url);
+                if self.hub.set_url(id, &url) {
+                    info.provenance = Provenance::Reopened;
+                }
                 info.url = Some(url);
             }
         }

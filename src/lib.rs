@@ -5,6 +5,7 @@ pub mod assets;
 pub mod backend;
 pub mod browser;
 pub mod content;
+pub mod guidance;
 pub mod http;
 pub mod hub;
 pub mod mcp;

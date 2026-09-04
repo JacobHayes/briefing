@@ -59,7 +59,7 @@
         if (b.draft.decisions) parts.push(`${b.draft.decisions} decision${b.draft.decisions === 1 ? "" : "s"}`);
         meta.push(parts.join(", "));
       }
-      if (b.onDiskOnly && b.status === "active") meta.push("served by another process; the link may be stale");
+      if (b.provenance === "diskOnly" && b.status === "active") meta.push("served by another process; the link may be stale");
       const children = [
         el("div", { class: "title", text: b.title }),
         el("span", { class: `status ${b.status}`, text: b.status === "active" ? "waiting" : b.status }),

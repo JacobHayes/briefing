@@ -127,8 +127,9 @@ export default function briefingExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.mode !== "tui") return;
     let schema: any;
+    let shared: string[];
     try {
-      schema = JSON.parse(await runCapture(["schema"]));
+      [schema, { shared }] = await Promise.all([runCapture(["schema"]), runCapture(["guidelines"])].map((p) => p.then(JSON.parse)));
     } catch (error) {
       ctx.ui.notify(`briefing binary unavailable: ${describe(error)}`, "warning");
       return;
@@ -140,12 +141,11 @@ export default function briefingExtension(pi: ExtensionAPI) {
       description:
         "Present complex information in a paced browser briefing and return the user's notes, inline comments, decisions, and follow-up markers. Blocks until the user submits.",
       promptSnippet: "Present complex information or contextual decisions as a paced browser briefing",
+      // Shared rules come from the binary (`briefing guidelines`) so they match the MCP server.
       promptGuidelines: [
-        "Proactively use brief_user whenever an answer crosses a complexity threshold (substantial research, multi-part explanations, decisions that need context). Use normal concise responses for simple answers.",
-        "Finish the research first, then call brief_user once with 3-8 semantic chunks in dependency order, 3-5 keyPoints each, stable context in tray, and 2-4 distinct decision options with the recommended one first and marked.",
-        "Every prose field accepts Markdown: GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, and ```vega-lite fences for charts; use them only when they clarify.",
-        "brief_user shows the link in Pi's UI and blocks until the user submits; respond only to the returned feedback and do not repeat the presentation.",
-        "Briefings outlive the Pi session (unanswered ones for two weeks, results for 6 hours); if the user gives you a briefing id from an interrupted session, tell them to run /brief-result <id> to recover it.",
+        ...shared,
+        "brief_user shows the link in Pi's UI and blocks until the user submits.",
+        "If the user gives you a briefing id from an interrupted session, tell them to run /brief-result <id> to recover it.",
       ],
       executionMode: "sequential",
       parameters: schema,

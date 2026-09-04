@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, Created};
 use crate::content::{Briefing, schema_value};
-use crate::hub::{BriefingStatus, WaitOutcome};
+use crate::hub::{BriefingStatus, Provenance, WaitOutcome};
 use crate::response::BriefingResponse;
 
 /// How to keep a long `await_briefing` call alive while the human reads.
@@ -42,15 +42,6 @@ pub enum HoldMode {
 }
 
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
-
-pub const INSTRUCTIONS: &str = "\
-Briefing presents complex information in a paced browser interface and returns the user's notes, inline comments, decisions, and follow-up markers.
-
-Use brief_user proactively whenever an answer crosses a complexity threshold: substantial research with dependent findings, multi-part explanations, or decisions that need context. Keep short and simple answers as normal chat. Finish the research and reasoning first, then call brief_user once with 3-8 semantic chunks in dependency order (one main idea per chunk, 3-5 keyPoints each, focused details, stable context in tray, 2-4 distinct decision options with the recommended one first and marked). Text fields accept Markdown, GFM tables, fenced code, Mermaid fences, and Vega-Lite fences; use them only when they clarify.
-
-Results are returned as structuredContent. brief_user returns immediately with the briefing link and a briefingId; put that exact link in your reply so the user can open it (they may be on a different machine from the agent), then call await_briefing with the briefingId; it blocks until they submit and returns their feedback. If await_briefing returns status \"pending\", call it again. If your harness moves the call to the background, stop and wait for its completion notification; do not poll. After the feedback arrives, respond only to it; do not repeat the presentation as a chat message.
-
-Briefings outlive the process that created them (unanswered ones for two weeks, results for 6 h). If a session was interrupted, or the user gives you a briefingId, call await_briefing with it: it returns the stored feedback if they already submitted, or reopens the briefing (status \"reopened\" with a fresh link to relay) if not.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -482,7 +473,7 @@ impl BriefingMcp {
             .map_err(internal)?
             .ok_or_else(|| ErrorData::invalid_params(format!("unknown briefingId {id}"), None))?;
         let url = info.url.clone().unwrap_or_else(|| format!("(briefing {})", info.title));
-        if info.reopened {
+        if info.provenance == Provenance::Reopened {
             return Ok(structured(
                 format!("Briefing {id} reopened at {url}"),
                 &AwaitOutput {
@@ -517,7 +508,7 @@ impl BriefingMcp {
 impl ServerHandler for BriefingMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(crate::guidance::mcp_instructions())
             .with_server_info(Implementation::new("briefing", env!("CARGO_PKG_VERSION")).with_title("Briefing"))
     }
 }

@@ -144,6 +144,7 @@ Unanswered briefings expire after 14 days. One result per briefing, no history.
 briefing demo                      # open the bundled demo
 briefing present spec.json         # print the user's feedback as text; --json for JSON
 briefing schema                    # JSON Schema for brief_user input
+briefing guidelines                # the model-facing rules as JSON (what the MCP instructions and Pi extension use)
 briefing mcp                       # MCP over stdio
 briefing serve --mcp               # long-lived hub (see below)
 briefing status                    # list known briefings (waiting / completed / cancelled)
@@ -156,7 +157,7 @@ the result on stdout. Exit codes: 0 completed, 2 cancelled, 3 still pending afte
 
 | Flag / env | Meaning |
 |---|---|
-| `--bind auto\|local\|tailscale` (`BRIEFING_BIND`) | Where the embedded server listens; `auto` prefers the Tailscale address |
+| `--bind auto\|local` (`BRIEFING_BIND`) | Where the embedded server listens; `auto` prefers the Tailscale address and falls back to loopback |
 | `--no-open` (`BRIEFING_NO_OPEN`) | Never try to open a browser |
 | `--on-create 'cmd'` (`BRIEFING_ON_CREATE`) | Shell hook run with `BRIEFING_URL/ID/TITLE`, e.g. to push the link to ntfy from a headless box |
 | `--hub URL` (`BRIEFING_HUB`) | Use a hub instead of the embedded server |

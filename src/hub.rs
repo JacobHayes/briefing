@@ -117,16 +117,25 @@ pub struct BriefingInfo {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<DraftSummary>,
-    /// True the first time this process serves a briefing at a different link than the
-    /// one it was last served at: the old link is dead and the new one must be shown.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reopened: bool,
-    /// True when the record is only on disk (listed, but not served by this process).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub on_disk_only: bool,
+    #[serde(default)]
+    pub provenance: Provenance,
 }
 
-fn info(stored: &StoredRecord, on_disk_only: bool) -> BriefingInfo {
+/// How the reporting process relates to a briefing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Provenance {
+    /// Served by this process at the link on record.
+    #[default]
+    Live,
+    /// This process has just started serving it at a new link (reported once): the old
+    /// link is dead and the new one must be shown again.
+    Reopened,
+    /// Known only from disk; the link on record belongs to another process and may be dead.
+    DiskOnly,
+}
+
+fn info(stored: &StoredRecord, provenance: Provenance) -> BriefingInfo {
     BriefingInfo {
         id: stored.id.clone(),
         title: stored.presentation.title.clone(),
@@ -136,8 +145,7 @@ fn info(stored: &StoredRecord, on_disk_only: bool) -> BriefingInfo {
         source: stored.source.clone(),
         url: stored.url.clone(),
         draft: stored.draft.as_ref().map(|draft| draft_summary(&stored.presentation, draft)),
-        reopened: false,
-        on_disk_only,
+        provenance,
     }
 }
 
@@ -425,17 +433,21 @@ impl Hub {
     }
 
     pub fn info(&self, id: &str) -> Option<BriefingInfo> {
-        self.with_record(id, |r| info(&r.stored, false))
+        self.with_record(id, |r| info(&r.stored, Provenance::Live))
     }
 
     /// Everything this process knows plus on-disk records from other processes.
     pub fn list(&self) -> Vec<BriefingInfo> {
         let mut infos: Vec<BriefingInfo> =
-            self.records.lock().unwrap().values().map(|r| info(&r.stored, false)).collect();
+            self.records.lock().unwrap().values().map(|r| info(&r.stored, Provenance::Live)).collect();
         if let Some(store) = &self.config.store {
             let known: HashSet<&str> = infos.iter().map(|i| i.id.as_str()).collect();
-            let disk: Vec<BriefingInfo> =
-                store.list().iter().filter(|s| !known.contains(s.id.as_str())).map(|s| info(s, true)).collect();
+            let disk: Vec<BriefingInfo> = store
+                .list()
+                .iter()
+                .filter(|s| !known.contains(s.id.as_str()))
+                .map(|s| info(s, Provenance::DiskOnly))
+                .collect();
             infos.extend(disk);
         }
         infos.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
@@ -626,10 +638,10 @@ mod tests {
         assert!(matches!(d.wait(&created.id, Duration::from_millis(1)).await, Ok(WaitOutcome::Done(_))));
         let listed = d.list();
         assert_eq!(listed.len(), 1);
-        assert!(!listed[0].on_disk_only);
+        assert_eq!(listed[0].provenance, Provenance::Live);
 
         // Listing without adopting reports disk-only records.
         let e = Hub::new(config());
-        assert!(e.list()[0].on_disk_only);
+        assert_eq!(e.list()[0].provenance, Provenance::DiskOnly);
     }
 }

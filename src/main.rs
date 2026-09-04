@@ -5,7 +5,7 @@ use std::time::Duration;
 use briefing::backend::{Backend, BindMode, Created, LocalBackend, RemoteBackend};
 use briefing::content::{self, Briefing};
 use briefing::http::{self, AppState, HttpConfig};
-use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, WaitOutcome};
+use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance, WaitOutcome};
 use briefing::mcp::{BriefingMcp, HoldMode};
 use briefing::store::Store;
 use clap::{Args, Parser, Subcommand};
@@ -137,6 +137,8 @@ enum Command {
     },
     /// Print the brief_user JSON Schema.
     Schema,
+    /// Print the model-facing guidelines as JSON (shared rules plus the MCP instructions).
+    Guidelines,
 }
 
 fn init_tracing() {
@@ -368,7 +370,7 @@ fn print_status_table(infos: &[BriefingInfo]) {
         if let Some(draft) = &info.draft {
             extras.push(format!("screen {}/{}, {} comments", draft.screen, draft.screens, draft.annotations));
         }
-        if info.on_disk_only && info.status == BriefingStatus::Active {
+        if info.provenance == Provenance::DiskOnly && info.status == BriefingStatus::Active {
             extras.push(format!(
                 "served by another process; `briefing await {}` re-serves it if that one is gone",
                 info.id
@@ -456,6 +458,10 @@ async fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Command::Schema => {
             println!("{}", serde_json::to_string_pretty(&content::json_schema())?);
+            Ok(0)
+        }
+        Command::Guidelines => {
+            println!("{}", serde_json::to_string_pretty(&briefing::guidance::json())?);
             Ok(0)
         }
     }
