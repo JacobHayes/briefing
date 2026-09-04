@@ -80,37 +80,18 @@ tasks:
       echo "$publish" > "$RWX_VALUES/publish"
       echo "$sha" > "$RWX_VALUES/sha"
 
-  - key: build
+  # Export the tag for build.rs (`briefing --version`); see packages/build.yml.
+  - key: version
     use: toolchain
     if: ${{ tasks.plan.values.publish == 'true' }}
-    parallel:
-      matrix:
-        target: [aarch64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl]
+    cache: false
     env:
-      TARGET: ${{ parallel.target }}
-    run: |
-      set -euo pipefail
-      cargo zigbuild --release --locked --target "$TARGET"
-      staging="$(mktemp -d)/briefing-$TARGET"
-      mkdir -p "$staging" dist
-      cp "target/$TARGET/release/briefing" README.md LICENSE "$staging/"
-      tar -C "$(dirname "$staging")" -czf "dist/briefing-$TARGET.tar.gz" "briefing-$TARGET"
-      (cd dist && sha256sum "briefing-$TARGET.tar.gz" > "briefing-$TARGET.tar.gz.sha256")
-    # Only what the build reads, so doc/workflow-only commits reuse the previous build.
-    filter:
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - mise.toml
-      - build.rs
-      - src/**/*
-      - assets/**/*
-      - README.md
-      - LICENSE
-    outputs:
-      artifacts:
-        - key: dist
-          path: dist
+      RELEASE_TAG: ${{ tasks.plan.values.release-tag }}
+    run: echo "$RELEASE_TAG" > "$RWX_ENV/BRIEFING_VERSION"
+
+  - key: build
+    use: version
+    call: ${{ run.dir }}/packages/build.yml
 
   - key: publish
     use: toolchain.tools
@@ -123,7 +104,7 @@ tasks:
         cache-key: excluded
       RELEASE_TAG: ${{ tasks.plan.values.release-tag }}
       SHA: ${{ tasks.plan.values.sha }}
-      ASSETS: ${{ tasks.build.artifacts.dist }}
+      ASSETS: ${{ tasks.build.tasks.build.artifacts.dist }}
     run: |
       set -euo pipefail
       sudo apt-get update && sudo apt-get install -y --no-install-recommends gh && sudo apt-get clean

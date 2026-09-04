@@ -20,7 +20,7 @@ const EXIT_INTERRUPTED: i32 = 130;
 
 /// Paced browser briefings for coding agents (Pi, Claude Code, Codex, ...).
 #[derive(Parser)]
-#[command(name = "briefing", version, about)]
+#[command(name = "briefing", version = env!("BRIEFING_VERSION"), about)]
 struct Cli {
     #[command(flatten)]
     common: Common,

@@ -36,6 +36,17 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/demo.json");
     println!("cargo:rerun-if-env-changed=BRIEFING_VENDOR_DIR");
 
+    // `briefing --version`: the release tag when the release build sets BRIEFING_VERSION,
+    // otherwise the Cargo version marked as a dev build. Kept out of Cargo.toml so releases
+    // need no version-bump commits.
+    println!("cargo:rerun-if-env-changed=BRIEFING_VERSION");
+    let version = env::var("BRIEFING_VERSION")
+        .ok()
+        .map(|v| v.trim().trim_start_matches('v').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("{}-dev", env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION")));
+    println!("cargo:rustc-env=BRIEFING_VERSION={version}");
+
     fs::create_dir_all(&out_dir).expect("create OUT_DIR/vendor");
 
     if let Some(dir) = env::var_os("BRIEFING_VENDOR_DIR") {

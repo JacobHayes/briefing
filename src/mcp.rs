@@ -510,7 +510,7 @@ impl ServerHandler for BriefingMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(crate::guidance::mcp_instructions())
-            .with_server_info(Implementation::new("briefing", env!("CARGO_PKG_VERSION")).with_title("Briefing"))
+            .with_server_info(Implementation::new("briefing", env!("BRIEFING_VERSION")).with_title("Briefing"))
     }
 }
 

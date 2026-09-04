@@ -47,22 +47,19 @@ tasks:
       - assets/**/*
       - skills/**/* # a test checks SKILL.md against the binary's limits
 
+  # Same packaging as a release, minus the version (see packages/build.yml).
   - key: build
     use: toolchain
-    parallel:
-      matrix:
-        target: [aarch64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl]
-    run: |
-      cargo zigbuild --release --locked --target "$TARGET"
-      mkdir -p "$RWX_ARTIFACTS/briefing-$TARGET"
-      cp "target/$TARGET/release/briefing" "$RWX_ARTIFACTS/briefing-$TARGET/"
+    call: ${{ run.dir }}/packages/build.yml
+
+  - key: package-check
+    use: toolchain.tools
+    after: [build]
     env:
-      TARGET: ${{ parallel.target }}
-    filter:
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - mise.toml
-      - build.rs
-      - src/**/*
-      - assets/**/*
+      ASSETS: ${{ tasks.build.tasks.build.artifacts.dist }}
+    run: |
+      set -euo pipefail
+      # One subdirectory per matrix leg.
+      find "$ASSETS" -type f | sort
+      for sums in "$ASSETS"/*/*.sha256; do (cd "$(dirname "$sums")" && sha256sum -c "$(basename "$sums")"); done
+      tar tzf "$ASSETS"/*/briefing-x86_64-unknown-linux-musl.tar.gz

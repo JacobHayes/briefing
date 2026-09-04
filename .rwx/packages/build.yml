@@ -1,0 +1,40 @@
+# Release build of every target, packaged the way mise expects (`briefing-<target>.tar.gz`
+# plus sha256). Shared by ci.yml (a `-dev` build, so CI proves the packaging and stays
+# cacheable across doc-only pushes) and release.yml, whose `version` task exports
+# BRIEFING_VERSION=<tag> through $RWX_ENV so build.rs bakes it into `briefing --version`
+# (that build is fresh once per release).
+package: true
+
+tasks:
+  - key: build
+    use: package.use
+    parallel:
+      matrix:
+        target: [aarch64-apple-darwin, aarch64-unknown-linux-musl, x86_64-unknown-linux-musl]
+    env:
+      TARGET: ${{ parallel.target }}
+    run: |
+      set -euo pipefail
+      cargo zigbuild --release --locked --target "$TARGET"
+      staging="$(mktemp -d)/briefing-$TARGET"
+      mkdir -p "$staging" dist
+      cp "target/$TARGET/release/briefing" README.md LICENSE "$staging/"
+      tar -C "$(dirname "$staging")" -czf "dist/briefing-$TARGET.tar.gz" "briefing-$TARGET"
+      (cd dist && sha256sum "briefing-$TARGET.tar.gz" > "briefing-$TARGET.tar.gz.sha256")
+      # The x86_64 musl binary runs on this runner: show the version that was baked in.
+      if [ "$TARGET" = x86_64-unknown-linux-musl ]; then "$staging/briefing" --version; fi
+    # Only what the build reads, so doc/workflow-only commits reuse the previous build.
+    filter:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - mise.toml
+      - build.rs
+      - src/**/*
+      - assets/**/*
+      - README.md
+      - LICENSE
+    outputs:
+      artifacts:
+        - key: dist
+          path: dist

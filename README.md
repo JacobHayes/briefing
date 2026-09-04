@@ -227,7 +227,9 @@ be available; offline builds can point `BRIEFING_VENDOR_DIR` at a directory hold
 seven files.
 
 CI (`.rwx/ci.yml`) checks and cross-builds every push; releases (`.rwx/release.yml`) are
-immutable calver tags `vYYYY.MM.DD.N`, published daily when `main` moved. The workflow files
+immutable calver tags `vYYYY.MM.DD.N`, published daily when `main` moved. The release build
+sets `BRIEFING_VERSION` to the tag, which `build.rs` bakes into `briefing --version`; other
+builds report the Cargo version with a `-dev` suffix. The workflow files
 carry the details. Fresh releases can be hidden by mise's `minimum_release_age` for a while;
 `MISE_MINIMUM_RELEASE_AGE=0` overrides. TLS is rustls + ring with bundled webpki roots, so no
 platform SDKs are needed to cross-compile.
