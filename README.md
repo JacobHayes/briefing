@@ -6,7 +6,7 @@ in your browser instead: one idea per screen, context one click away, inline com
 anything you select, decision cards with a recommendation, and a review screen before you
 send it back. Only what you wrote returns to the agent.
 
-![A briefing chunk: one idea, its key points, a comparison table, and a diagram](docs/screenshots/01-chunk.png)
+![Walkthrough: read a chunk, select a sentence and comment on it, open the Context panel, pick a decision, review, submit](docs/screenshots/tour.gif)
 
 ```mermaid
 flowchart LR
