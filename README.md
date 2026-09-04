@@ -12,29 +12,15 @@ notes, checkpoint answers, inline comments with their quoted passages, flagged s
 decisions.
 
 ```mermaid
-sequenceDiagram
-    participant Agent as Agent<br/>(Claude Code, Codex, Pi, CLI)
-    participant B as briefing<br/>(MCP server or CLI)
-    participant S as Page server<br/>(embedded or hub)
-    participant User as User's browser
-
-    Agent->>B: brief_user(presentation)
-    B->>S: register, mirror record to disk
-    B-->>Agent: link + briefingId
-    Agent->>User: shows the link
-    Agent->>B: await_briefing(briefingId)
-    User->>S: opens the page
-    loop reading
-        User->>S: notes, comments, decisions (draft saved server-side)
-    end
-    User->>S: Submit
-    S-->>B: feedback
-    B-->>Agent: feedback (structuredContent)
+flowchart LR
+    A[Agent finishes<br/>its research] --> B[Opens a briefing<br/>in your browser]
+    B --> C[You read it one idea at a time,<br/>comment, and decide]
+    C --> D[Your notes and decisions<br/>go back to the agent]
 ```
 
-The record on disk is what makes this robust: if the agent's process dies at any point, a
-later `await_briefing` with the same id returns the stored feedback or re-serves the page with
-the draft intact ([recovery](#recovery-and-hand-off)).
+Briefings survive the agent's process: if it dies at any point, a later `await_briefing` with
+the same id returns your feedback or reopens the page with your draft intact
+([recovery](#recovery-and-hand-off)).
 
 ## Install
 
