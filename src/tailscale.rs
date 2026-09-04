@@ -97,28 +97,31 @@ pub fn parse_status_json(stdout: &str) -> Result<BindTarget, String> {
     })
 }
 
-/// Run `tailscale status --json` and pick a bind target, falling back to loopback.
-pub async fn detect_bind_target() -> BindTarget {
+/// Run `tailscale status --json` and pick this node's Tailscale address. `Err` carries the
+/// reason there is none.
+pub async fn detect() -> Result<BindTarget, String> {
     let command = tokio::process::Command::new("tailscale")
         .args(["status", "--json"])
         .stdin(std::process::Stdio::null())
         .output();
     let output = match tokio::time::timeout(TAILSCALE_STATUS_TIMEOUT, command).await {
         Ok(Ok(output)) => output,
-        Ok(Err(error)) => return BindTarget::local(Some(format!("Tailscale check failed: {error}"))),
-        Err(_) => return BindTarget::local(Some("Tailscale check timed out".into())),
+        Ok(Err(error)) => return Err(format!("Tailscale check failed: {error}")),
+        Err(_) => return Err("Tailscale check timed out".into()),
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         let detail = compact(if stderr.trim().is_empty() { &stdout } else { &stderr });
         let detail = if detail.is_empty() { format!("exit {}", output.status) } else { detail };
-        return BindTarget::local(Some(format!("Tailscale unavailable: {detail}")));
+        return Err(format!("Tailscale unavailable: {detail}"));
     }
-    match parse_status_json(&String::from_utf8_lossy(&output.stdout)) {
-        Ok(target) => target,
-        Err(reason) => BindTarget::local(Some(reason)),
-    }
+    parse_status_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// [`detect`], falling back to loopback with the reason as a diagnostic.
+pub async fn detect_bind_target() -> BindTarget {
+    detect().await.unwrap_or_else(|reason| BindTarget::local(Some(reason)))
 }
 
 #[cfg(test)]

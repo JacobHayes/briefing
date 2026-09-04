@@ -20,13 +20,19 @@ pub enum BindMode {
     Auto,
     /// 127.0.0.1 only.
     Local,
+    /// The Tailscale address, or fail: never serve on loopback (for a headless box where a
+    /// loopback link would be useless).
+    Tailscale,
 }
 
 impl BindMode {
-    pub async fn target(self) -> BindTarget {
+    pub async fn target(self) -> anyhow::Result<BindTarget> {
         match self {
-            BindMode::Local => BindTarget::local(None),
-            BindMode::Auto => tailscale::detect_bind_target().await,
+            BindMode::Local => Ok(BindTarget::local(None)),
+            BindMode::Auto => Ok(tailscale::detect_bind_target().await),
+            BindMode::Tailscale => {
+                tailscale::detect().await.map_err(|reason| anyhow::anyhow!("--bind tailscale: {reason}"))
+            }
         }
     }
 }
@@ -136,8 +142,8 @@ impl LocalBackend {
     async fn ensure_server(&self) -> anyhow::Result<&LocalServer> {
         self.server
             .get_or_try_init(|| async {
-                let preferred = self.bind.target().await;
-                let fallback = (preferred.scope == BindScope::Tailnet).then(|| {
+                let preferred = self.bind.target().await?;
+                let fallback = (self.bind == BindMode::Auto && preferred.scope == BindScope::Tailnet).then(|| {
                     BindTarget::local(Some(format!(
                         "Fell back to local loopback after {} bind failed",
                         preferred.label

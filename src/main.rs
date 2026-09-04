@@ -292,7 +292,7 @@ async fn run_mcp_stdio(common: &Common, hold: HoldArgs) -> anyhow::Result<()> {
 }
 
 async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
-    let target = common.bind.target().await;
+    let target = common.bind.target().await?;
     let listener = http::bind(&target.bind_host, args.port).await?;
     let bound_port = listener.local_addr()?.port();
     let origin = args

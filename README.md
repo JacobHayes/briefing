@@ -157,7 +157,7 @@ the result on stdout. Exit codes: 0 completed, 2 cancelled, 3 still pending afte
 
 | Flag / env | Meaning |
 |---|---|
-| `--bind auto\|local` (`BRIEFING_BIND`) | Where the embedded server listens; `auto` prefers the Tailscale address and falls back to loopback |
+| `--bind auto\|local\|tailscale` (`BRIEFING_BIND`) | Where the embedded server listens: `auto` prefers the Tailscale address and falls back to loopback; `tailscale` fails instead of falling back |
 | `--no-open` (`BRIEFING_NO_OPEN`) | Never try to open a browser |
 | `--on-create 'cmd'` (`BRIEFING_ON_CREATE`) | Shell hook run with `BRIEFING_URL/ID/TITLE`, e.g. to push the link to ntfy from a headless box |
 | `--hub URL` (`BRIEFING_HUB`) | Use a hub instead of the embedded server |
