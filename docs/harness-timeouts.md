@@ -57,16 +57,22 @@ Under 2026-07-28 the question disappears: there is no outstanding request.
 
 ## Implications for briefing
 
-The current design already matches the most portable pattern: a bounded blocking wait with
-progress heartbeats, a `briefingId` resume handle (`await_briefing`), and elicitation as an
-opt-in hold rather than the wait itself. What the data adds:
+The design matches the most portable pattern: a bounded blocking wait with progress
+heartbeats, a `briefingId` resume handle (`await_briefing`), and elicitation as an opt-in hold
+rather than the wait itself. What the data adds:
 
 - `--max-wait-secs` matters more than `--hold` on the 60-second clients (Cursor, Cline, Zed,
   Continue, OpenCode, Pi's MCP adapter): none reset on progress, several cannot raise the
-  limit. Recommended budgets: ~50 s there, ~280 s Codex/Goose, ~570 s Gemini, ~100 s Claude
-  Code (keeps the call in the foreground), any value on VS Code.
-- Claude Code auto-backgrounds the call after 2 minutes; the result then arrives as a task
-  notification, which is fine.
+  limit. Budgets in `ClientProfile`: ~50 s there, ~280 s Codex/Goose, ~570 s Gemini, 24 h
+  Claude Code and VS Code.
+- Claude Code (verified 2026-09-04): no effective timeout for our purposes. The ~28 h
+  wall-clock cap is far away and the 30-minute stdio idle timer is reset by the 10 s
+  heartbeats. It moves any call over 2 minutes into a background task and wakes the model with
+  a completion notice, so the tool text tells the model to wait for that rather than poll.
+  Progress `message` text is not rendered (issue #31893), which is why `brief_user` returns
+  the link immediately instead of reporting it mid-call.
+- Because records are mirrored to disk, a lost tool call is never fatal: `await_briefing`
+  with the same id from any later process returns the stored feedback or re-serves the page.
 - Tasks is the sanctioned long-run pattern but only VS Code implements it (old shape), so it is
   not worth targeting yet. MRTR `input_required` + `requestState` is the natural next step once
   clients speak 2026-07-28; the existing `briefingId` can become that state.

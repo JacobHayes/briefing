@@ -20,7 +20,8 @@ flowchart LR
 
 Briefings survive the agent's process: if it dies at any point, a later `await_briefing` with
 the same id returns your feedback or reopens the page with your draft intact
-([recovery](#recovery-and-hand-off)).
+([recovery](#recovery-and-hand-off)). The reading experience, its non-goals, and the content
+contract are described in [docs/design.md](docs/design.md).
 
 ## Install
 
