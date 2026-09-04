@@ -59,6 +59,23 @@ tasks:
       - mise.toml
       - rust-toolchain.toml
 
+  # Same cached dependency layer as ci.yml, so the three build legs share one fetch.
+  - key: deps
+    use: [tools]
+    run: |
+      cargo fetch --locked
+      (cd assets && npm ci --ignore-scripts --no-audit --no-fund)
+    filter:
+      - mise.toml
+      - rust-toolchain.toml
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - src/lib.rs
+      - src/main.rs
+      - assets/package.json
+      - assets/package-lock.json
+
   # Decide the tag for this run and whether anything needs publishing.
   - key: plan
     use: [tools]
@@ -88,7 +105,7 @@ tasks:
       echo "$sha" > "$RWX_VALUES/sha"
 
   - key: build
-    use: [tools]
+    use: [deps]
     if: ${{ tasks.plan.values.publish == 'true' }}
     parallel:
       matrix:
@@ -97,7 +114,6 @@ tasks:
       TARGET: ${{ parallel.target }}
     run: |
       set -euo pipefail
-      (cd assets && npm ci --ignore-scripts --no-audit --no-fund)
       cargo zigbuild --release --locked --target "$TARGET"
       staging="$(mktemp -d)/briefing-$TARGET"
       mkdir -p "$staging" dist

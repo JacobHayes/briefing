@@ -4,16 +4,12 @@ node = "latest"
 zig = "0.16.0"
 
 [tasks.check]
-description = "fmt, clippy (deny warnings), tests"
+description = "fmt, clippy (deny warnings), tests (the same three commands CI runs)"
 run = """
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
 """
-
-[tasks.install]
-description = "Build the release binary and install it to ~/.cargo/bin"
-run = "cargo install --path . --locked --force"
 
 [tasks.demo]
 description = "Open the bundled demo presentation"

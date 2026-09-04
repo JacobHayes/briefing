@@ -61,10 +61,7 @@ tasks:
 
   - key: check
     use: [deps]
-    run: |
-      cargo fmt --all -- --check
-      cargo clippy --all-targets --locked -- -D warnings
-      cargo test --locked
+    run: mise run check
     filter:
       - Cargo.toml
       - Cargo.lock
