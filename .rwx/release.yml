@@ -14,8 +14,10 @@
 # right one.
 #
 # Cloning and listing releases need no token (public repo). Creating releases does, so
-# `publish` uses the vault secret BRIEFING_GITHUB_TOKEN: a fine-grained PAT with Contents: read/write on
-# JacobHayes/briefing (`rwx vaults secrets set BRIEFING_GITHUB_TOKEN=...`).
+# `publish` uses BRIEFING_GITHUB_TOKEN from the RWX vault `briefing`: a fine-grained PAT with
+# Contents: read/write on JacobHayes/briefing (`rwx vaults secrets set --vault briefing
+# BRIEFING_GITHUB_TOKEN=...`). It is its own vault because the cron trigger has no user behind
+# it and can only reach a vault whose access rules admit this repository.
 
 on:
   cli:
@@ -24,7 +26,7 @@ on:
       force: "false"
   cron:
     - key: daily
-      schedule: '0 9 * * *' # 09:00 UTC daily
+      schedule: '18 14 * * *' # TEMPORARY: verify the cron trigger can read the vault; restore to '0 9 * * *'
       init:
         commit-sha: ${{ event.git.sha }}
         force: "false"
@@ -117,7 +119,7 @@ tasks:
     cache: false
     env:
       GH_TOKEN:
-        value: ${{ secrets.BRIEFING_GITHUB_TOKEN }}
+        value: ${{ vaults.briefing.secrets.BRIEFING_GITHUB_TOKEN }}
         cache-key: excluded
       RELEASE_TAG: ${{ tasks.plan.values.release-tag }}
       SHA: ${{ tasks.plan.values.sha }}
