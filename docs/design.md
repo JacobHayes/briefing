@@ -57,8 +57,14 @@ call validates the content, registers it, and hands back a link. What the user s
   confirm, never a browser dialog). Notes sit in the right margin when there is room and
   never cover presentation text. Mermaid nodes and edges and Vega-Lite charts can be
   commented on directly; those comments carry structured target metadata.
+- **A free-standing Notes panel**, opened from the header on any screen, holds thoughts that
+  belong to no section (inline comments and per-section responses cover those). It docks in
+  the left margin on wide viewports and is a bottom sheet on narrow ones. Notes return to the
+  agent next to the other feedback and carry the same weight.
 - **Decisions** are cards with a recommended option first, tradeoffs, and a collapsed
-  guidance field. Required decisions block `Next` until answered.
+  guidance field, either inline at the bottom of the chunk they depend on or standalone after
+  the chunks for choices that span the whole briefing. Required decisions block `Next` until
+  answered.
 - **Navigation** is Back, Next, and an always-available `View all` escape hatch; a final review
   screen lists everything the user wrote before `Submit`. No timers, no automatic advancement.
 - **Drafts persist.** Everything typed is saved server-side (debounced, revisioned) and cached
@@ -68,8 +74,9 @@ call validates the content, registers it, and hands back a link. What the user s
   navigation and refresh.
 
 Keyboard: Left/Right move between screens when focus is outside a form control; `c` after a
-keyboard selection opens the comment composer; Cmd/Ctrl+Enter saves a comment; Escape closes
-the composer or a pinned note; highlights are focusable and Enter/Space pins them.
+keyboard selection opens the comment composer; `n` opens the Notes panel; Cmd/Ctrl+Enter saves
+a comment; Escape closes the composer or a pinned note; highlights are focusable and
+Enter/Space pins them.
 
 The page uses plain wording ("Respond", "Submitted") rather than naming the agent, because
 the same page serves every harness.
@@ -97,7 +104,8 @@ The model should:
   and `remember` only for anchors needed later;
 - ask an explicit `checkpoint` question when it needs an answer;
 - offer 2-4 meaningfully distinct decision options, the recommended one first and marked,
-  with concrete tradeoffs and neutral wording;
+  with concrete tradeoffs and neutral wording; put a decision on the chunk it depends on and
+  keep top-level `decisions` for choices that span the whole briefing;
 - use rich Markdown only when it clarifies: GFM tables for comparisons and tradeoff matrices,
   fenced code with a language tag for technical examples, Mermaid for flows, architecture,
   state, and sequences, Vega-Lite for magnitude, trend, or segmentation. Prose is the default;
@@ -107,11 +115,13 @@ The model should:
 
 Input: whole presentation at most 1 MiB, fenced blocks at most 128 KB each; 1-10 chunks; per
 chunk up to 8 `keyPoints`, 4 `remember`, 6 `sources`; tray up to 6 `keyContext` and 5
-`openQuestions`; 0-6 decisions with 2-4 options and up to 4 `tradeoffs` each; sources must be
-absolute http(s) URLs; required text fields non-empty after trimming.
+`openQuestions`; 0-6 top-level decisions plus at most one per chunk, each with 2-4 options and
+up to 4 `tradeoffs`; sources must be absolute http(s) URLs; required text fields non-empty
+after trimming.
 
 Output: up to 500 annotations, each with a 2 000-character quote, 4 000-character comment,
-and 300-character location; other user text 20 000 characters; request body 8 MiB.
+and 300-character location; up to 100 free-standing notes of 20 000 characters each; other
+user text 20 000 characters; request body 8 MiB.
 
 ## Security and lifecycle
 

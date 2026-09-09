@@ -88,6 +88,9 @@ pub struct BriefingResponse {
     pub chunks: Vec<ChunkResponse>,
     pub decisions: Vec<DecisionResponse>,
     pub annotations: Vec<Annotation>,
+    /// Free-standing notes written in the Notes panel; not tied to any section.
+    #[serde(default)]
+    pub notes: Vec<String>,
     pub overall_note: String,
 }
 
@@ -206,6 +209,7 @@ pub fn parse_browser_result(value: &Value) -> BriefingResponse {
         chunks,
         decisions,
         annotations: parse_annotations(input.get("annotations")),
+        notes: rows("notes").into_iter().filter_map(|note| non_empty(trimmed(Some(note), MAX_USER_TEXT))).collect(),
         overall_note: trimmed(input.get("overallNote"), MAX_USER_TEXT),
     }
 }
@@ -243,11 +247,16 @@ pub struct FeedbackCounts {
     pub decisions: usize,
     pub sections: usize,
     pub comments: usize,
+    pub notes: usize,
 }
 
 impl std::fmt::Display for FeedbackCounts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} decisions, {} section responses, {} comments", self.decisions, self.sections, self.comments)
+        write!(
+            f,
+            "{} decisions, {} section responses, {} comments, {} notes",
+            self.decisions, self.sections, self.comments, self.notes
+        )
     }
 }
 
@@ -257,6 +266,7 @@ impl BriefingResponse {
             decisions: self.decisions.iter().filter(|d| d.is_substantive()).count(),
             sections: self.chunks.iter().filter(|c| c.is_substantive()).count(),
             comments: self.annotations.len(),
+            notes: self.notes.len(),
         }
     }
 
@@ -295,6 +305,9 @@ impl BriefingResponse {
             entry.push_str(&quote.join("\n"));
             entry.push_str(&format!("\nComment: {}", annotation.comment));
             lines.push(entry);
+        }
+        for note in &self.notes {
+            lines.push(format!("Note: {note}"));
         }
         if !self.overall_note.is_empty() {
             lines.push(format!("Overall response: {}", self.overall_note));
@@ -344,6 +357,7 @@ mod tests {
                 {"location": "First", "quote": "q", "comment": "c", "target": {"contentType": "mermaid", "targetId": "n1", "bogus": "x"}},
                 {"location": "x", "quote": "", "comment": "no quote"}
             ],
+            "notes": ["  a thought ", "", 7],
             "overallNote": "done"
         }));
         assert_eq!(result.chunks.len(), 2);
@@ -354,19 +368,20 @@ mod tests {
         assert_eq!(result.annotations.len(), 1);
         let target = result.annotations[0].target.as_ref().unwrap();
         assert_eq!(target.content_type.as_deref(), Some("mermaid"));
-        assert_eq!(result.counts().to_string(), "1 decisions, 1 section responses, 1 comments");
+        assert_eq!(result.notes, vec!["a thought"]);
+        assert_eq!(result.counts().to_string(), "1 decisions, 1 section responses, 1 comments, 1 notes");
 
         let text = Outcome::Completed { feedback: result }.format_text();
         assert!(text.contains("Sections flagged for follow-up: First"));
         assert!(text.contains("Target: content=mermaid, id=n1"));
         assert!(text.contains("> q\nComment: c"));
-        assert!(text.contains("Overall response: done"));
+        assert!(text.contains("\nNote: a thought\nOverall response: done"));
     }
 
     #[test]
     fn empty_and_cancelled_results() {
         let empty = parse_browser_result(&json!({}));
-        assert_eq!(empty.counts(), FeedbackCounts { decisions: 0, sections: 0, comments: 0 });
+        assert_eq!(empty.counts(), FeedbackCounts { decisions: 0, sections: 0, comments: 0, notes: 0 });
         assert!(Outcome::Completed { feedback: empty }.format_text().contains("returned no notes"));
         assert_eq!(parse_browser_result(&json!(null)), BriefingResponse::default());
         assert!(Outcome::cancelled().format_text().contains("cancelled"));

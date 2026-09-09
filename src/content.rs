@@ -57,6 +57,9 @@ pub struct Chunk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 6))]
     pub sources: Option<Vec<Source>>,
+    /// A decision that depends on this section: its options render at the bottom of this card, right under their context. Prefer this over a top-level decision whenever the choice refers to one section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<Decision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -122,7 +125,7 @@ pub struct Briefing {
     pub chunks: Vec<Chunk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tray: Option<Tray>,
-    /// 0-6 decisions shown after the explanatory chunks.
+    /// 0-6 decisions that span the whole briefing, shown after the chunks. A decision about one section belongs on that chunk's `decision` instead.
     #[serde(default)]
     #[schemars(length(max = 6))]
     pub decisions: Vec<Decision>,
@@ -163,6 +166,9 @@ fn text_fields(input: &Briefing) -> Vec<(String, &str)> {
         for (i, item) in chunk.remember.iter().flatten().enumerate() {
             fields.push((format!("{prefix} remember {}", i + 1), item));
         }
+        if let Some(decision) = &chunk.decision {
+            decision_fields(&mut fields, &format!("{prefix} decision"), decision);
+        }
     }
     if let Some(tray) = &input.tray {
         for (i, item) in tray.key_context.iter().flatten().enumerate() {
@@ -176,23 +182,26 @@ fn text_fields(input: &Briefing) -> Vec<(String, &str)> {
         }
     }
     for (index, decision) in input.decisions.iter().enumerate() {
-        let prefix = format!("decision {}", index + 1);
-        if let Some(context) = &decision.context {
-            fields.push((format!("{prefix} context"), context));
-        }
-        for (oi, option) in decision.options.iter().enumerate() {
-            if let Some(description) = &option.description {
-                fields.push((format!("{prefix} option {} description", oi + 1), description));
-            }
-            for (ti, tradeoff) in option.tradeoffs.iter().flatten().enumerate() {
-                fields.push((format!("{prefix} option {} tradeoff {}", oi + 1, ti + 1), tradeoff));
-            }
-        }
+        decision_fields(&mut fields, &format!("decision {}", index + 1), decision);
     }
     if let Some(prompt) = &input.completion_prompt {
         fields.push(("completionPrompt".into(), prompt));
     }
     fields
+}
+
+fn decision_fields<'a>(fields: &mut Vec<(String, &'a str)>, prefix: &str, decision: &'a Decision) {
+    if let Some(context) = &decision.context {
+        fields.push((format!("{prefix} context"), context));
+    }
+    for (oi, option) in decision.options.iter().enumerate() {
+        if let Some(description) = &option.description {
+            fields.push((format!("{prefix} option {} description", oi + 1), description));
+        }
+        for (ti, tradeoff) in option.tradeoffs.iter().flatten().enumerate() {
+            fields.push((format!("{prefix} option {} tradeoff {}", oi + 1, ti + 1), tradeoff));
+        }
+    }
 }
 
 /// Fenced code blocks found in a Markdown string: `(language, source)`.
@@ -247,6 +256,30 @@ fn validate_rich_content(input: &Briefing) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn validate_decision(decision: &Decision, label: &str) -> Result<(), ValidationError> {
+    require_text(&decision.question, &format!("{label} question"))?;
+    if decision.options.len() < MIN_OPTIONS || decision.options.len() > MAX_OPTIONS {
+        return Err(ValidationError(format!("{label} requires {MIN_OPTIONS}-{MAX_OPTIONS} options")));
+    }
+    let mut labels = std::collections::HashSet::new();
+    for option in &decision.options {
+        require_text(&option.label, &format!("{label} option label"))?;
+        if !labels.insert(option.label.trim().to_lowercase()) {
+            return Err(ValidationError(format!("{label} has duplicate option: {}", option.label)));
+        }
+        if option.tradeoffs.as_ref().map_or(0, Vec::len) > MAX_TRADEOFFS {
+            return Err(ValidationError(format!(
+                "{label} option {} has more than {MAX_TRADEOFFS} tradeoffs",
+                option.label
+            )));
+        }
+    }
+    if decision.options.iter().filter(|o| o.recommended == Some(true)).count() > 1 {
+        return Err(ValidationError(format!("{label} has more than one recommended option")));
+    }
+    Ok(())
+}
+
 /// Validate a presentation and return a normalized copy (trimmed title/goal).
 pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
     let serialized = serde_json::to_vec(input).map_err(|error| ValidationError(error.to_string()))?;
@@ -277,6 +310,9 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
                 return Err(ValidationError(format!("chunk {n} source URL must use http or https")));
             }
         }
+        if let Some(decision) = &chunk.decision {
+            validate_decision(decision, &format!("chunk {n} decision"))?;
+        }
     }
 
     if let Some(tray) = &input.tray {
@@ -292,27 +328,7 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
         return Err(ValidationError(format!("brief_user supports at most {MAX_DECISIONS} decisions")));
     }
     for (index, decision) in input.decisions.iter().enumerate() {
-        let n = index + 1;
-        require_text(&decision.question, &format!("decision {n} question"))?;
-        if decision.options.len() < MIN_OPTIONS || decision.options.len() > MAX_OPTIONS {
-            return Err(ValidationError(format!("decision {n} requires {MIN_OPTIONS}-{MAX_OPTIONS} options")));
-        }
-        let mut labels = std::collections::HashSet::new();
-        for option in &decision.options {
-            require_text(&option.label, &format!("decision {n} option label"))?;
-            if !labels.insert(option.label.trim().to_lowercase()) {
-                return Err(ValidationError(format!("decision {n} has duplicate option: {}", option.label)));
-            }
-            if option.tradeoffs.as_ref().map_or(0, Vec::len) > MAX_TRADEOFFS {
-                return Err(ValidationError(format!(
-                    "decision {n} option {} has more than {MAX_TRADEOFFS} tradeoffs",
-                    option.label
-                )));
-            }
-        }
-        if decision.options.iter().filter(|o| o.recommended == Some(true)).count() > 1 {
-            return Err(ValidationError(format!("decision {n} has more than one recommended option")));
-        }
+        validate_decision(decision, &format!("decision {}", index + 1))?;
     }
 
     validate_rich_content(input)?;
@@ -355,6 +371,7 @@ mod tests {
                 remember: None,
                 checkpoint: None,
                 sources: None,
+                decision: None,
             }],
             tray: None,
             decisions: vec![],
@@ -402,6 +419,17 @@ mod tests {
             options: vec![opt("A", true), opt("B", true)],
         }];
         assert!(validate(&p).unwrap_err().0.contains("recommended"));
+
+        // Inline decisions get the same checks, labelled by their chunk.
+        let mut p = minimal();
+        p.chunks[0].decision =
+            Some(Decision { question: " ".into(), context: None, required: None, options: vec![opt("A", true)] });
+        assert!(validate(&p).unwrap_err().0.starts_with("chunk 1 decision question"));
+        p.chunks[0].decision =
+            Some(Decision { question: "Q".into(), context: None, required: None, options: vec![opt("A", true)] });
+        assert!(validate(&p).unwrap_err().0.contains("chunk 1 decision requires"));
+        p.chunks[0].decision.as_mut().unwrap().options.push(opt("B", false));
+        validate(&p).unwrap();
     }
 
     #[test]

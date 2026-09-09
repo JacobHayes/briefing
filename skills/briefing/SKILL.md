@@ -21,8 +21,9 @@ harness:
   `status: "pending"`, call it again. `cancel_briefing` abandons an open briefing.
 
 `feedback` is `{chunks[{title, status, checkpoint, note}], decisions[{question, selected,
-note}], annotations[{location, quote, comment, target?}], overallNote}`; `status: "revisit"`
-marks a section flagged for follow-up. MCP results are structured JSON with an
+note}], annotations[{location, quote, comment, target?}], notes[string], overallNote}`;
+`status: "revisit"` marks a section flagged for follow-up, and `notes` are free-standing notes
+from the Notes panel, tied to no section. MCP results are structured JSON with an
 `instructions` field.
 
 Briefings outlive the process that created them (unanswered for 14 days, results for 6 hours).
@@ -56,9 +57,11 @@ Finish the research and reasoning first, then call the tool once.
   absolute http(s) URLs (max 6).
 - **Tray** (the Context panel): stable `keyContext` (max 6), a `runningSummary`, and
   `openQuestions` (max 5). Put context here instead of repeating it on every chunk.
-- **Decisions**: 0-6, each with 2-4 meaningfully distinct options. Put the recommended option
+- **Decisions**: each has 2-4 meaningfully distinct options. Put the recommended option
   first and set `recommended: true` on it only. State concrete `tradeoffs` (max 4) without
-  loaded wording. `required` defaults to true.
+  loaded wording. `required` defaults to true. Put a decision on the chunk it depends on
+  (`decision` on that chunk; it renders at the bottom of the chunk's card) and reserve
+  top-level `decisions` (0-6, shown after the chunks) for choices that span the whole briefing.
 - **Rich text**: every prose field accepts Markdown: emphasis, links (bare domains allowed),
   lists, GFM tables, inline code, fenced code with a language tag, ```mermaid fences, and
   ```vega-lite fences (JSON spec). Use them only when they clarify: tables for comparisons and
@@ -70,9 +73,10 @@ Finish the research and reasoning first, then call the tool once.
 ## After the result
 
 Respond only to what came back: answer checkpoint questions, act on decisions, address inline
-comments (each carries a location, the quoted passage, and the comment), and follow up on
-flagged sections. Do not repeat the presentation as a chat message. If the user cancelled,
-ask how they would like to proceed instead of re-opening the briefing.
+comments (each carries a location, the quoted passage, and the comment), act on `notes` (they
+carry the same weight as any other feedback), and follow up on flagged sections. Do not repeat
+the presentation as a chat message. If the user cancelled, ask how they would like to proceed
+instead of re-opening the briefing.
 
 ## Minimal example
 
@@ -85,18 +89,16 @@ ask how they would like to proceed instead of re-opening the briefing.
       "title": "What the pipeline needs",
       "mainPoint": "Ordering per tenant matters more than raw throughput.",
       "keyPoints": ["~2k msg/s peak", "At-least-once is fine", "Ops team already runs Postgres"],
-      "checkpoint": "Is per-tenant ordering a hard requirement?"
+      "checkpoint": "Is per-tenant ordering a hard requirement?",
+      "decision": {
+        "question": "Which backend?",
+        "options": [
+          { "label": "Postgres SKIP LOCKED", "recommended": true, "tradeoffs": ["No new infra", "Caps near 10k msg/s"] },
+          { "label": "Kafka", "tradeoffs": ["Ordering per partition", "New cluster to run"] }
+        ]
+      }
     }
   ],
-  "tray": { "keyContext": ["Deadline: end of quarter"], "runningSummary": "Ordering > throughput." },
-  "decisions": [
-    {
-      "question": "Which backend?",
-      "options": [
-        { "label": "Postgres SKIP LOCKED", "recommended": true, "tradeoffs": ["No new infra", "Caps near 10k msg/s"] },
-        { "label": "Kafka", "tradeoffs": ["Ordering per partition", "New cluster to run"] }
-      ]
-    }
-  ]
+  "tray": { "keyContext": ["Deadline: end of quarter"], "runningSummary": "Ordering > throughput." }
 }
 ```

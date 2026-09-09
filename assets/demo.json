@@ -13,7 +13,24 @@
       ],
       "details": "Rich content can clarify a chunk without changing the authoring model.\n\n| Content | Useful when |\n|---|---|\n| Tables | Evidence or tradeoffs are easier to compare in rows |\n| Mermaid | A flow, architecture, or state transition is easier to see than read |\n| Vega-Lite | A compact chart explains relative magnitude or trend |\n\n```mermaid\nflowchart LR\n  agent[Agent reasoning] --> briefing[Browser briefing]\n  briefing --> feedback[Notes and decisions]\n  feedback --> agent\n```",
       "remember": ["The interface controls presentation; the agent still does the research and reasoning."],
-      "checkpoint": "What feels different from reading a normal long chat response?"
+      "checkpoint": "What feels different from reading a normal long chat response?",
+      "decision": {
+        "question": "Which reading mode should a briefing open in?",
+        "context": "Decided here because it only concerns the pacing described above.",
+        "options": [
+          {
+            "label": "Paced, one chunk per screen",
+            "description": "Open in the step-by-step view; View all stays one click away.",
+            "tradeoffs": ["Keeps attention on one idea", "One more click to skim"],
+            "recommended": true
+          },
+          {
+            "label": "View all first",
+            "description": "Open the full-page view and let the reader switch to pacing.",
+            "tradeoffs": ["Fast to skim", "Loses the one-idea-at-a-time framing"]
+          }
+        ]
+      }
     },
     {
       "title": "Return only useful signal",

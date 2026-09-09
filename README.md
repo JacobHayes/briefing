@@ -3,8 +3,9 @@
 **Paced browser briefings for coding agents.** When Claude Code, Codex, Pi, or any agent
 that speaks MCP has something too long or too layered for a chat reply, it opens a briefing
 in your browser instead: one idea per screen, context one click away, inline comments on
-anything you select, decision cards with a recommendation, and a review screen before you
-send it back. Only what you wrote returns to the agent.
+anything you select, decision cards with a recommendation (on the chunk they depend on, or
+after all of them), a free-standing Notes panel, and a review screen before you send it back.
+Only what you wrote returns to the agent.
 
 ![Walkthrough: read a chunk, select a sentence and comment on it, open the Context panel, pick a decision, review, submit](docs/screenshots/tour.gif)
 
@@ -22,8 +23,9 @@ flowchart LR
   next one.
 - **Feedback should be precise.** Select any sentence, table cell, diagram node, or chart and
   comment on exactly that. The agent gets the quoted passage with your note, not a paraphrase.
-- **Decisions need context first.** Decision cards come after the chunks that justify them,
-  with the recommended option first and its tradeoffs spelled out.
+- **Decisions need context first.** Decision cards sit at the bottom of the chunk that
+  justifies them, or after all the chunks when a choice spans the whole briefing, with the
+  recommended option first and its tradeoffs spelled out.
 - **It survives everything.** Drafts save as you type. If the agent's process dies, or you
   switch from laptop to phone, the briefing picks up where you left off, and the agent can
   fetch your answers later.
@@ -81,6 +83,7 @@ be on a different machine from the agent). `await_briefing` then blocks until yo
     "chunks":      [{ "title": "...", "status": "revisit", "checkpoint": "...", "note": "..." }],
     "decisions":   [{ "question": "...", "selected": "...", "note": "..." }],
     "annotations": [{ "location": "...", "quote": "...", "comment": "...", "target": { "..." : "..." } }],
+    "notes":       ["..."],
     "overallNote": "..."
   },
   "instructions": "Respond only to this feedback ..."
@@ -90,7 +93,8 @@ be on a different machine from the agent). `await_briefing` then blocks until yo
 Each result carries an `instructions` field telling the model what to do next; the text
 block is a one-line summary because Claude Code hands the model only the structured part.
 All three tools (`brief_user`, `await_briefing`, `cancel_briefing`) declare an
-`outputSchema`. Caps: 500 inline comments, 4 000-character comments, 20 000-character notes.
+`outputSchema`. Caps: 500 inline comments, 4 000-character comments, 100 free-standing notes,
+20 000-character notes.
 
 The page itself is a single calm reading column: `Step X of Y`, Back and Next, an always
 available **View all**, and no timers or auto-advance. The full interaction model, the
@@ -153,7 +157,7 @@ the result on stdout. With `--json` the result is one line, the same `status` sh
 tool and the hub API return:
 
 ```jsonc
-{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "completed", "feedback": { "chunks": [], "decisions": [], "annotations": [], "overallNote": "..." } }
+{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "completed", "feedback": { "chunks": [], "decisions": [], "annotations": [], "notes": ["..."], "overallNote": "..." } }
 { "briefingId": "7rJ-tS8jIOb8SPX5", "status": "cancelled", "feedback": { "..." : "..." } }
 { "briefingId": "7rJ-tS8jIOb8SPX5", "status": "pending" }
 ```

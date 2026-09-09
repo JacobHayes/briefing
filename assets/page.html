@@ -71,6 +71,7 @@
     main { max-width: var(--content); margin: 0 auto; padding: clamp(24px, 5vw, 40px) clamp(16px, 5vw, 28px) 120px; }
     .tag { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: .72rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
     h1.title { margin: 14px 0 0; font-size: clamp(1.5rem, 4vw, 2rem); line-height: 1.2; letter-spacing: -.02em; font-weight: 680; outline: none; }
+    h2.title { margin: 10px 0 0; font-size: clamp(1.2rem, 3vw, 1.45rem); line-height: 1.25; letter-spacing: -.015em; font-weight: 660; outline: none; }
     .purpose { margin: 8px 0 0; color: var(--muted); font-size: 1rem; }
     .lede { margin: 22px 0 0; font-size: 1.12rem; line-height: 1.55; white-space: pre-wrap; }
     .detail { margin: 20px 0 0; padding-top: 18px; border-top: 1px solid var(--line); }
@@ -148,6 +149,7 @@
     .flag input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
 
     /* Decisions */
+    .inline-decision { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); }
     .options { margin: 22px 0 0; display: grid; gap: 10px; }
     .option { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 15px 16px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); cursor: pointer; }
     .option:hover { border-color: var(--accent); }
@@ -173,7 +175,7 @@
     .review-empty { margin: 20px 0 0; color: var(--muted); }
 
     /* Navigation */
-    .nav { position: sticky; bottom: 0; margin-top: 32px; padding: 14px 0; display: flex; align-items: center; gap: 10px; background: linear-gradient(to top, var(--bg) 62%, transparent); }
+    .nav { position: sticky; bottom: var(--sheet, 0px); margin-top: 32px; padding: 14px 0; display: flex; align-items: center; gap: 10px; background: linear-gradient(to top, var(--bg) 62%, transparent); }
     .btn { border: 1px solid var(--line-strong); border-radius: 10px; padding: 10px 18px; background: var(--surface); font-weight: 600; }
     .btn:hover:not(:disabled) { border-color: var(--accent); }
     .btn.primary { color: var(--bg); background: var(--accent); border-color: var(--accent); }
@@ -236,6 +238,28 @@
     .composer-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
     .composer-actions .btn { padding: 8px 14px; }
 
+    /* Notes panel: free-standing notes, not tied to any section. A bottom sheet by
+       default; docked in the empty left margin when the viewport has room. The
+       reading column never moves and the right margin stays free for comments. */
+    .notes { position: fixed; z-index: 25; left: 0; right: 0; bottom: 0; max-height: min(100svh, max(50vh, 300px)); display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.18); }
+    .notes-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px 6px; }
+    .notes-title { font-size: .72rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); font-weight: 650; }
+    .notes-close { margin-left: auto; }
+    .notes-list { flex: 1; min-height: 0; overflow: auto; padding: 0 16px; }
+    .notes-empty { margin: 4px 0 10px; color: var(--muted); font-size: .9rem; }
+    .note-item, .note-editor { padding: 10px 0; border-top: 1px solid var(--line); }
+    .note-item .markdown { font-size: .95rem; }
+    .note-actions { display: flex; gap: 2px; margin-top: 4px; }
+    .notes-composer { padding: 10px 16px 14px; border-top: 1px solid var(--line); }
+    .notes textarea { min-height: 64px; background: var(--bg); }
+    .notes-actions { margin-top: 8px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+    .notes-actions .btn { padding: 8px 14px; }
+    .notes-hint { margin-right: auto; color: var(--muted); font-size: .78rem; }
+    @media (pointer: coarse) { .notes-hint { display: none; } }
+    @media (min-width: 1200px) {
+      .notes { left: 16px; right: auto; top: 88px; bottom: 16px; max-height: none; width: min(320px, calc((100vw - var(--content)) / 2 - 44px)); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,.12); }
+    }
+
     @media (max-width: 560px) {
       .wordmark span:not(.mark) { display: none; }
       .nav { flex-wrap: wrap; }
@@ -265,8 +289,12 @@
     let pendingSelection = null;
     let composer = null;
     let composerReturnFocus = null;
-    let state = { chunks: {}, decisions: {}, annotations: [], overallNote: "" };
+    let state = { chunks: {}, decisions: {}, annotations: [], notes: [], overallNote: "" };
     let disclosureState = {};
+    const NOTES_OPEN_KEY = "briefing:notesOpen";
+    let notesOpen = (() => { try { return localStorage.getItem(NOTES_OPEN_KEY) === "1"; } catch { return false; } })();
+    let noteDraft = "";
+    let noteEditing = null;
     const MAX_ANNOTATIONS = 500;
     const MAX_QUOTE = 2000;
     const MAX_COMMENT = 4000;
@@ -729,10 +757,12 @@
         state = saved.state;
         disclosureState = saved.disclosures;
       }
-      if (!state || typeof state !== "object") state = { chunks: {}, decisions: {}, annotations: [], overallNote: "" };
+      if (!state || typeof state !== "object") state = { chunks: {}, decisions: {}, annotations: [], notes: [], overallNote: "" };
       if (!state.chunks) state.chunks = {};
       if (!state.decisions) state.decisions = {};
       if (!Array.isArray(state.annotations)) state.annotations = [];
+      if (!Array.isArray(state.notes)) state.notes = [];
+      state.notes = state.notes.filter(n => n && typeof n.text === "string").map(n => ({ id: n.id || uid(), text: n.text }));
       if (!disclosureState || typeof disclosureState !== "object" || Array.isArray(disclosureState)) disclosureState = {};
     }
     function adoptServerDraft(draft, revision, message) {
@@ -793,7 +823,20 @@
     window.addEventListener("focus", () => { void refreshFromServer(); });
     window.addEventListener("pagehide", () => { if (syncTimer) void syncDraft(true); });
     const chunkState = index => state.chunks[index] ||= { note: "", checkpoint: "", status: "" };
-    const decisionState = index => state.decisions[index] ||= { selected: "", note: "" };
+    // Decision drafts are keyed by "<index>" for top-level decisions and "chunk:<index>" for inline ones.
+    const decisionState = key => state.decisions[key] ||= { selected: "", note: "" };
+    // Every decision in reading order: inline ones with their chunk, then the top-level ones.
+    function allDecisions() {
+      const inline = presentation.chunks.flatMap((chunk, index) => chunk.decision ? [{ decision: chunk.decision, key: "chunk:" + index, section: chunk.title }] : []);
+      const standalone = presentation.decisions.map((decision, index) => ({ decision, key: index, section: null }));
+      return [...inline, ...standalone];
+    }
+    function screenDecision(screen) {
+      if (!screen) return null;
+      if (screen.type === "decision") return { decision: screen.data, key: screen.index };
+      if (screen.data.decision) return { decision: screen.data.decision, key: "chunk:" + screen.index };
+      return null;
+    }
     const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
     const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 
@@ -1215,23 +1258,28 @@
       button.dataset.deleteArmed = "false";
       button.classList.remove("armed");
       button.textContent = "Delete";
-      button.setAttribute("aria-label", "Delete comment");
+      button.setAttribute("aria-label", "Delete " + (button.dataset.deleteWhat || "comment"));
     }
 
-    function requestDeleteAnnotation(id, button) {
+    // Two-step in-page confirm: the first press arms the button, the second runs `action`.
+    function requestDelete(button, what, action) {
       if (button.dataset.deleteArmed === "true") {
-        hidePopover();
-        deleteAnnotation(id);
+        action();
         return;
       }
       document.querySelectorAll('[data-delete-armed="true"]').forEach(disarmDeleteButton);
+      button.dataset.deleteWhat = what;
       button.dataset.deleteArmed = "true";
       button.classList.add("armed");
       button.textContent = "Confirm delete?";
-      button.setAttribute("aria-label", "Confirm delete comment?");
+      button.setAttribute("aria-label", "Confirm delete " + what + "?");
       window.setTimeout(() => {
         if (button.isConnected && button.dataset.deleteArmed === "true") disarmDeleteButton(button);
       }, DELETE_ARM_MS);
+    }
+
+    function requestDeleteAnnotation(id, button) {
+      requestDelete(button, "comment", () => { hidePopover(); deleteAnnotation(id); });
     }
 
     function closeComposer(rerender, restoreFocus = false) {
@@ -1311,8 +1359,19 @@
       return !element.closest("input, textarea, select, button, [contenteditable]");
     }
 
+    function isPlainKey(event, key) {
+      return event.key.toLowerCase() === key && !event.isComposing && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+    }
+
     function isCommentShortcut(event) {
-      return event.key.toLowerCase() === "c" && !event.isComposing && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+      return isPlainKey(event, "c");
+    }
+
+    function openNotesFromShortcut(event) {
+      if (!isPlainKey(event, "n") || submitted || composer || !targetAllowsCommentShortcut(event.target)) return false;
+      event.preventDefault();
+      toggleNotes(true);
+      return true;
     }
 
     function openComposerFromShortcut(event) {
@@ -1368,8 +1427,11 @@
     document.addEventListener("pointerdown", handleSelectionPointerStart);
     document.addEventListener("keydown", event => {
       if (openComposerFromShortcut(event)) return;
+      if (openNotesFromShortcut(event)) return;
       if (event.key !== "Escape") return;
       if (composer) { closeComposer(true, true); event.preventDefault(); return; }
+      const notes = document.getElementById("notes-panel");
+      if (notes && notes.contains(event.target)) { toggleNotes(false); event.preventDefault(); return; }
       if (!tooltip.hidden) {
         const returnTo = popover.pinned ? popover.mark : null;
         hidePopover();
@@ -1398,6 +1460,10 @@
           onclick: () => { contextOpen = !contextOpen; render(); },
         }));
       }
+      actions.append(el("button", {
+        id: "notes-toggle", class: "ghost", "aria-expanded": String(notesOpen), "aria-controls": "notes-panel",
+        text: notesButtonText(), onclick: () => toggleNotes(),
+      }));
       actions.append(el("button", { class: "ghost", text: overview ? "Paced view" : "View all", onclick: () => { overview = !overview; render(); } }));
 
       const inner = el("div", { class: "header-inner" }, [
@@ -1454,6 +1520,7 @@
     function chunkScreen(chunk, index) {
       const draft = chunkState(index);
       const frag = el("div", {}, el("div", { class: "reading", "data-section": "Section: " + chunk.title }, chunkBody(chunk, "chunk:" + index)));
+      if (chunk.decision) frag.append(el("div", { class: "inline-decision" }, [decisionIntro(chunk.decision, "h2"), decisionBlock(chunk.decision, "chunk:" + index)]));
 
       const respondBody = el("div", { class: "disclose-body" });
       const usesCheckpoint = Boolean(chunk.checkpoint);
@@ -1472,8 +1539,8 @@
       return frag;
     }
 
-    function decisionIntro(decision) {
-      const intro = el("div", { class: "reading", "data-section": "Decision: " + decision.question }, [el("span", { class: "tag", text: "Decision" }), mdInline("h1", { class: "title", tabindex: "-1" }, decision.question)]);
+    function decisionIntro(decision, heading = "h1") {
+      const intro = el("div", { class: "reading", "data-section": "Decision: " + decision.question }, [el("span", { class: "tag", text: "Decision" }), mdInline(heading, { class: "title", tabindex: "-1" }, decision.question)]);
       if (decision.context) intro.append(markdownBlock("purpose", decision.context));
       return intro;
     }
@@ -1487,14 +1554,15 @@
       return body;
     }
 
-    function decisionScreen(decision, index) {
-      const draft = decisionState(index);
-      const frag = el("div", {}, decisionIntro(decision));
-
+    // Options, guidance, and the validation error for one decision (at most one per screen).
+    function decisionBlock(decision, key) {
+      const draft = decisionState(key);
+      const frag = el("div", {});
+      const slug = String(key).replace(/[^a-z0-9]+/gi, "-");
       const options = el("div", { class: "options" });
       decision.options.forEach((option, optionIndex) => {
-        const id = "decision-" + index + "-" + optionIndex;
-        const radio = el("input", { id, type: "radio", name: "decision-" + index, value: option.label });
+        const id = "decision-" + slug + "-" + optionIndex;
+        const radio = el("input", { id, type: "radio", name: "decision-" + slug, value: option.label });
         radio.checked = draft.selected === option.label;
         radio.addEventListener("change", () => { draft.selected = option.label; save(); document.getElementById("decision-error")?.classList.remove("visible"); });
         options.append(el("label", { class: "option", for: id }, [radio, optionBody(option)]));
@@ -1504,16 +1572,135 @@
       const note = el("textarea", { "aria-label": "Guidance for this decision", placeholder: "Constraints, concerns, or an alternative" });
       note.value = draft.note || "";
       note.addEventListener("input", () => { draft.note = note.value; save(); });
-      frag.append(disclosure("Add guidance", note, "", "decision:" + index + ":guidance"));
+      frag.append(disclosure("Add guidance", note, "", "decision:" + key + ":guidance"));
       frag.append(el("div", { class: "error", id: "decision-error", role: "alert", text: "Choose an option before continuing, or add guidance instead." }));
       return frag;
+    }
+
+    function decisionScreen(decision, index) {
+      return el("div", {}, [decisionIntro(decision), decisionBlock(decision, index)]);
+    }
+
+    // --- Notes panel: free-standing notes, not tied to any section ---
+    function setNotesOpen(open) {
+      notesOpen = open;
+      try { localStorage.setItem(NOTES_OPEN_KEY, open ? "1" : "0"); } catch { /* storage unavailable */ }
+    }
+    const notesButtonText = () => state.notes.length ? "Notes · " + state.notes.length : "Notes";
+    // Swap only the panel and the header count so focus and scroll elsewhere survive.
+    function refreshNotes(focusSelector) {
+      const button = document.getElementById("notes-toggle");
+      if (button) { button.textContent = notesButtonText(); button.setAttribute("aria-expanded", String(notesOpen)); }
+      const existing = document.getElementById("notes-panel");
+      const fresh = notesOpen && !submitted ? notesPanel() : null;
+      const field = document.getElementById("note-composer");
+      if (existing && fresh && field && document.activeElement === field) {
+        // Keep the focused composer in place: swapping it out blurs and refocuses,
+        // which on iOS Safari hides and re-shows the keyboard and can leave the
+        // fixed sheet pushed under the keyboard bar.
+        existing.querySelector(".notes-list").replaceWith(fresh.querySelector(".notes-list"));
+        field.value = noteDraft;
+      }
+      else if (existing && fresh) existing.replaceWith(fresh);
+      else if (existing) existing.remove();
+      else if (fresh) app.append(fresh);
+      layoutNotes();
+      if (focusSelector) requestAnimationFrame(() => document.querySelector(focusSelector)?.focus());
+    }
+    // As a bottom sheet the panel would cover the Back/Next bar, so lift the bar above it.
+    const notesDocked = matchMedia("(min-width: 1200px)");
+    function layoutNotes() {
+      const panel = document.getElementById("notes-panel");
+      const lift = panel && !notesDocked.matches ? panel.offsetHeight : 0;
+      document.documentElement.style.setProperty("--sheet", lift + "px");
+    }
+    notesDocked.addEventListener("change", layoutNotes);
+    window.addEventListener("resize", layoutNotes);
+    function toggleNotes(open = !notesOpen) {
+      setNotesOpen(open);
+      refreshNotes(open ? "#note-composer" : "#notes-toggle");
+    }
+    // The review screen lists notes too, so it re-renders; elsewhere only the panel changes.
+    function notesChanged(focusSelector) {
+      save();
+      if (!overview && current >= screens.length) { pendingFocus = focusSelector || null; render(); }
+      else refreshNotes(focusSelector);
+    }
+    function addNote() {
+      const text = noteDraft.trim();
+      if (!text) return;
+      state.notes.push({ id: uid(), text });
+      noteDraft = "";
+      notesChanged("#note-composer");
+    }
+    function editNote(id) {
+      noteEditing = id;
+      setNotesOpen(true);
+      refreshNotes('[data-note-editor="' + id + '"]');
+    }
+    function deleteNote(id) {
+      state.notes = state.notes.filter(n => n.id !== id);
+      if (noteEditing === id) noteEditing = null;
+      notesChanged("#note-composer");
+    }
+    function noteItem(note) {
+      return el("div", { class: "note-item", "data-note-id": note.id }, [
+        markdownBlock("", note.text),
+        el("div", { class: "note-actions" }, [
+          el("button", { class: "link-edit", type: "button", text: "Edit", onclick: () => editNote(note.id) }),
+          el("button", { class: "link-danger", type: "button", text: "Delete", "aria-label": "Delete note", onclick: event => requestDelete(event.currentTarget, "note", () => deleteNote(note.id)) }),
+        ]),
+      ]);
+    }
+    function noteEditor(note) {
+      const field = el("textarea", { "aria-label": "Edit note", "data-note-editor": note.id });
+      field.value = note.text;
+      const commit = () => {
+        const text = field.value.trim();
+        noteEditing = null;
+        if (text) note.text = text; else state.notes = state.notes.filter(n => n !== note);
+        notesChanged("#note-composer");
+      };
+      const cancel = () => { noteEditing = null; refreshNotes('[data-note-id="' + note.id + '"] .link-edit'); };
+      field.addEventListener("keydown", event => {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); commit(); }
+        else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancel(); }
+      });
+      return el("div", { class: "note-editor" }, [field, el("div", { class: "notes-actions" }, [
+        el("button", { class: "btn", type: "button", text: "Cancel", onclick: cancel }),
+        el("button", { class: "btn primary", type: "button", text: "Save", onclick: commit }),
+      ])]);
+    }
+    function notesPanel() {
+      const panel = el("aside", { id: "notes-panel", class: "notes", "aria-label": "Notes" });
+      panel.append(el("div", { class: "notes-head" }, [
+        el("span", { class: "notes-title", text: "Notes" }),
+        el("button", { class: "ghost notes-close", type: "button", text: "Close", "aria-label": "Close notes", onclick: () => toggleNotes(false) }),
+      ]));
+      const list = el("div", { class: "notes-list" });
+      if (!state.notes.length) list.append(el("p", { class: "notes-empty", text: "Thoughts, questions, or tangents that are not about any one section. They go back with your response." }));
+      state.notes.forEach(note => list.append(noteEditing === note.id ? noteEditor(note) : noteItem(note)));
+      panel.append(list);
+      const field = el("textarea", { id: "note-composer", "aria-label": "New note", placeholder: "A thought, question, or tangent — not tied to any section" });
+      field.value = noteDraft;
+      field.addEventListener("input", () => { noteDraft = field.value; });
+      field.addEventListener("keydown", event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); addNote(); } });
+      const isMac = /Mac|iPhone|iPad/.test(navigator.platform || "");
+      panel.append(el("div", { class: "notes-composer" }, [
+        field,
+        el("div", { class: "notes-actions" }, [
+          el("span", { class: "notes-hint", text: (isMac ? "⌘" : "Ctrl+") + "Enter to add" }),
+          el("button", { class: "btn primary", type: "button", text: "Add note", onclick: addNote }),
+        ]),
+      ]));
+      return panel;
     }
 
     function reviewScreen() {
       const frag = el("div", {}, [
         el("span", { class: "tag", text: "Review" }),
         mdInline("h1", { class: "title", tabindex: "-1" }, presentation.completionPrompt || "Submit"),
-        el("p", { class: "purpose", text: "Only what is listed here is returned — your answers, notes, decisions, comments, and anything flagged for follow-up." }),
+        el("p", { class: "purpose", text: "Only what is listed here is returned — your answers, decisions, comments, notes, and anything flagged for follow-up." }),
       ]);
       const grid = el("div", { class: "review" });
       presentation.chunks.forEach((chunk, index) => {
@@ -1525,8 +1712,8 @@
         if (draft.note) pieces.push(draft.note);
         grid.append(el("div", { class: "review-item" }, [mdInline("strong", {}, chunk.title), markdownBlock("", pieces.join("\n\n"))]));
       });
-      presentation.decisions.forEach((decision, index) => {
-        const draft = decisionState(index);
+      allDecisions().forEach(({ decision, key }) => {
+        const draft = decisionState(key);
         if (!draft.selected && !draft.note) return;
         grid.append(el("div", { class: "review-item" }, [mdInline("strong", {}, decision.question), markdownBlock("", (draft.selected || "No option selected") + (draft.note ? "\n\n" + draft.note : ""))]));
       });
@@ -1542,6 +1729,17 @@
           ]),
         ];
         grid.append(el("div", { class: "review-item" }, children));
+      });
+      state.notes.forEach(note => {
+        if (!note.text.trim()) return;
+        grid.append(el("div", { class: "review-item" }, [
+          el("strong", { text: "Note" }),
+          markdownBlock("", note.text),
+          el("div", { class: "review-actions" }, [
+            el("button", { class: "link-edit", type: "button", text: "Edit", onclick: () => editNote(note.id) }),
+            el("button", { class: "link-danger", type: "button", text: "Delete", "aria-label": "Delete note", onclick: event => requestDelete(event.currentTarget, "note", () => deleteNote(note.id)) }),
+          ]),
+        ]));
       });
       if (!grid.children.length) frag.append(el("p", { class: "review-empty", text: "Nothing recorded yet. You can still add an overall response below." }));
       else frag.append(grid);
@@ -1563,22 +1761,24 @@
       presentation.chunks.forEach((chunk, i) => {
         const item = el("div", { class: "overview-item", "data-section": "Section: " + chunk.title }, chunkBody(chunk));
         item.querySelectorAll("details.disclose").forEach(d => d.open = true);
+        if (chunk.decision) item.append(el("div", { class: "inline-decision" }, [decisionIntro(chunk.decision, "h2"), overviewOptions(chunk.decision)]));
         main.append(item);
       });
       presentation.decisions.forEach((decision, i) => {
-        const item = el("div", { class: "overview-item" }, decisionIntro(decision));
-        item.append(el("div", { class: "options" }, decision.options.map(option => el("div", { class: "option" }, optionBody(option)))));
-        main.append(item);
+        main.append(el("div", { class: "overview-item" }, [decisionIntro(decision), overviewOptions(decision)]));
       });
       return main;
     }
+    const overviewOptions = decision => el("div", { class: "options" }, decision.options.map(option => el("div", { class: "option" }, optionBody(option))));
 
     function currentScreenValid() {
-      const screen = screens[current];
-      if (!screen || screen.type !== "decision") return true;
-      const draft = decisionState(screen.index);
-      if (screen.data.required === false || draft.selected || draft.note.trim()) return true;
-      document.getElementById("decision-error")?.classList.add("visible");
+      const pending = screenDecision(screens[current]);
+      if (!pending) return true;
+      const draft = decisionState(pending.key);
+      if (pending.decision.required === false || draft.selected || draft.note.trim()) return true;
+      const error = document.getElementById("decision-error");
+      error?.classList.add("visible");
+      error?.scrollIntoView({ block: "nearest" });
       return false;
     }
 
@@ -1592,12 +1792,13 @@
           checkpoint: chunkState(index).checkpoint.trim(),
           note: chunkState(index).note.trim(),
         })).filter(item => item.status !== "unmarked" || item.checkpoint || item.note),
-        decisions: presentation.decisions.map((decision, index) => ({
+        decisions: allDecisions().map(({ decision, key }) => ({
           question: decision.question,
-          selected: decisionState(index).selected,
-          note: decisionState(index).note.trim(),
+          selected: decisionState(key).selected,
+          note: decisionState(key).note.trim(),
         })).filter(item => item.selected || item.note),
         annotations: (state.annotations || []).map(a => ({ location: a.location, quote: a.quote, comment: a.comment, ...(a.target ? { target: a.target } : {}) })).filter(a => a.quote && a.comment),
+        notes: state.notes.map(n => n.text.trim()).filter(Boolean),
         overallNote: (state.overallNote || "").trim(),
       };
       try {
@@ -1658,8 +1859,16 @@
       const frag = document.createDocumentFragment();
       frag.append(header());
 
-      if (overview) { frag.append(renderOverview()); app.replaceChildren(frag); decorateHighlights(); applyFocus(); return; }
+      if (overview) frag.append(renderOverview());
+      else frag.append(pacedMain());
+      if (notesOpen) frag.append(notesPanel());
+      app.replaceChildren(frag);
+      layoutNotes();
+      decorateHighlights();
+      applyFocus();
+    }
 
+    function pacedMain() {
       const main = el("main", {});
       const isReview = current >= screens.length;
       if (isReview) main.append(reviewScreen());
@@ -1680,11 +1889,7 @@
         el("span", { class: "spacer" }),
         next,
       ]));
-
-      frag.append(main);
-      app.replaceChildren(frag);
-      decorateHighlights();
-      applyFocus();
+      return main;
     }
 
     document.addEventListener("keydown", event => {

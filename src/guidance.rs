@@ -17,7 +17,9 @@ pub fn shared() -> Vec<String> {
             "Finish the research and reasoning first, then call brief_user once with 3-8 semantic chunks (at most \
              {MAX_CHUNKS}) in dependency order: one main idea per chunk, 3-5 keyPoints each (at most {MAX_KEY_POINTS}), \
              focused details, stable context in tray, and {MIN_OPTIONS}-{MAX_OPTIONS} distinct decision options with \
-             the recommended one first and marked."
+             the recommended one first and marked. Put a decision on the chunk it depends on (the chunk's `decision` \
+             field) so its options sit right under their context; use top-level decisions only for choices that span \
+             the whole briefing."
         ),
         "Text fields accept Markdown, GFM tables, fenced code with a language tag, Mermaid fences, and Vega-Lite \
          fences; use them only when they clarify."
@@ -36,7 +38,8 @@ pub fn mcp_instructions() -> String {
     let shared = shared();
     format!(
         "Briefing presents complex information in a paced browser interface and returns the user's notes, inline \
-         comments, decisions, and follow-up markers.\n\n{}\n\nResults are returned as structuredContent. brief_user \
+         comments, decisions, and follow-up markers; free-standing notes from the Notes panel count as much as any \
+         other feedback.\n\n{}\n\nResults are returned as structuredContent. brief_user \
          returns immediately with the briefing link and a briefingId; put that exact link in your reply so the user \
          can open it (they may be on a different machine from the agent), then call await_briefing with the \
          briefingId; it blocks until they submit and returns their feedback. If await_briefing returns status \

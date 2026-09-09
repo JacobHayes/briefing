@@ -32,6 +32,7 @@ type Feedback = {
   chunks: Array<{ title: string; status: string; checkpoint: string; note: string }>;
   decisions: Array<{ question: string; selected: string; note: string }>;
   annotations: Array<{ location: string; quote: string; comment: string; target?: Record<string, string> }>;
+  notes: string[];
   overallNote: string;
 };
 
@@ -62,7 +63,7 @@ const describe = (error: unknown) => (error instanceof Error ? error.message : S
 function summary(feedback: Feedback): string {
   const decisions = feedback.decisions.filter((d) => d.selected || d.note).length;
   const sections = feedback.chunks.filter((c) => c.note || c.checkpoint || c.status === "revisit").length;
-  return `${decisions} decisions, ${sections} section responses, ${feedback.annotations.length} inline comments`;
+  return `${decisions} decisions, ${sections} section responses, ${feedback.annotations.length} inline comments, ${feedback.notes.length} notes`;
 }
 
 export default function briefingExtension(pi: ExtensionAPI) {
