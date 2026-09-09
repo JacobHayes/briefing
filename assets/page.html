@@ -68,7 +68,8 @@
     .context-summary { margin: 0; color: var(--muted); white-space: pre-wrap; }
 
     /* Main */
-    main { max-width: var(--content); margin: 0 auto; padding: clamp(24px, 5vw, 40px) clamp(16px, 5vw, 28px) 120px; }
+    /* Bottom padding grows by the notes sheet's height so the nav can always scroll clear of it. */
+    main { max-width: var(--content); margin: 0 auto; padding: clamp(24px, 5vw, 40px) clamp(16px, 5vw, 28px) calc(120px + var(--sheet, 0px)); }
     .tag { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: .72rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
     h1.title { margin: 14px 0 0; font-size: clamp(1.5rem, 4vw, 2rem); line-height: 1.2; letter-spacing: -.02em; font-weight: 680; outline: none; }
     h2.title { margin: 10px 0 0; font-size: clamp(1.2rem, 3vw, 1.45rem); line-height: 1.25; letter-spacing: -.015em; font-weight: 660; outline: none; }
@@ -161,7 +162,7 @@
     .tradeoffs { margin: 8px 0 0; padding-left: 1.05rem; color: var(--muted); font-size: .9rem; }
     .tradeoffs li + li { margin-top: 3px; }
 
-    .error { display: none; margin-top: 16px; padding: 11px 14px; color: var(--danger); background: var(--danger-soft); border-radius: 10px; font-size: .92rem; }
+    .error { display: none; margin-top: 16px; padding: 11px 14px; color: var(--danger); background: var(--danger-soft); border-radius: 10px; font-size: .92rem; scroll-margin-bottom: calc(80px + var(--sheet, 0px)); }
     .error.visible { display: block; }
 
     /* Review */
@@ -1605,7 +1606,8 @@
       else if (existing) existing.remove();
       else if (fresh) app.append(fresh);
       layoutNotes();
-      if (focusSelector) requestAnimationFrame(() => document.querySelector(focusSelector)?.focus());
+      // Focus synchronously: iOS only raises the keyboard for a focus made inside the tap handler.
+      if (focusSelector) document.querySelector(focusSelector)?.focus();
     }
     // As a bottom sheet the panel would cover the Back/Next bar, so lift the bar above it.
     const notesDocked = matchMedia("(min-width: 1200px)");
@@ -1778,7 +1780,8 @@
       if (pending.decision.required === false || draft.selected || draft.note.trim()) return true;
       const error = document.getElementById("decision-error");
       error?.classList.add("visible");
-      error?.scrollIntoView({ block: "nearest" });
+      // "end" plus the scroll margin keeps it clear of the sticky nav.
+      error?.scrollIntoView({ block: "end" });
       return false;
     }
 
