@@ -68,8 +68,9 @@
     .context-summary { margin: 0; color: var(--muted); white-space: pre-wrap; }
 
     /* Main */
-    /* Bottom padding grows by the notes sheet's height so the nav can always scroll clear of it. */
-    main { max-width: var(--content); margin: 0 auto; padding: clamp(24px, 5vw, 40px) clamp(16px, 5vw, 28px) calc(120px + var(--sheet, 0px)); }
+    /* With the notes sheet open the bottom padding covers the sheet, so the nav can always scroll
+       clear of it and, fully scrolled, sits just above it. */
+    main { max-width: var(--content); margin: 0 auto; padding: clamp(24px, 5vw, 40px) clamp(16px, 5vw, 28px) max(120px, calc(var(--sheet, 0px) + 16px)); }
     .tag { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: .72rem; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
     h1.title { margin: 14px 0 0; font-size: clamp(1.5rem, 4vw, 2rem); line-height: 1.2; letter-spacing: -.02em; font-weight: 680; outline: none; }
     h2.title { margin: 10px 0 0; font-size: clamp(1.2rem, 3vw, 1.45rem); line-height: 1.25; letter-spacing: -.015em; font-weight: 660; outline: none; }
@@ -229,7 +230,7 @@
     /* Selection affordance + composer overlays */
     .comment-fab { position: fixed; z-index: 40; border: 1px solid var(--accent); background: var(--accent); color: var(--bg); border-radius: 10px; padding: 7px 14px; font-size: .85rem; font-weight: 600; box-shadow: 0 6px 20px rgba(0,0,0,.22); }
     .comment-fab[hidden] { display: none; }
-    .composer { position: fixed; z-index: 41; width: min(340px, calc(100vw - 24px)); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 14px 40px rgba(0,0,0,.28); padding: 16px; }
+    .composer { position: fixed; z-index: 41; overflow: auto; width: min(340px, calc(100vw - 24px)); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 14px 40px rgba(0,0,0,.28); padding: 16px; }
     .composer-loc { font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 650; }
     .composer-excerpt { margin: 6px 0 12px; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); white-space: pre-wrap; font-style: italic; max-height: 96px; overflow: auto; }
     .composer-input { width: 100%; min-height: 76px; resize: vertical; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg); line-height: 1.5; }
@@ -289,6 +290,7 @@
     let pendingFocus = null;
     let pendingSelection = null;
     let composer = null;
+    let composerRect = null;
     let composerReturnFocus = null;
     let state = { chunks: {}, decisions: {}, annotations: [], notes: [], overallNote: "" };
     let disclosureState = {};
@@ -1060,14 +1062,25 @@
 
     // Viewport-bounded placement below the anchor, flipping above when it would
     // overflow. Used directly for the mobile saved-comment fallback.
+    // The part of the layout viewport that is actually on screen: iOS shrinks and offsets it
+    // while the on-screen keyboard is up, and fixed elements are placed in layout coordinates.
+    function visibleRect() {
+      const vv = window.visualViewport;
+      return vv
+        ? { top: vv.offsetTop, left: vv.offsetLeft, width: vv.width, height: vv.height }
+        : { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight };
+    }
+
     function clampBelowAbove(node, rect) {
       const margin = 8;
+      const view = visibleRect();
+      node.style.maxHeight = (view.height - 2 * margin) + "px";
       const w = node.offsetWidth;
       const h = node.offsetHeight;
-      const left = Math.max(margin, Math.min(rect.left, window.innerWidth - w - margin));
+      const left = Math.max(view.left + margin, Math.min(rect.left, view.left + view.width - w - margin));
       let top = rect.bottom + margin;
-      if (top + h > window.innerHeight - margin) top = rect.top - h - margin;
-      top = Math.max(margin, Math.min(top, window.innerHeight - h - margin));
+      if (top + h > view.top + view.height - margin) top = rect.top - h - margin;
+      top = Math.max(view.top + margin, Math.min(top, view.top + view.height - h - margin));
       node.style.left = left + "px";
       node.style.top = top + "px";
     }
@@ -1082,26 +1095,26 @@
 
     // Touch browsers draw their own selection callout (Copy / Look Up / ...)
     // right where clampBelowAbove would put the Comment action. iOS 26 Safari
-    // puts the callout on the side of the selection with more room: below it
-    // in the upper half of the viewport, above it in the lower half, in a band
-    // roughly TOUCH_CALLOUT_CLEARANCE tall under the selection. Keep the
-    // action below the selection (never above, where the callout and the
-    // start handle live) and clear the callout's band when it is expected
-    // below. Mouse selection keeps the tight below/above placement.
+    // puts it above or below the selection depending on room, and the rule is
+    // not simply "upper half goes below" (seen below at 49% of the height), so
+    // on touch the action always sits TOUCH_CALLOUT_CLEARANCE under the
+    // selection: clear of a callout below it, and a callout above never
+    // reaches there. Never above, where the start handle lives. Mouse
+    // selection keeps the tight below/above placement.
     const coarsePointer = window.matchMedia("(pointer: coarse)");
-    function positionCommentButton(rect, bounds) {
+    function positionCommentButton(rect) {
       if (!coarsePointer.matches) { positionOverlay(commentButton, rect); return; }
       commentButton.style.left = "0px";
       commentButton.style.top = "0px";
       requestAnimationFrame(() => {
         const margin = 8;
+        const view = visibleRect();
         const w = commentButton.offsetWidth;
         const h = commentButton.offsetHeight;
-        const calloutBelow = bounds.top + bounds.bottom < window.innerHeight;
-        let top = rect.bottom + margin + (calloutBelow ? TOUCH_CALLOUT_CLEARANCE : 0);
-        if (top + h > window.innerHeight - margin) top = rect.bottom + margin;
-        top = Math.max(margin, Math.min(top, window.innerHeight - h - margin));
-        commentButton.style.left = Math.max(margin, Math.min(rect.left, window.innerWidth - w - margin)) + "px";
+        let top = rect.bottom + margin + TOUCH_CALLOUT_CLEARANCE;
+        if (top + h > view.top + view.height - margin) top = rect.bottom + margin;
+        top = Math.max(view.top + margin, Math.min(top, view.top + view.height - h - margin));
+        commentButton.style.left = Math.max(view.left + margin, Math.min(rect.left, view.left + view.width - w - margin)) + "px";
         commentButton.style.top = top + "px";
       });
     }
@@ -1196,7 +1209,7 @@
       // action so it can never sit above the add-comment affordance.
       hidePopover();
       commentButton.hidden = false;
-      positionCommentButton(rect, range.getBoundingClientRect());
+      positionCommentButton(rect);
     }
 
     function addAnnotation(sel, comment) {
@@ -1328,6 +1341,7 @@
         el("div", { class: "composer-actions" }, [cancelBtn, saveBtn]),
       ]);
       document.body.append(composer);
+      composerRect = opts.rect;
       hideCommentButton();
       positionOverlay(composer, opts.rect);
       field.focus();
@@ -1595,7 +1609,7 @@
       const existing = document.getElementById("notes-panel");
       const fresh = notesOpen && !submitted ? notesPanel() : null;
       const field = document.getElementById("note-composer");
-      if (existing && fresh && field && document.activeElement === field) {
+      if (existing && fresh && field && document.activeElement === field && !noteEditing) {
         // Keep the focused composer in place: swapping it out blurs and refocuses,
         // which on iOS Safari hides and re-shows the keyboard and can leave the
         // fixed sheet pushed under the keyboard bar.
@@ -1613,11 +1627,46 @@
     const notesDocked = matchMedia("(min-width: 1200px)");
     function layoutNotes() {
       const panel = document.getElementById("notes-panel");
-      const lift = panel && !notesDocked.matches ? panel.offsetHeight : 0;
+      let lift = 0;
+      if (panel && !notesDocked.matches) {
+        // Size the sheet against the visible viewport, not the layout one, so that with the
+        // keyboard up it still leaves room for the nav: half the visible height, but never less
+        // than its head plus composer need.
+        const view = visibleRect();
+        panel.style.maxHeight = Math.min(view.height, Math.max(view.height / 2, 260)) + "px";
+        const bottom = Math.max(0, window.innerHeight - view.top - view.height);
+        panel.style.bottom = bottom + "px";
+        lift = bottom + panel.offsetHeight;
+      } else if (panel) {
+        panel.style.maxHeight = "";
+        panel.style.bottom = "";
+      }
       document.documentElement.style.setProperty("--sheet", lift + "px");
     }
     notesDocked.addEventListener("change", layoutNotes);
     window.addEventListener("resize", layoutNotes);
+    // Fixed overlays follow the visible viewport while the on-screen keyboard shows or hides.
+    // iOS Safari: after the keyboard closes, the visual viewport can also stay offset from the
+    // layout viewport, so fixed elements are drawn in one place and hit-tested in another until
+    // the page scrolls; a one-pixel scroll and back re-syncs the two (a zero-distance scroll is
+    // ignored), once the keyboard animation has settled.
+    if (window.visualViewport) {
+      let viewportHeight = visualViewport.height;
+      const relayout = () => {
+        layoutNotes();
+        if (composer && composerRect) clampBelowAbove(composer, composerRect);
+      };
+      visualViewport.addEventListener("scroll", relayout);
+      visualViewport.addEventListener("resize", () => {
+        const grew = visualViewport.height > viewportHeight;
+        viewportHeight = visualViewport.height;
+        relayout();
+        if (grew) setTimeout(() => { window.scrollBy(0, 1); window.scrollBy(0, -1); relayout(); }, 50);
+      });
+    }
+    // A button that acts on the focused note field must not steal its focus: the keyboard would
+    // drop and re-raise, moving every fixed overlay under a fast tap sequence.
+    const keepFocus = button => { button.addEventListener("pointerdown", event => event.preventDefault()); return button; };
     function toggleNotes(open = !notesOpen) {
       setNotesOpen(open);
       refreshNotes(open ? "#note-composer" : "#notes-toggle");
@@ -1663,14 +1712,15 @@
         if (text) note.text = text; else state.notes = state.notes.filter(n => n !== note);
         notesChanged("#note-composer");
       };
-      const cancel = () => { noteEditing = null; refreshNotes('[data-note-id="' + note.id + '"] .link-edit'); };
+      // Focus returns to the composer (not the Edit button) so a touch keyboard stays up.
+      const cancel = () => { noteEditing = null; refreshNotes("#note-composer"); };
       field.addEventListener("keydown", event => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); commit(); }
         else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancel(); }
       });
       return el("div", { class: "note-editor" }, [field, el("div", { class: "notes-actions" }, [
-        el("button", { class: "btn", type: "button", text: "Cancel", onclick: cancel }),
-        el("button", { class: "btn primary", type: "button", text: "Save", onclick: commit }),
+        keepFocus(el("button", { class: "btn", type: "button", text: "Cancel", onclick: cancel })),
+        keepFocus(el("button", { class: "btn primary", type: "button", text: "Save", onclick: commit })),
       ])]);
     }
     function notesPanel() {
@@ -1683,6 +1733,9 @@
       if (!state.notes.length) list.append(el("p", { class: "notes-empty", text: "Thoughts, questions, or tangents that are not about any one section. They go back with your response." }));
       state.notes.forEach(note => list.append(noteEditing === note.id ? noteEditor(note) : noteItem(note)));
       panel.append(list);
+      // While a note is being edited its editor stands in for the composer, which frees the
+      // room a short (keyboard-up) sheet needs to show the editor and its actions.
+      if (noteEditing && state.notes.some(n => n.id === noteEditing)) return panel;
       const field = el("textarea", { id: "note-composer", "aria-label": "New note", placeholder: "A thought, question, or tangent — not tied to any section" });
       field.value = noteDraft;
       field.addEventListener("input", () => { noteDraft = field.value; });
@@ -1692,7 +1745,7 @@
         field,
         el("div", { class: "notes-actions" }, [
           el("span", { class: "notes-hint", text: (isMac ? "⌘" : "Ctrl+") + "Enter to add" }),
-          el("button", { class: "btn primary", type: "button", text: "Add note", onclick: addNote }),
+          keepFocus(el("button", { class: "btn primary", type: "button", text: "Add note", onclick: addNote })),
         ]),
       ]));
       return panel;
