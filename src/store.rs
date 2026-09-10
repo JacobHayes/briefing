@@ -49,17 +49,22 @@ pub struct Store {
 }
 
 impl Store {
+    /// An absolute `$<xdg_env>`, else `$HOME/<home_suffix>`. Shared by the XDG-based default
+    /// locations (state dir here, config file in `main`).
+    pub fn xdg_base(xdg_env: &str, home_suffix: &str) -> Option<PathBuf> {
+        std::env::var_os(xdg_env)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(home_suffix)))
+    }
+
     /// `BRIEFING_STATE_DIR`, else `$XDG_STATE_HOME/briefing/briefings`, else
     /// `~/.local/state/briefing/briefings`.
     pub fn default_dir() -> Option<PathBuf> {
         if let Some(dir) = std::env::var_os("BRIEFING_STATE_DIR") {
             return Some(PathBuf::from(dir));
         }
-        let base = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
-        Some(base.join("briefing/briefings"))
+        Some(Self::xdg_base("XDG_STATE_HOME", ".local/state")?.join("briefing/briefings"))
     }
 
     /// Open (creating) the default store; `None` with a warning when no directory is usable.

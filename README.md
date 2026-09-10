@@ -167,11 +167,34 @@ Exit codes: 0 completed, 2 cancelled, 3 still pending after `--wait-seconds`, 13
 | Flag / env | Meaning |
 |---|---|
 | `--bind auto\|local\|tailscale` (`BRIEFING_BIND`) | Where the embedded server listens: `auto` prefers the Tailscale address and falls back to loopback; `tailscale` fails instead of falling back |
-| `--no-open` (`BRIEFING_NO_OPEN`) | Never try to open a browser |
+| `--open true\|false` (`BRIEFING_OPEN`) | Whether to open new local briefings in the browser |
 | `--on-create 'cmd'` (`BRIEFING_ON_CREATE`) | Shell hook run with `BRIEFING_URL/ID/TITLE`, e.g. to push the link to ntfy from a headless box |
 | `--hub URL` (`BRIEFING_HUB`) | Use a hub instead of the embedded server |
 | `BRIEFING_STATE_DIR` | Where records are mirrored (default `$XDG_STATE_HOME/briefing/briefings`) |
+| `BRIEFING_CONFIG` | Override the settings file path |
 | `BRIEFING_BROWSER`, `BRIEFING_LOG` | Override the browser opener; tracing filter |
+
+### Per-machine configuration
+
+Briefing always reads `$XDG_CONFIG_HOME/briefing/config.toml` (default
+`~/.config/briefing/config.toml`) first, then overlays environment variables, then explicit
+command-line arguments. For example,
+
+```toml
+bind = "local"                    # auto | local | tailscale
+hub = "https://briefings.example" # use a remote hub instead of the embedded server
+on_create = "notify-send"         # shell hook run with BRIEFING_URL/ID/TITLE
+open = false                      # do not open the system browser
+```
+
+For each key, the value comes from the settings file, then `BRIEFING_<KEY>`, then the matching
+argument, in increasing priority (`bind` also has a built-in `auto` default). For example
+`--open true`/`--open false` override `BRIEFING_OPEN` and the file setting for commands that
+create local briefings. Unknown fields or an invalid settings file fail visibly
+even when an environment variable or argument would override them. Set `BRIEFING_CONFIG` to use
+another file; unlike the default path, an explicitly selected file must exist. Settings that are
+per client rather than per machine (such as `--hold`) stay argument/environment only, so each MCP
+client's launcher can set its own.
 
 ## Hub mode (optional)
 
@@ -191,10 +214,9 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
 - `--finished-ttl 6h` / `--active-ttl 14d` tune retention; the embedded server uses the same
   defaults.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
-- `--on-create` runs a shell command with `BRIEFING_URL/ID/TITLE` so a remote session
-  can push the URL to your phone (the hub cannot open your browser); `--open` opens each new
-  briefing in the hub machine's own browser instead. Both apply however the briefing was
-  created: the agent API, `/mcp`, or a CLI pointed at the hub.
+- `--on-create` runs a shell command with `BRIEFING_URL/ID/TITLE` so a remote session can push
+  the URL to your phone. It applies however the briefing was created: the agent API, `/mcp`, or
+  a CLI pointed at the hub. The hub never tries to open a browser itself.
 - `GET /agent/briefings/{id}/wait?timeout_secs=N` answers with the same
   `{ "briefingId", "status": "completed" | "cancelled" | "pending", "feedback"? }` shape as
   the CLI's `--json` output.

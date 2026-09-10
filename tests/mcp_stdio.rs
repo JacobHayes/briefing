@@ -20,13 +20,21 @@ fn state_dir() -> std::path::PathBuf {
     DIR.get_or_init(|| tempfile::tempdir().unwrap()).path().to_path_buf()
 }
 
+/// One empty config home per test binary run so subprocesses never read the caller's config.
+fn config_home() -> std::path::PathBuf {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path().to_path_buf()
+}
+
 impl McpClient {
     fn spawn(args: &[&str], client_name: &str, elicitation: bool) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_briefing"))
             .args(args)
             .env("BRIEFING_BIND", "local")
-            .env("BRIEFING_NO_OPEN", "1")
+            .env("BRIEFING_OPEN", "false")
             .env("BRIEFING_STATE_DIR", state_dir())
+            .env("XDG_CONFIG_HOME", config_home())
+            .env_remove("BRIEFING_CONFIG")
             .env_remove("BRIEFING_HUB")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

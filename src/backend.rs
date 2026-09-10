@@ -14,7 +14,8 @@ use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance};
 use crate::response::Outcome;
 use crate::tailscale::{self, BindScope, BindTarget};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BindMode {
     /// Tailscale 100.x address when Tailscale is running, otherwise loopback.
     #[default]
@@ -87,7 +88,7 @@ pub struct SiteOptions {
 
 /// One briefing server: the registry, how it is reached, and the side effects of creating a
 /// briefing. Every entry point (CLI, MCP over stdio or HTTP, the hub agent API) creates
-/// briefings through [`Site::create`], so they all honour `--open` and `--on-create` alike.
+/// briefings through [`Site::create`], so they all share validation and configured side effects.
 pub struct Site {
     pub hub: Arc<Hub>,
     pub config: HttpConfig,
