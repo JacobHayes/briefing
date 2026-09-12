@@ -95,11 +95,17 @@ README's "Long waits" section; the per-client budgets are `PROFILES` in `src/mcp
 The CLI's built-in bind default remains `auto` for every harness. Every invocation loads the
 per-machine `config.toml`, then overlays environment variables, then explicit CLI arguments.
 clap owns the argument layer and most environment parsing declaratively; the file is a fallback
-below it in `run`. Only per-machine settings (`bind`, `hub`, `on_create`, `open`)
-live in the file; per-client settings such as `hold` stay argument/environment only, since one
-binary serves several MCP clients and each client's launcher sets its own. Configuration is
-strict so misspelled or invalid file settings fail even when a later layer would override them,
-rather than silently reverting to behavior the user did not select.
+below it in `run`. Only per-machine settings (`bind`, `hub`, `on_create`, `open`) live in the
+file; per-client settings such as `hold` stay argument/environment only, since one binary serves
+several MCP clients and each client's launcher sets its own. Configuration is strict so
+misspelled or invalid file settings fail even when a later layer would override them, rather
+than silently reverting to behavior the user did not select. Invalid environment values may also
+fail in clap even when a CLI flag would override them.
+
+`open` is per-machine rather than per-command, so the layers resolve it once. What differs
+between an embedded server and the hub is a `Role` in `src/main.rs`, the single place that says
+a hub serves the agent API and never opens a browser; a `serve` run that was given an explicit
+`--open true` says so rather than ignoring it silently.
 
 ## Content contract
 

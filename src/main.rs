@@ -159,7 +159,7 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 /// Per-machine defaults from `config.toml`, each sitting below the matching environment variable
 /// and CLI argument. Every field is optional so an unset key leaves the higher layers untouched.
 #[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 struct Settings {
     bind: Option<BindMode>,
     hub: Option<String>,
@@ -167,28 +167,22 @@ struct Settings {
     open: Option<bool>,
 }
 
-/// The path to the settings file and whether it was given explicitly: `BRIEFING_CONFIG` (explicit,
-/// so a missing file is an error), else `$XDG_CONFIG_HOME/briefing/config.toml`, else
-/// `~/.config/briefing/config.toml` (a missing default file just means no settings).
-fn config_path() -> anyhow::Result<Option<(PathBuf, bool)>> {
-    if let Some(path) = std::env::var_os("BRIEFING_CONFIG") {
-        if path.is_empty() {
-            anyhow::bail!("BRIEFING_CONFIG is empty");
-        }
-        return Ok(Some((PathBuf::from(path), true)));
-    }
-    Ok(Store::xdg_base("XDG_CONFIG_HOME", ".config").map(|base| (base.join("briefing/config.toml"), false)))
-}
-
-/// The per-machine settings file, or defaults when there is none. Environment variables and CLI
-/// arguments are higher-priority layers.
+/// The per-machine settings file, or defaults when there is none. The path is `BRIEFING_CONFIG`
+/// when set - explicit, so a missing file is an error - else `$XDG_CONFIG_HOME/briefing/config.toml`
+/// or `~/.config/briefing/config.toml`, where a missing file just means no settings. Environment
+/// variables and CLI arguments are higher-priority layers.
 fn load_file_config() -> anyhow::Result<Settings> {
-    let Some((path, explicit)) = config_path()? else {
-        return Ok(Settings::default());
+    let (path, required) = match std::env::var_os("BRIEFING_CONFIG") {
+        Some(path) if path.is_empty() => anyhow::bail!("BRIEFING_CONFIG is empty"),
+        Some(path) => (PathBuf::from(path), true),
+        None => match Store::xdg_base("XDG_CONFIG_HOME", ".config") {
+            Some(base) => (base.join("briefing/config.toml"), false),
+            None => return Ok(Settings::default()),
+        },
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !explicit => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {
             return Ok(Settings::default());
         }
         Err(error) => anyhow::bail!("could not read {}: {error}", path.display()),
@@ -207,15 +201,36 @@ impl Settings {
     }
 }
 
+/// Which server this process runs. Both create briefings through the same [`Site`], so the
+/// differences between them belong here rather than at each construction site.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// Started on demand by a CLI or stdio-MCP run, on the machine the user is sitting at.
+    Embedded,
+    /// The long-running headless hub: it serves the agent API and never opens a browser.
+    Hub,
+}
+
 impl Common {
     fn bind_mode(&self) -> BindMode {
         self.bind.unwrap_or_default()
     }
 
     /// Whether creating a local briefing should open it: `--open`/`BRIEFING_OPEN`, else the config
-    /// file, else a built-in `true`. `serve` ignores this - a headless hub never opens a browser.
+    /// file, else a built-in `true`.
     fn open_browser(&self) -> bool {
         self.open.unwrap_or(true)
+    }
+
+    /// What a [`Site`] in this process does with the briefings it creates. The one place the
+    /// `Role` differences live, so `serve` carries no open-browser literal of its own.
+    fn site_options(&self, role: Role, public_origin: Option<String>) -> SiteOptions {
+        SiteOptions {
+            agent_api: role == Role::Hub,
+            public_origin,
+            open_browser: role == Role::Embedded && self.open_browser(),
+            on_create: self.on_create.clone(),
+        }
     }
 }
 
@@ -223,11 +238,7 @@ fn backend(common: &Common) -> anyhow::Result<Backend> {
     match &common.hub {
         Some(hub) => Ok(Backend::Remote(RemoteBackend::new(hub)?)),
         None => {
-            let options = SiteOptions {
-                open_browser: common.open_browser(),
-                on_create: common.on_create.clone(),
-                ..Default::default()
-            };
+            let options = common.site_options(Role::Embedded, None);
             Ok(Backend::Local(LocalBackend::new(common.bind_mode(), options, HubConfig::with_default_store())))
         }
     }
@@ -367,12 +378,7 @@ async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
         active_ttl: args.active_ttl,
         ..HubConfig::with_default_store()
     }));
-    let options = SiteOptions {
-        agent_api: true,
-        public_origin: args.public_origin,
-        open_browser: false,
-        on_create: common.on_create.clone(),
-    };
+    let options = common.site_options(Role::Hub, args.public_origin);
     let (site, running) =
         Site::start(hub, target, args.port, options, |site| args.mcp.then(|| mcp_router(site, &args.hold))).await?;
     let origin = &site.config.public_origin;
@@ -444,6 +450,9 @@ async fn main() {
 }
 
 async fn run(mut cli: Cli) -> anyhow::Result<i32> {
+    // Only an explicit argument/environment `--open true` is worth reporting to a `serve` run; a
+    // config-file value is this machine's default for its own briefings, not a hub instruction.
+    let open_requested = cli.common.open == Some(true);
     // The config file sits below the argument/environment layers, filling only their holes.
     let settings = load_file_config()?;
     settings.overlay(&mut cli.common);
@@ -459,6 +468,9 @@ async fn run(mut cli: Cli) -> anyhow::Result<i32> {
             Ok(0)
         }
         Command::Serve(args) => {
+            if open_requested {
+                tracing::warn!("--open/BRIEFING_OPEN is ignored by `serve`: a hub never opens a browser itself");
+            }
             serve(&cli.common, args).await?;
             Ok(0)
         }
@@ -552,36 +564,43 @@ mod tests {
     #[test]
     fn overlay_fills_only_unset_fields() {
         // A file value wins only where clap left the field unset; an argument/env value stands.
-        let mut common = Common { bind: Some(BindMode::Tailscale), ..bare_common() };
+        // Every field is set on both layers so a forgotten `overlay` line cannot hide here.
+        let mut common =
+            Common { bind: Some(BindMode::Tailscale), on_create: Some("flag".into()), open: Some(true), hub: None };
         Settings {
             bind: Some(BindMode::Local),
             hub: Some("https://hub.example".into()),
-            on_create: None,
+            on_create: Some("file".into()),
             open: Some(false),
         }
         .overlay(&mut common);
         assert_eq!(common.bind, Some(BindMode::Tailscale)); // set on CLI, file ignored
+        assert_eq!(common.on_create.as_deref(), Some("flag")); // set on CLI, file ignored
+        assert!(common.open_browser()); // set on CLI, file ignored
         assert_eq!(common.hub.as_deref(), Some("https://hub.example")); // filled from file
-        assert_eq!(common.open, Some(false)); // filled from file
 
-        // Absent everywhere, the fallback is the built-in default.
+        // With nothing on the CLI the file fills every hole.
+        let mut common = bare_common();
+        Settings { on_create: Some("file".into()), open: Some(false), ..Settings::default() }.overlay(&mut common);
+        assert_eq!(common.on_create.as_deref(), Some("file"));
+        assert!(!common.open_browser());
+
+        // Absent everywhere, the fallbacks are the built-in defaults.
         assert_eq!(bare_common().bind_mode(), BindMode::Auto);
+        assert!(bare_common().open_browser());
     }
 
     #[test]
-    fn open_flag_overrides_file_and_falls_back_to_default() {
-        // `--open`/`BRIEFING_OPEN` (parsed by clap into `open`) wins over the file.
-        let mut common = Common { open: Some(true), ..bare_common() };
-        Settings { open: Some(false), ..Settings::default() }.overlay(&mut common);
-        assert!(common.open_browser());
+    fn the_hub_never_opens_a_browser_whatever_the_layers_say() {
+        let common = Common { open: Some(true), ..bare_common() };
+        let embedded = common.site_options(Role::Embedded, None);
+        let hub = common.site_options(Role::Hub, None);
+        assert!(embedded.open_browser && !embedded.agent_api);
+        assert!(!hub.open_browser && hub.agent_api);
+    }
 
-        // No flag: the file fills the hole; with no file either, the built-in `true`.
-        let mut common = bare_common();
-        Settings { open: Some(false), ..Settings::default() }.overlay(&mut common);
-        assert!(!common.open_browser());
-        assert!(bare_common().open_browser());
-
-        // The flag takes an explicit value.
+    #[test]
+    fn open_flag_takes_an_explicit_value() {
         let cli = Cli::try_parse_from(["briefing", "demo", "--open", "false"]).unwrap();
         assert!(!cli.common.open_browser());
         let cli = Cli::try_parse_from(["briefing", "demo", "--open", "true"]).unwrap();

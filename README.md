@@ -190,9 +190,10 @@ open = false                      # do not open the system browser
 For each key, the value comes from the settings file, then `BRIEFING_<KEY>`, then the matching
 argument, in increasing priority (`bind` also has a built-in `auto` default). For example
 `--open true`/`--open false` override `BRIEFING_OPEN` and the file setting for commands that
-create local briefings. Unknown fields or an invalid settings file fail visibly
-even when an environment variable or argument would override them. Set `BRIEFING_CONFIG` to use
-another file; unlike the default path, an explicitly selected file must exist. Settings that are
+create local briefings; `serve` is a headless hub and never opens a browser, and says so when
+given an explicit `--open true`. Unknown fields or an invalid settings file fail visibly
+even when overridden; invalid environment values may also fail before CLI overrides apply.
+Set `BRIEFING_CONFIG` to use another file; an explicitly selected file must exist. Settings that are
 per client rather than per machine (such as `--hold`) stay argument/environment only, so each MCP
 client's launcher can set its own.
 
