@@ -3,10 +3,12 @@
 //! the tool result. Also exercises the elicitation hold path with a fake Codex client.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+
+mod common;
 
 struct McpClient {
     child: Child,
@@ -28,14 +30,12 @@ fn config_home() -> std::path::PathBuf {
 
 impl McpClient {
     fn spawn(args: &[&str], client_name: &str, elicitation: bool) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_briefing"))
+        let mut child = common::briefing_command()
             .args(args)
             .env("BRIEFING_BIND", "local")
             .env("BRIEFING_OPEN", "false")
             .env("BRIEFING_STATE_DIR", state_dir())
             .env("XDG_CONFIG_HOME", config_home())
-            .env_remove("BRIEFING_CONFIG")
-            .env_remove("BRIEFING_HUB")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
