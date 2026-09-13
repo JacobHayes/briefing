@@ -137,10 +137,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print the brief_user JSON Schema.
+    /// Print the presentation JSON Schema.
     Schema,
-    /// Print the model-facing guidelines as JSON (shared rules plus the MCP instructions).
-    Guidelines,
+    /// Print model-facing guidance for an integration surface.
+    Guidance {
+        #[command(subcommand)]
+        target: GuidanceTarget,
+    },
+}
+
+#[derive(Subcommand)]
+enum GuidanceTarget {
+    /// Print agent-facing CLI workflow guidance.
+    Cli,
+    /// Print Pi extension guidance as JSON.
+    Pi,
+    /// Print MCP server instructions text.
+    Mcp,
+    /// Print the CLI-focused Agent Skill markdown.
+    Skill,
 }
 
 fn init_tracing() {
@@ -525,8 +540,13 @@ async fn run(mut cli: Cli) -> anyhow::Result<i32> {
             println!("{}", serde_json::to_string_pretty(&content::json_schema())?);
             Ok(0)
         }
-        Command::Guidelines => {
-            println!("{}", serde_json::to_string_pretty(&briefing::guidance::json())?);
+        Command::Guidance { target } => {
+            match target {
+                GuidanceTarget::Cli => print!("{}", briefing::guidance::cli_guidance()),
+                GuidanceTarget::Pi => println!("{}", serde_json::to_string_pretty(&briefing::guidance::pi_guidance())?),
+                GuidanceTarget::Mcp => println!("{}", briefing::guidance::mcp_guidance()),
+                GuidanceTarget::Skill => print!("{}", briefing::guidance::skill_guidance()),
+            }
             Ok(0)
         }
     }

@@ -4,8 +4,10 @@
 
 ```sh
 cargo install --git https://github.com/JacobHayes/briefing --locked
-mkdir -p ~/.codex/skills && ln -s "$(pwd)/skills/briefing" ~/.codex/skills/briefing
 ```
+
+The MCP server carries its own model guidance; the bundled `skills/briefing` skill is only for
+raw CLI use without this MCP integration.
 
 Add to `~/.codex/config.toml`:
 

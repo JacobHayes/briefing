@@ -13,9 +13,12 @@ node = "latest"
 zig = "0.16.0"
 
 [tasks.check]
-description = "fmt, clippy (deny warnings), tests (the same three commands CI runs)"
+description = "format, apply clippy fixes, regenerate the skill, then verify clippy and tests"
 run = """
-cargo fmt --all -- --check
+cargo fmt --all
+cargo clippy --fix --allow-dirty --allow-staged --all-targets --locked -- -D warnings
+cargo fmt --all
+cargo run --quiet --locked -- guidance skill > skills/briefing/SKILL.md
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 """

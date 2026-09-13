@@ -5,8 +5,10 @@
 ```sh
 mise use -g github:JacobHayes/briefing@latest   # or: cargo install --git https://github.com/JacobHayes/briefing --locked
 claude mcp add --scope user briefing -- briefing mcp
-mkdir -p ~/.claude/skills && ln -s "$(pwd)/skills/briefing" ~/.claude/skills/briefing
 ```
+
+The MCP server carries its own model guidance; the bundled `skills/briefing` skill is only for
+raw CLI use without this MCP integration.
 
 Claude Code's idle timeout for MCP calls (30 min on stdio) is reset by progress notifications,
 and the server sends one every 10 seconds while a briefing is open, so `await_briefing` can

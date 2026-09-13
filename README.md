@@ -58,11 +58,11 @@ mise use -g github:JacobHayes/briefing@latest
 |---|---|---|
 | Claude Code | `claude mcp add --scope user briefing -- briefing mcp` | [integrations/claude-code.md](integrations/claude-code.md) |
 | Codex | `[mcp_servers.briefing]` with `command = "briefing"`, `args = ["mcp"]`, `tool_timeout_sec = 14400` | [integrations/codex.md](integrations/codex.md) |
-| Pi | `pi install git:github.com/JacobHayes/briefing` | extension + skill, [integrations/pi](integrations/pi/briefing.ts) |
+| Pi | `pi install git:github.com/JacobHayes/briefing` | extension, [integrations/pi](integrations/pi/briefing.ts) |
 | Anything else | `briefing present presentation.json` | JSON in, feedback out |
 
-Optionally link `skills/briefing` into the harness's skills directory so the model gets the
-same "when to brief" guidance everywhere; the MCP server and Pi extension already carry it.
+Optionally link `skills/briefing` into a harness's skills directory for raw CLI use if it does
+not use the MCP server or Pi extension; those integrations already carry their own guidance.
 
 **3. Ask for one.** Say "brief me on the options for X" or just let the agent decide: it is
 told to open a briefing whenever an answer crosses a complexity threshold and to stay in
@@ -144,8 +144,11 @@ Unanswered briefings expire after 14 days. One result per briefing, no history.
 ```sh
 briefing demo                      # open the bundled demo
 briefing present spec.json         # print the user's feedback as text; --json for JSON
-briefing schema                    # JSON Schema for brief_user input
-briefing guidelines                # the model-facing rules as JSON (what the MCP instructions and Pi extension use)
+briefing schema                    # JSON Schema for presentation input
+briefing guidance cli              # agent-facing CLI workflow guidance
+briefing guidance pi               # Pi extension guidance as JSON
+briefing guidance mcp              # MCP instructions text
+briefing guidance skill            # print the CLI-focused Agent Skill markdown
 briefing mcp                       # MCP over stdio
 briefing serve --mcp               # long-lived hub (see below)
 briefing status                    # list known briefings (waiting / completed / cancelled)
@@ -253,7 +256,7 @@ Explicit IPs never fall back. Wildcards (`0.0.0.0`, `::`) listen on all interfac
 
 ```sh
 mise install         # rust (+ clippy, rustfmt, release targets), zig, cargo-zigbuild, node
-mise run check       # fmt --check, clippy -D warnings, tests
+mise run check       # format, clippy --fix, regenerate skill, clippy -D warnings, tests
 mise use -g github:JacobHayes/briefing@latest   # or: cargo install --path . --locked
 mise run assets:update
 cargo zigbuild --release --target aarch64-apple-darwin   # any release target, from Linux
@@ -265,9 +268,10 @@ Vega, Vega-Lite, vega-embed). `build.rs` installs the versions pinned in
 be available; offline builds can point `BRIEFING_VENDOR_DIR` at a directory holding the
 seven files.
 
-CI (`.rwx/ci.yml`) checks and cross-builds every push; releases (`.rwx/release.yml`) are
-immutable calver tags `vYYYY.MM.DD.N`, published daily when `main` moved. The release build
-sets `BRIEFING_VERSION` to the tag, which `build.rs` bakes into `briefing --version`; other
+CI (`.rwx/ci.yml`) runs `mise run check`, fails if it leaves a diff, and cross-builds every
+push; releases (`.rwx/release.yml`) are immutable calver tags `vYYYY.MM.DD.N`, published
+daily when `main` moved. The release build sets `BRIEFING_VERSION` to the tag, which
+`build.rs` bakes into `briefing --version`; other
 builds report the Cargo version with a `-dev` suffix. The workflow files
 carry the details. Fresh releases can be hidden by mise's `minimum_release_age` for a while;
 `MISE_MINIMUM_RELEASE_AGE=0` overrides. TLS is rustls + ring with bundled webpki roots, so no

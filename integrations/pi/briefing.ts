@@ -1,7 +1,7 @@
 // Pi extension: thin adapter over the `briefing` CLI.
 //
 // Install: `pi install git:github.com/JacobHayes/briefing` (the repo's package.json
-// declares this extension and the skill). Requires the `briefing` binary on PATH.
+// declares this extension). Requires the `briefing` binary on PATH.
 //
 // Pi has no tool timeout, so this is a single blocking tool: `brief_user` spawns
 // `briefing present --json`, shows the link in Pi's UI while the user works, and returns the
@@ -59,6 +59,14 @@ function runCapture(args: string[]): Promise<string> {
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+function parseStringArray(text: string, label: string): string[] {
+  const value = JSON.parse(text);
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`${label} returned an unexpected shape`);
+  }
+  return value;
+}
 
 function summary(feedback: Feedback): string {
   const decisions = feedback.decisions.filter((d) => d.selected || d.note).length;
@@ -132,9 +140,12 @@ export default function briefingExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.mode !== "tui") return;
     let schema: any;
-    let shared: string[];
+    let piGuidance: string[];
     try {
-      [schema, { shared }] = await Promise.all([runCapture(["schema"]), runCapture(["guidelines"])].map((p) => p.then(JSON.parse)));
+      [schema, piGuidance] = await Promise.all([
+        runCapture(["schema"]).then(JSON.parse),
+        runCapture(["guidance", "pi"]).then((text) => parseStringArray(text, "briefing guidance pi")),
+      ]);
     } catch (error) {
       ctx.ui.notify(`briefing binary unavailable: ${describe(error)}`, "warning");
       return;
@@ -146,12 +157,8 @@ export default function briefingExtension(pi: ExtensionAPI) {
       description:
         "Present complex information in a paced browser briefing and return the user's notes, inline comments, decisions, and follow-up markers. Blocks until the user submits.",
       promptSnippet: "Present complex information or contextual decisions as a paced browser briefing",
-      // Shared rules come from the binary (`briefing guidelines`) so they match the MCP server.
-      promptGuidelines: [
-        ...shared,
-        "brief_user shows the link in Pi's UI and blocks until the user submits.",
-        "If the user gives you a briefing id from an interrupted session, tell them to run /brief-result <id> to recover it.",
-      ],
+      // Prompt guidance comes from the binary (`briefing guidance pi`) so it matches the CLI and MCP wrappers.
+      promptGuidelines: piGuidance,
       executionMode: "sequential",
       parameters: schema,
 
@@ -245,6 +252,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
   pi.registerCommand("brief-status", {
     description: "List known briefings (waiting, completed, cancelled)",
     handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
       const text = await runCapture(["status"]).catch((error) => `error: ${describe(error)}`);
       ctx.ui.notify(text.trim() || "no briefings", "info");
     },
@@ -253,6 +261,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
   pi.registerCommand("brief-reopen", {
     description: "Show the open briefing's link again",
     handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
       if (!active?.url) return ctx.ui.notify("No briefing is open", "warning");
       ctx.ui.notify(`Briefing: ${active.url}`, "info");
     },
@@ -261,6 +270,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
   pi.registerCommand("brief-cancel", {
     description: "Cancel the open briefing",
     handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
       if (!active) return ctx.ui.notify("No briefing is open", "warning");
       active.child.kill("SIGINT");
       ctx.ui.notify("Briefing cancelled", "info");
