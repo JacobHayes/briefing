@@ -3,6 +3,7 @@
 
 pub mod assets;
 pub mod backend;
+pub mod bind;
 pub mod browser;
 pub mod content;
 pub mod guidance;
@@ -14,7 +15,8 @@ pub mod store;
 pub mod tailscale;
 pub mod tls;
 
-pub use backend::{Backend, BindMode, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
+pub use backend::{Backend, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
+pub use bind::{BindMode, BindTarget, Scope};
 pub use content::Briefing;
 pub use hub::{BriefingStatus, Hub, HubConfig};
 pub use response::{BriefingOutcome, BriefingResponse, Outcome};

@@ -19,6 +19,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{Backend, Created};
+use crate::bind::Scope;
 use crate::content::{Briefing, schema_value};
 use crate::hub::Provenance;
 use crate::response::Outcome;
@@ -71,8 +72,8 @@ pub struct OpenOutput {
     pub url: String,
     /// Whether the server opened a browser on its own machine.
     pub opened_browser: bool,
-    /// "local", "tailnet", or "hub".
-    pub scope: String,
+    /// How far the link reaches; `explicit` implies no network trust.
+    pub scope: Scope,
     /// What the model should do next.
     pub instructions: String,
 }

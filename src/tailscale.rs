@@ -1,53 +1,19 @@
-//! Bind-target selection: loopback by default, or this node's Tailscale 100.x address.
+//! Detecting this node's Tailscale 100.x address. The bind abstraction it feeds is in
+//! [`crate::bind`].
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::bind::BindTarget;
+
 const TAILSCALE_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindScope {
-    Local,
-    Tailnet,
-}
-
-impl BindScope {
-    pub fn label(self) -> &'static str {
-        match self {
-            BindScope::Local => "local",
-            BindScope::Tailnet => "tailnet",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BindTarget {
-    pub bind_host: String,
-    pub public_host: String,
-    pub scope: BindScope,
-    pub label: String,
-    pub diagnostics: Option<String>,
-}
-
-impl BindTarget {
-    pub fn local(diagnostics: Option<String>) -> Self {
-        Self {
-            bind_host: "127.0.0.1".into(),
-            public_host: "127.0.0.1".into(),
-            scope: BindScope::Local,
-            label: "local loopback".into(),
-            diagnostics,
-        }
-    }
-}
-
-fn is_tailscale_ipv4(value: &str) -> bool {
-    let Ok(ip) = value.parse::<std::net::Ipv4Addr>() else {
-        return false;
-    };
+fn tailscale_ipv4(value: &str) -> Option<Ipv4Addr> {
+    let ip = value.parse::<Ipv4Addr>().ok()?;
     let [a, b, _, _] = ip.octets();
-    a == 100 && (64..=127).contains(&b)
+    (a == 100 && (64..=127).contains(&b)).then_some(ip)
 }
 
 fn strings(value: Option<&Value>) -> Vec<&str> {
@@ -75,10 +41,7 @@ pub fn parse_status_json(stdout: &str) -> Result<BindTarget, String> {
     }
     let mut ips = strings(this_node.and_then(|n| n.get("TailscaleIPs")));
     ips.extend(strings(status.get("TailscaleIPs")));
-    let ip = ips
-        .into_iter()
-        .find(|ip| is_tailscale_ipv4(ip))
-        .ok_or("Tailscale did not report a usable 100.x IPv4 address")?;
+    let ip = ips.into_iter().find_map(tailscale_ipv4).ok_or("Tailscale did not report a usable 100.x IPv4 address")?;
 
     let dns_name = this_node
         .and_then(|n| n.get("DNSName"))
@@ -88,13 +51,7 @@ pub fn parse_status_json(stdout: &str) -> Result<BindTarget, String> {
     let host_name = this_node.and_then(|n| n.get("HostName")).and_then(Value::as_str).map(str::to_string);
     let node_name = dns_name.or(host_name);
 
-    Ok(BindTarget {
-        bind_host: ip.to_string(),
-        public_host: ip.to_string(),
-        scope: BindScope::Tailnet,
-        label: node_name.as_ref().map_or("tailnet".to_string(), |n| format!("tailnet {n}")),
-        diagnostics: node_name.map(|n| format!("Tailscale node: {n}")),
-    })
+    Ok(BindTarget::tailnet(ip.into(), node_name))
 }
 
 /// Run `tailscale status --json` and pick this node's Tailscale address. `Err` carries the
@@ -119,11 +76,6 @@ pub async fn detect() -> Result<BindTarget, String> {
     parse_status_json(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// [`detect`], falling back to loopback with the reason as a diagnostic.
-pub async fn detect_bind_target() -> BindTarget {
-    detect().await.unwrap_or_else(|reason| BindTarget::local(Some(reason)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,8 +86,8 @@ mod tests {
             r#"{"BackendState":"Running","Self":{"Online":true,"TailscaleIPs":["fd7a::1","100.101.102.103"],"DNSName":"box.tail.ts.net."}}"#,
         )
         .unwrap();
-        assert_eq!(target.bind_host, "100.101.102.103");
-        assert_eq!(target.scope, BindScope::Tailnet);
+        assert_eq!(target.host, "100.101.102.103".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(target.scope, crate::bind::Scope::Tailnet);
         assert_eq!(target.label, "tailnet box.tail.ts.net");
     }
 

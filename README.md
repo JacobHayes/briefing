@@ -166,7 +166,7 @@ Exit codes: 0 completed, 2 cancelled, 3 still pending after `--wait-seconds`, 13
 
 | Flag / env | Meaning |
 |---|---|
-| `--bind auto\|local\|tailscale` (`BRIEFING_BIND`) | Where the embedded server listens: `auto` prefers the Tailscale address and falls back to loopback; `tailscale` fails instead of falling back |
+| `--bind auto\|local\|tailscale\|IP` (`BRIEFING_BIND`) | Where the server listens: `auto` prefers Tailscale, otherwise loopback; `local` uses `127.0.0.1`; `tailscale` and literal IPv4/IPv6 addresses fail instead of falling back |
 | `--open true\|false` (`BRIEFING_OPEN`) | Whether to open new local briefings in the browser |
 | `--on-create 'cmd'` (`BRIEFING_ON_CREATE`) | Shell hook run with `BRIEFING_URL/ID/TITLE`, e.g. to push the link to ntfy from a headless box |
 | `--hub URL` (`BRIEFING_HUB`) | Use a hub instead of the embedded server |
@@ -181,7 +181,7 @@ Briefing always reads `$XDG_CONFIG_HOME/briefing/config.toml` (default
 command-line arguments. For example,
 
 ```toml
-bind = "local"                    # auto | local | tailscale
+bind = "local"                    # auto | local | tailscale | literal IPv4/IPv6 address
 hub = "https://briefings.example" # use a remote hub instead of the embedded server
 on_create = "notify-send"         # shell hook run with BRIEFING_URL/ID/TITLE
 open = false                      # do not open the system browser
@@ -207,11 +207,10 @@ long-lived server that any harness on any machine can use:
 briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-topic'
 ```
 
-- Binds to this node's Tailscale 100.x address when Tailscale is running, else loopback.
+- Defaults to Tailscale when available, otherwise loopback. Override with `--bind`.
 - Serves briefing pages, a dashboard at `/` listing briefings awaiting feedback (with links and
   progress) and recent results, the agent API (`/agent/briefings`), and with `--mcp` a
-  streamable-HTTP MCP endpoint at `/mcp`. There is no authentication: the tailnet is the
-  perimeter, and each briefing URL still carries its own capability token.
+  streamable-HTTP MCP endpoint at `/mcp`.
 - `--finished-ttl 6h` / `--active-ttl 14d` tune retention; the embedded server uses the same
   defaults.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
@@ -224,16 +223,31 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
 - Clients either point the stdio server at it (`briefing mcp --hub URL`) or connect to
   `/mcp` directly. `briefing --hub URL await|cancel|status` work against a hub.
 
+### Behind a reverse proxy
+
+```sh
+briefing serve --bind 127.0.0.1 --port 7789 --mcp \
+  --public-origin https://briefings.example
+```
+
+`--public-origin` sets generated URLs and the allowed proxy Host/Origin; TLS stays at the
+proxy. Preserve the public Host header or use the bound IP.
+
+`bind` accepts literal IPv4/IPv6 addresses, without ports, on all config surfaces.
+Explicit IPs never fall back. Wildcards (`0.0.0.0`, `::`) listen on all interfaces and need
+`--public-origin` for usable links.
+
 ## Security model
 
-- Bind only to loopback or one Tailscale address; never all interfaces.
+- Defaults to loopback/Tailscale; other bind addresses are opt-in.
 - Every briefing URL carries a random capability token; the agent side uses a separate id.
-- `Host` must match the bound origin on every request; `Origin` must match on browser POSTs.
+- `Host` and browser-write `Origin` checks prevent DNS rebinding and cross-site requests.
 - Strict CSP with a per-page nonce; renderer libraries are served from the binary.
 - Presentation and feedback sizes are capped. Records are written to the user's state
   directory with owner-only permissions and deleted 6 h after finishing (14 days if never
   answered).
-- No authentication on the hub's agent API or dashboard: run it on a private network.
+- No built-in authentication. Restrict all routes through network controls or an authenticating
+  proxy; block untrusted direct access. Proxy identity headers are not authentication.
 
 ## Development
 

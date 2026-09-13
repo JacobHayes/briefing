@@ -23,8 +23,7 @@ reason to open a briefing more often.
 ## Non-goals
 
 - Do not replace the harness's chat UI or build a general web client.
-- Do not expose the page server to the LAN or the internet; bind loopback or one Tailscale
-  address only.
+- No built-in authentication; access control belongs to the network or proxy.
 - Do not auto-open a briefing for every answer.
 - Do not gamify reading. The design target is low visual and interaction load, nothing more.
 - Do not infer comprehension from navigation or time spent. Only user-authored signal is
@@ -92,6 +91,8 @@ the same page serves every harness.
 Why the MCP shape is two calls, and how the wait survives client timeouts, is in the
 README's "Long waits" section; the per-client budgets are `PROFILES` in `src/mcp.rs`.
 
+## Configuration
+
 The CLI's built-in bind default remains `auto` for every harness. Every invocation loads the
 per-machine `config.toml`, then overlays environment variables, then explicit CLI arguments.
 clap owns the argument layer and most environment parsing declaratively; the file is a fallback
@@ -101,6 +102,10 @@ several MCP clients and each client's launcher sets its own. Configuration is st
 misspelled or invalid file settings fail even when a later layer would override them, rather
 than silently reverting to behavior the user did not select. Invalid environment values may also
 fail in clap even when a CLI flag would override them.
+
+`bind` shares one parser across file/env/CLI (`BindMode::from_str` in `src/bind.rs`): `auto`,
+`local`, `tailscale`, or a literal IPv4/IPv6 address without a port or zone identifier. Explicit
+IPs never fall back and report scope `explicit`, without implying network trust.
 
 `open` is per-machine rather than per-command, so the layers resolve it once. What differs
 between an embedded server and the hub is a `Role` in `src/main.rs`, the single place that says
@@ -140,12 +145,13 @@ user text 20 000 characters; request body 8 MiB.
 
 ## Security and lifecycle
 
-- Bind only to `127.0.0.1` or to one Tailscale 100.x address reported by `tailscale status`;
-  never all interfaces or a normal LAN address.
+- Default to loopback/Tailscale. Explicit IPs are opt-in; wildcards expose all interfaces.
 - Every briefing URL carries a cryptographically random capability token; the agent side uses
-  a separate id. Show the URL to the user so it can be opened from another tailnet device.
-- Require the expected `Host` header on every request and a same-origin `Origin` on browser
-  writes. Strict CSP with a per-page nonce; renderer libraries are served from the binary, no
+  a separate id. Show the URL to the user so it can be opened from another authorized device.
+  Capability tokens do not protect the hub dashboard or agent API.
+- Require an allowed bound/public `Host` header on every request and an allowed `Origin` on
+  browser writes. These are DNS-rebinding/cross-site defenses, not authentication.
+  Strict CSP with a per-page nonce; renderer libraries are served from the binary, no
   CDN. Remote data and images referenced by content are allowed (charts, illustrations).
 - Sanitize any HTML in content: no scripts, event handlers, dangerous URLs, or styles that
   could break the page.
@@ -159,5 +165,7 @@ user text 20 000 characters; request body 8 MiB.
   `status` with the feedback alongside; the CLI's `--json` output, the hub API, and the MCP
   `await_briefing` result all use that shape (MCP adds `reopened` for a recovered briefing). Records are written to the user's state directory with
   owner-only permissions and swept 6 hours after finishing (14 days if never answered).
-- The hub has no authentication of its own: run it on a private network.
+- Restrict all hub routes through network controls or an authenticating proxy; block untrusted
+  direct access. Briefing does not authenticate proxy identity headers.
+- `--public-origin` sets generated URLs and the allowed proxy Host/Origin, not binding or TLS.
 - Fail visibly when the browser cannot be opened and the link cannot be shown.

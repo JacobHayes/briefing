@@ -7,37 +7,12 @@ use axum::Router;
 use serde::Serialize;
 use tokio::sync::OnceCell;
 
+use crate::bind::{BindMode, BindTarget, Scope};
 use crate::browser;
 use crate::content::{self, Briefing};
 use crate::http::{self, HttpConfig, RunningServer};
 use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance};
 use crate::response::Outcome;
-use crate::tailscale::{self, BindScope, BindTarget};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BindMode {
-    /// Tailscale 100.x address when Tailscale is running, otherwise loopback.
-    #[default]
-    Auto,
-    /// 127.0.0.1 only.
-    Local,
-    /// The Tailscale address, or fail: never serve on loopback (for a headless box where a
-    /// loopback link would be useless).
-    Tailscale,
-}
-
-impl BindMode {
-    pub async fn target(self) -> anyhow::Result<BindTarget> {
-        match self {
-            BindMode::Local => Ok(BindTarget::local(None)),
-            BindMode::Auto => Ok(tailscale::detect_bind_target().await),
-            BindMode::Tailscale => {
-                tailscale::detect().await.map_err(|reason| anyhow::anyhow!("--bind tailscale: {reason}"))
-            }
-        }
-    }
-}
 
 /// What a caller learns after creating a briefing.
 #[derive(Debug, Clone, Serialize)]
@@ -45,8 +20,7 @@ impl BindMode {
 pub struct Created {
     pub id: String,
     pub url: String,
-    /// "local", "tailnet", or "hub".
-    pub scope: String,
+    pub scope: Scope,
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bind_host: Option<String>,
@@ -107,17 +81,17 @@ impl Site {
         options: SiteOptions,
         mcp: impl FnOnce(&Arc<Site>) -> Option<Router<Arc<Site>>>,
     ) -> anyhow::Result<(Arc<Site>, RunningServer)> {
-        let listener = http::bind(&target.bind_host, port)
+        let listener = http::bind(target.host, port)
             .await
             .map_err(|error| anyhow::anyhow!("{} bind failed: {error}", target.label))?;
         let port = listener.local_addr()?.port();
         let public_origin = options
             .public_origin
             .map(|origin| origin.trim_end_matches('/').to_string())
-            .unwrap_or_else(|| http::origin_for(&target.public_host, port));
+            .unwrap_or_else(|| http::origin_for(target.host, port));
         let site = Arc::new(Site {
             hub,
-            config: HttpConfig::new(public_origin, &target.public_host, options.agent_api),
+            config: HttpConfig::new(public_origin, target.host, options.agent_api),
             target,
             open_browser: options.open_browser,
             on_create: options.on_create,
@@ -150,9 +124,9 @@ impl Site {
         Ok(Created {
             id: created.id,
             url,
-            scope: self.target.scope.label().to_string(),
+            scope: self.target.scope,
             label: self.target.label.clone(),
-            bind_host: Some(self.target.bind_host.clone()),
+            bind_host: Some(self.target.host.to_string()),
             diagnostics: self.target.diagnostics.clone(),
             opened_browser: opened,
         })
@@ -239,12 +213,7 @@ impl LocalBackend {
         started
             .get_or_try_init(|| async {
                 let preferred = bind.target().await?;
-                let fallback = (bind == BindMode::Auto && preferred.scope == BindScope::Tailnet).then(|| {
-                    BindTarget::local(Some(format!(
-                        "Fell back to local loopback after {} bind failed",
-                        preferred.label
-                    )))
-                });
+                let fallback = bind.fallback(&preferred);
                 match start(preferred).await {
                     Ok(started) => Ok(started),
                     Err(error) => match fallback {
@@ -393,7 +362,7 @@ impl RemoteBackend {
         Ok(Created {
             id: created.id,
             url: created.url,
-            scope: "hub".into(),
+            scope: Scope::Hub,
             label: format!("hub {}", self.base),
             bind_host: None,
             diagnostics: None,

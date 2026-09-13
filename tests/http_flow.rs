@@ -4,12 +4,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use briefing::backend::{BindMode, LocalBackend, Site, SiteOptions};
+use briefing::backend::{LocalBackend, Site, SiteOptions};
+use briefing::bind::{BindMode, BindTarget, Scope};
 use briefing::content::demo;
 use briefing::hub::{Hub, HubConfig, Provenance};
 use briefing::response::Outcome;
 use briefing::store::Store;
-use briefing::tailscale::BindTarget;
 use serde_json::{Value, json};
 
 fn local(config: HubConfig) -> LocalBackend {
@@ -23,7 +23,7 @@ async fn embedded_server_roundtrip() {
     let created = backend.create(demo(), Some("test".into())).await.unwrap();
     assert_eq!(backend.info(&created.id).await.unwrap().unwrap().provenance, Provenance::Live, "created here");
     assert!(created.url.starts_with("http://127.0.0.1:"));
-    assert_eq!(created.scope, "local");
+    assert_eq!(created.scope, Scope::Local);
     assert!(!created.opened_browser);
 
     let client = reqwest::Client::new();

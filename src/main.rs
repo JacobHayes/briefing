@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use briefing::backend::{Backend, BindMode, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
+use briefing::backend::{Backend, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
+use briefing::bind::{self, BindMode};
 use briefing::content::{self, Briefing};
 use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance};
 use briefing::mcp::{BriefingMcp, HoldMode};
@@ -35,8 +36,14 @@ struct Common {
     /// Use a remote hub instead of an embedded server.
     #[arg(long, env = "BRIEFING_HUB", global = true)]
     hub: Option<String>,
-    /// Address to bind the embedded server to (overrides the config file).
-    #[arg(long, env = "BRIEFING_BIND", global = true, value_enum)]
+    // Help text is built from `bind::ACCEPTED` so it cannot drift from the parser.
+    #[arg(
+        long,
+        env = "BRIEFING_BIND",
+        global = true,
+        value_name = "MODE_OR_IP",
+        help = format!("Where to listen: {}. Explicit addresses never fall back", bind::ACCEPTED)
+    )]
     bind: Option<BindMode>,
     /// Shell command run when a briefing is created (gets BRIEFING_URL, BRIEFING_ID,
     /// BRIEFING_TITLE); use it to push the link to your phone from a headless box.
@@ -362,7 +369,7 @@ async fn run_mcp_stdio(common: &Common, hold: HoldArgs) -> anyhow::Result<()> {
 fn mcp_router(site: &Arc<Site>, hold: &HoldArgs) -> axum::Router<Arc<Site>> {
     let backend = Arc::new(Backend::Local(LocalBackend::attached(site.clone())));
     let (hold, max_wait) = (hold.hold, hold.max_wait_secs.map(Duration::from_secs));
-    let config = StreamableHttpServerConfig::default().with_allowed_hosts(site.config.allowed_hosts.clone());
+    let config = StreamableHttpServerConfig::default().with_allowed_hosts(site.config.allowed_hosts());
     let service = StreamableHttpService::new(
         move || Ok(BriefingMcp::new(backend.clone(), hold, max_wait)),
         Arc::new(LocalSessionManager::default()),
@@ -554,6 +561,9 @@ mod tests {
         assert_eq!(config.open, Some(false));
 
         assert!(toml::from_str::<Settings>(r#"binding = "local""#).is_err());
+        for value in ["123", "false", "[]", "{}"] {
+            assert!(toml::from_str::<Settings>(&format!("bind = {value}")).is_err());
+        }
     }
 
     /// A `Common` with everything unset, as clap leaves it before the file overlay.

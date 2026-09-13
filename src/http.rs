@@ -1,11 +1,12 @@
 //! HTTP surface: the browser briefing page + its API, and (in hub mode) the dashboard, the
 //! agent API, and an MCP endpoint used by remote harnesses.
 //!
-//! There is no authentication: the hub is meant to sit on a private network (a tailnet),
-//! and every briefing URL carries its own capability token. Host and Origin checks guard
-//! against DNS rebinding and cross-site requests.
+//! There is no authentication: the hub needs a trusted network or an authenticating reverse
+//! proxy with no untrusted direct access. Every briefing URL carries its own capability token.
+//! Host and Origin checks guard against DNS rebinding and cross-site requests.
 
-use std::net::SocketAddr;
+use std::borrow::Cow;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,44 +37,74 @@ pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 pub struct HttpConfig {
     /// Origin used to build briefing URLs, e.g. `http://127.0.0.1:41234` or `https://briefings.example`.
     pub public_origin: String,
-    /// Host header values (with or without port) accepted by every route.
-    pub allowed_hosts: Vec<String>,
+    /// Authorities accepted by every route, already split: an entry without a port accepts any
+    /// port, an entry carrying one must match it exactly.
+    allowed: Vec<(String, Option<u16>)>,
     /// Serve the dashboard at `/` and the agent API under `/agent/*` (hub mode).
     pub agent_api: bool,
 }
 
-/// `host` or `host:port` as it appears in a Host header, for a parsed URL.
-pub fn host_with_port(url: &url::Url) -> Option<String> {
-    let host = url.host_str()?;
-    Some(match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    })
+/// How `url` - and so rmcp and every briefing URL - spells an IP host: an IPv6 literal bracketed
+/// and hex-compressed (`::ffff:127.0.0.1` becomes `[::ffff:7f00:1]`), IPv4 as written.
+fn canonical_host(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => url::Host::<String>::Ipv4(ip).to_string(),
+        IpAddr::V6(ip) => url::Host::<String>::Ipv6(ip).to_string(),
+    }
+}
+
+/// An authority split at the last `:` outside a bracketed IPv6 literal. `None` when the port is
+/// not bare decimal digits in range (`u16::from_str` alone would accept a leading `+`).
+fn split_port(authority: &str) -> Option<(&str, Option<u16>)> {
+    let tail = authority.rfind(']').map_or(0, |end| end + 1);
+    let Some(colon) = authority[tail..].rfind(':') else { return Some((authority, None)) };
+    let (host, port) = authority.split_at(tail + colon);
+    let port = &port[1..];
+    if !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((host, Some(port.parse().ok()?)))
 }
 
 impl HttpConfig {
     /// Accept the host we bind on and, when `public_origin` names another host (a reverse
     /// proxy), that one too.
-    pub fn new(public_origin: String, bind_host: &str, agent_api: bool) -> Self {
-        let mut allowed_hosts = vec![bind_host.to_string()];
+    pub fn new(public_origin: String, bind_host: IpAddr, agent_api: bool) -> Self {
+        let bind_host = canonical_host(bind_host);
+        let mut allowed = vec![(bind_host.clone(), None)];
         if let Ok(url) = url::Url::parse(&public_origin)
-            && url.host_str().is_some_and(|host| !host.eq_ignore_ascii_case(bind_host))
-            && let Some(host) = host_with_port(&url)
+            && let Some(host) = url.host_str()
+            && !host.eq_ignore_ascii_case(&bind_host)
         {
-            allowed_hosts.push(host);
+            allowed.push((host.to_string(), url.port()));
         }
-        Self { public_origin, allowed_hosts, agent_api }
+        Self { public_origin, allowed, agent_api }
+    }
+
+    /// The allow-list as authority strings, for consumers that keep their own copy (rmcp's
+    /// `with_allowed_hosts`).
+    pub fn allowed_hosts(&self) -> Vec<String> {
+        self.allowed
+            .iter()
+            .map(|(host, port)| match port {
+                Some(port) => format!("{host}:{port}"),
+                None => host.clone(),
+            })
+            .collect()
     }
 
     pub fn host_allowed(&self, host: &str) -> bool {
-        let host = host.trim();
-        let bare = host
-            .rsplit_once(':')
-            .filter(|(h, p)| !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-            .map(|(h, _)| h);
-        self.allowed_hosts
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(host) || bare.is_some_and(|b| allowed.eq_ignore_ascii_case(b)))
+        let Some((host, port)) = split_port(host.trim()) else { return false };
+        // Equivalent IPv6 spellings must agree with URL/rmcp canonicalization, so the bracketed
+        // form goes through `url`'s own parser. Nothing else in the authority may be
+        // reinterpreted: `Host::parse` would apply IDNA and IPv4 shorthand to a bare host.
+        let host = if host.starts_with('[') {
+            let Ok(parsed @ url::Host::Ipv6(_)) = url::Host::parse(host) else { return false };
+            Cow::Owned(parsed.to_string())
+        } else {
+            Cow::Borrowed(host)
+        };
+        self.matches(&host, port)
     }
 
     pub fn origin_allowed(&self, origin: &str) -> bool {
@@ -83,7 +114,15 @@ impl HttpConfig {
         if url.scheme() != "http" && url.scheme() != "https" {
             return false;
         }
-        host_with_port(&url).is_some_and(|host| self.host_allowed(&host))
+        // `url` already canonicalizes the host, so this skips `host_allowed`'s normalization.
+        url.host_str().is_some_and(|host| self.matches(host, url.port()))
+    }
+
+    /// A canonical host and port against the allow-list.
+    fn matches(&self, host: &str, port: Option<u16>) -> bool {
+        self.allowed.iter().any(|(allowed, allowed_port)| {
+            allowed.eq_ignore_ascii_case(host) && (allowed_port.is_none() || *allowed_port == port)
+        })
     }
 
     pub fn briefing_url(&self, token: &str) -> String {
@@ -348,7 +387,7 @@ impl RunningServer {
 }
 
 /// Bind `host:port` (port 0 = ephemeral). Serve it with [`serve_listener`].
-pub async fn bind(host: &str, port: u16) -> std::io::Result<tokio::net::TcpListener> {
+pub async fn bind(host: IpAddr, port: u16) -> std::io::Result<tokio::net::TcpListener> {
     tokio::net::TcpListener::bind((host, port)).await
 }
 
@@ -366,12 +405,8 @@ pub fn serve_listener(router: Router, listener: tokio::net::TcpListener) -> std:
     Ok(RunningServer { local_addr, shutdown, task })
 }
 
-pub fn origin_for(public_host: &str, port: u16) -> String {
-    if public_host.contains(':') && !public_host.starts_with('[') {
-        format!("http://[{public_host}]:{port}")
-    } else {
-        format!("http://{public_host}:{port}")
-    }
+pub fn origin_for(public_host: IpAddr, port: u16) -> String {
+    format!("http://{}:{port}", canonical_host(public_host))
 }
 
 #[cfg(test)]
@@ -381,7 +416,7 @@ mod tests {
     fn config() -> HttpConfig {
         HttpConfig {
             public_origin: "http://127.0.0.1:4000".into(),
-            allowed_hosts: vec!["127.0.0.1".into(), "briefings.example".into()],
+            allowed: vec![("127.0.0.1".into(), None), ("briefings.example".into(), None)],
             agent_api: false,
         }
     }
@@ -395,22 +430,62 @@ mod tests {
         assert!(!config.host_allowed("localhost:4000"));
         assert!(!config.host_allowed("evil.example:4000"));
         assert!(!config.host_allowed(""));
+        // One port grammar for every host spelling, bracketed or not.
+        assert!(!config.host_allowed("127.0.0.1:"));
+        assert!(!config.host_allowed("127.0.0.1:99999"));
+        assert!(!config.host_allowed("127.0.0.1:+80"));
         assert!(config.origin_allowed("http://127.0.0.1:4000"));
         assert!(config.origin_allowed("https://briefings.example"));
         assert!(!config.origin_allowed("null"));
         assert!(!config.origin_allowed("http://attacker.example"));
         assert_eq!(config.briefing_url("abc"), "http://127.0.0.1:4000/briefing/abc");
-        assert_eq!(origin_for("fd7a::1", 8), "http://[fd7a::1]:8");
+        assert_eq!(origin_for("fd7a::1".parse().unwrap(), 8), "http://[fd7a::1]:8");
         assert_eq!(clamp_wait(Some(10_000)), MAX_WAIT);
         assert_eq!(clamp_wait(None), DEFAULT_WAIT);
     }
 
     #[test]
+    fn ipv6_bind_hosts_and_origins_use_brackets() {
+        for origin in ["http://[::1]:4000", "https://briefings.example"] {
+            let config = HttpConfig::new(origin.into(), "::1".parse().unwrap(), true);
+            assert!(config.allowed_hosts().contains(&"[::1]".to_string()));
+            assert!(config.host_allowed("[::1]"));
+            assert!(config.host_allowed("[::1]:4000"));
+            assert!(config.origin_allowed("http://[::1]:4000"));
+            assert!(!config.host_allowed("::1"));
+            assert!(!config.host_allowed("[::2]:4000"));
+            assert!(!config.origin_allowed("http://[::2]:4000"));
+            assert!(!config.host_allowed("[::1].evil.example:4000"));
+            assert!(!config.origin_allowed("http://[::1].evil.example:4000"));
+        }
+        let mapped = HttpConfig::new("https://briefings.example".into(), "::ffff:127.0.0.1".parse().unwrap(), true);
+        for host in ["[::ffff:127.0.0.1]:4000", "[0:0:0:0:0:ffff:7f00:1]:4000", "[::ffff:7f00:1]"] {
+            assert!(mapped.host_allowed(host), "{host}");
+        }
+        for host in [
+            "[::ffff:127.0.0.2]:4000",
+            "[::ffff:127.0.0.1].evil:4000",
+            "[::ffff:127.0.0.1]:",
+            "[::ffff:127.0.0.1]:65536",
+            "[::ffff:127.0.0.1]:+80",
+            "[::ffff:127.0.0.1]@evil",
+            "[::ffff:127.0.0.1%lo]:4000",
+        ] {
+            assert!(!mapped.host_allowed(host), "{host}");
+        }
+        assert_eq!(origin_for("::ffff:127.0.0.1".parse().unwrap(), 4000), "http://[::ffff:7f00:1]:4000");
+        assert_eq!(origin_for("::1".parse().unwrap(), 4000), "http://[::1]:4000");
+        let proxied = HttpConfig::new("http://[::1]:4000".into(), "127.0.0.1".parse().unwrap(), true);
+        assert_eq!(proxied.allowed_hosts(), vec!["127.0.0.1".to_string(), "[::1]:4000".to_string()]);
+        assert!(proxied.host_allowed("[::1]:4000") && !proxied.host_allowed("[::1]:4001"));
+    }
+
+    #[test]
     fn allowed_hosts_follow_the_public_origin() {
-        let plain = HttpConfig::new("http://127.0.0.1:4000".into(), "127.0.0.1", false);
-        assert_eq!(plain.allowed_hosts, vec!["127.0.0.1".to_string()]);
-        let proxied = HttpConfig::new("https://briefings.example".into(), "100.64.0.1", true);
-        assert_eq!(proxied.allowed_hosts, vec!["100.64.0.1".to_string(), "briefings.example".to_string()]);
+        let plain = HttpConfig::new("http://127.0.0.1:4000".into(), "127.0.0.1".parse().unwrap(), false);
+        assert_eq!(plain.allowed_hosts(), vec!["127.0.0.1".to_string()]);
+        let proxied = HttpConfig::new("https://briefings.example".into(), "100.64.0.1".parse().unwrap(), true);
+        assert_eq!(proxied.allowed_hosts(), vec!["100.64.0.1".to_string(), "briefings.example".to_string()]);
         assert!(proxied.host_allowed("briefings.example"));
         assert!(proxied.origin_allowed("https://briefings.example"));
     }
