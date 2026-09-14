@@ -43,7 +43,7 @@ type CliResult = { briefingId: string } & (
   | { status: "cancelled"; feedback: Feedback }
 );
 
-type Active = { child: ChildProcess; url?: string };
+type Active = { child: ChildProcess; ready?: ReadyEvent };
 
 /** Run the CLI and return its stdout; rejects with stderr on a non-zero exit. */
 function runCapture(args: string[]): Promise<string> {
@@ -106,7 +106,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       }
       if (event.event !== "ready") return;
       const ready = event as ReadyEvent;
-      active!.url = ready.url;
+      active!.ready = ready;
       const message = `Briefing (${ready.scope}): ${ready.url}`;
       ctx.ui.setWorkingMessage(message);
       ctx.ui.setStatus("briefing", `briefing: ${ready.scope}`);
@@ -262,8 +262,8 @@ export default function briefingExtension(pi: ExtensionAPI) {
     description: "Show the open briefing's link again",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
-      if (!active?.url) return ctx.ui.notify("No briefing is open", "warning");
-      ctx.ui.notify(`Briefing: ${active.url}`, "info");
+      if (!active?.ready?.url) return ctx.ui.notify("No briefing is open", "warning");
+      ctx.ui.notify(`Briefing: ${active.ready.url}`, "info");
     },
   });
 

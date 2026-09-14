@@ -278,6 +278,10 @@ impl LocalBackend {
 
 const HUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug, thiserror::Error)]
+#[error("hub request timed out")]
+struct HubRequestTimeout;
+
 /// Minimal HTTP(S) client for the hub API: hyper + rustls with bundled webpki roots, so the
 /// binary cross-compiles without platform TLS frameworks.
 pub struct RemoteBackend {
@@ -332,9 +336,8 @@ impl RemoteBackend {
             None => Vec::new(),
         };
         let request = request.body(http_body_util::Full::new(bytes::Bytes::from(payload)))?;
-        let response = tokio::time::timeout(timeout, self.client.request(request))
-            .await
-            .map_err(|_| anyhow::anyhow!("hub request timed out"))??;
+        let response =
+            tokio::time::timeout(timeout, self.client.request(request)).await.map_err(|_| HubRequestTimeout)??;
         let status = response.status();
         let bytes = response.into_body().collect().await?.to_bytes();
         let value = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes)? };
@@ -371,15 +374,32 @@ impl RemoteBackend {
     }
 
     pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
+        self.wait_with_limits(id, timeout, http::MAX_WAIT, HUB_REQUEST_TIMEOUT).await
+    }
+
+    async fn wait_with_limits(
+        &self,
+        id: &str,
+        timeout: Duration,
+        max_slice: Duration,
+        request_timeout: Duration,
+    ) -> anyhow::Result<Outcome> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Ok(Outcome::Pending);
             }
-            let slice = remaining.min(http::MAX_WAIT);
+            let slice = remaining.min(max_slice);
             let path = format!("/agent/briefings/{id}/wait?timeout_secs={}", slice.as_secs().max(1));
-            let value = self.request(::http::Method::GET, &path, None, slice + HUB_REQUEST_TIMEOUT).await?;
+            let value = match self.request(::http::Method::GET, &path, None, slice + request_timeout).await {
+                Ok(value) => value,
+                // A remote long-poll can outlive one HTTP request even though the briefing is
+                // still valid on the hub. Treat transport timeouts as "still pending" and
+                // reconnect instead of losing the briefing id.
+                Err(error) if error.is::<HubRequestTimeout>() => continue,
+                Err(error) => return Err(error),
+            };
             match serde_json::from_value(value)? {
                 Outcome::Pending => continue,
                 done => return Ok(done),
@@ -459,5 +479,47 @@ impl Backend {
         if let Backend::Local(local) = self {
             local.shutdown().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn remote_wait_retries_hub_request_timeouts() {
+        crate::tls::init();
+        let hub = Arc::new(Hub::new(HubConfig::default()));
+        let options = SiteOptions { agent_api: true, ..SiteOptions::default() };
+        let (site, running) = Site::start(hub, BindTarget::local(None), 0, options, |_| None).await.unwrap();
+        let origin = site.config.public_origin.clone();
+        let remote = RemoteBackend::new(&origin).unwrap();
+        let created = remote.create(content::demo(), Some("test".into())).await.unwrap();
+        let token = created.url.rsplit('/').next().unwrap().to_string();
+
+        let submit_origin = origin.clone();
+        let submitter = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            let response = reqwest::Client::new()
+                .post(format!("{submit_origin}/api/{token}/complete"))
+                .header("origin", &submit_origin)
+                .json(&json!({"overallNote": "retried"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        });
+
+        let outcome = remote
+            .wait_with_limits(&created.id, Duration::from_secs(2), Duration::from_millis(25), Duration::from_millis(5))
+            .await
+            .unwrap();
+        match outcome {
+            Outcome::Completed { feedback } => assert_eq!(feedback.overall_note, "retried"),
+            other => panic!("unexpected {other:?}"),
+        }
+        submitter.await.unwrap();
+        running.stop().await;
     }
 }
