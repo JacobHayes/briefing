@@ -119,9 +119,11 @@ plan. The per-client table, with sources, is `PROFILES` in
 [src/mcp.rs](src/mcp.rs).
 
 Pi's own extension has no client-side tool timeout to work around, so it exposes a single
-blocking `brief_user` that shows the link in Pi's UI and returns the feedback directly. When
-using a remote hub, individual long-poll HTTP requests may still time out; `briefing await`
-treats those as pending and repolls internally, so callers never see the timeout.
+blocking `brief_user` that shows the link in Pi's UI and returns the feedback directly. The
+`/brief-demo` and `/brief-result` commands route through temporary command-only tools so they
+exercise the same active-tool UI mechanics. When using a remote hub, individual long-poll
+HTTP requests may still time out; `briefing await` treats those as pending and repolls
+internally, so callers never see the timeout.
 
 ## Recovery and hand-off
 

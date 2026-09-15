@@ -3,9 +3,10 @@
 // Install: `pi install git:github.com/JacobHayes/briefing` (the repo's package.json
 // declares this extension). Requires the `briefing` binary on PATH.
 //
-// Pi has no tool timeout, so this is a single blocking tool: `brief_user` spawns
+// Pi has no tool timeout, so real briefings use a single blocking tool: `brief_user` spawns
 // `briefing present --json`, shows the link in Pi's UI while the user works, and returns the
-// feedback when they submit. Esc or /brief-cancel cancels. Briefings are mirrored to disk by
+// feedback when they submit. Recovery/demo commands temporarily enable command-only tools so
+// they exercise the same active-tool UI. Esc or /brief-cancel cancels. Briefings are mirrored to disk by
 // the CLI, so `/brief-result <id>` recovers one after a crash (stored feedback, or a fresh
 // link with the draft intact) and `/brief-status` lists them.
 
@@ -16,6 +17,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { matchesKey, Text } from "@earendil-works/pi-tui";
 
 const BINARY = process.env.BRIEFING_BIN || "briefing";
+const DEMO_TOOL_NAME = "briefing_demo";
+const RESULT_TOOL_NAME = "briefing_result";
 
 type ReadyEvent = {
   event: "ready";
@@ -78,6 +81,25 @@ export default function briefingExtension(pi: ExtensionAPI) {
   let active: Active | undefined;
   let forceBriefingNextTurn = false;
 
+  // A command-only tool (`/brief-demo`, `/brief-result`) is enabled for exactly one turn: the
+  // command records what to run, `before_agent_start` injects the prompt that steers the model
+  // to it, and `agent_settled` tears the tool back down. `cliArgs` also carries the recovery
+  // id, so the tool needs no model-supplied parameters.
+  type Forced = { tool: string; cliArgs: string[]; prompt: string };
+  let forced: Forced | undefined;
+
+  function forceCommandTool(next: Forced) {
+    forced = next;
+    pi.setActiveTools([...new Set([...pi.getActiveTools(), next.tool])]);
+  }
+
+  function clearForcedTool() {
+    if (!forced) return;
+    const { tool } = forced;
+    forced = undefined;
+    pi.setActiveTools(pi.getActiveTools().filter((name) => name !== tool));
+  }
+
   /** Run the CLI to completion; `onReady` fires once the link is known. */
   function run(args: string[], stdin: string | undefined, ctx: ExtensionContext, signal?: AbortSignal, onReady?: (ready: ReadyEvent) => void): Promise<CliResult> {
     if (active) return Promise.reject(new Error("A briefing is already open; wait for it or /brief-cancel"));
@@ -107,13 +129,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
       if (event.event !== "ready") return;
       const ready = event as ReadyEvent;
       active!.ready = ready;
-      const message = `Briefing (${ready.scope}): ${ready.url}`;
+      // Keep Pi UI chrome minimal: the working row already stays visible while the
+      // briefing blocks, and /brief-reopen can redisplay the link if needed.
+      const message = `Briefing: ${ready.url}`;
       ctx.ui.setWorkingMessage(message);
-      ctx.ui.setStatus("briefing", `briefing: ${ready.scope}`);
-      const widget = [message, `Listening on ${ready.label}`];
-      if (!ready.openedBrowser) widget.push("Browser not opened automatically; open the link manually");
-      if (ready.diagnostics) widget.push(ready.diagnostics);
-      ctx.ui.setWidget("briefing", widget, { placement: "belowEditor" });
       onReady?.(ready);
     });
 
@@ -152,6 +171,111 @@ export default function briefingExtension(pi: ExtensionAPI) {
     }
 
     pi.registerTool({
+      name: DEMO_TOOL_NAME,
+      label: "Briefing Demo",
+      description: "Open the bundled briefing demo and return the user's feedback. Used only by /brief-demo.",
+      promptSnippet: "Open the bundled briefing demo when /brief-demo is requested",
+      executionMode: "sequential",
+      parameters: { type: "object", properties: {}, additionalProperties: false } as any,
+
+      async execute(_toolCallId, _params, signal, onUpdate, toolCtx) {
+        try {
+          const result = await run(["demo", "--json"], undefined, toolCtx, signal, (ready) => {
+            onUpdate?.({
+              content: [{ type: "text", text: `Briefing: ${ready.url}` }],
+              details: { status: "open", briefingId: ready.id, url: ready.url, scope: ready.scope },
+            });
+          });
+          if (result.status !== "completed") {
+            toolCtx.abort();
+            throw new Error("Briefing demo cancelled by user");
+          }
+          const feedback = result.feedback;
+          return {
+            content: [{ type: "text", text: JSON.stringify({ status: "completed", briefingId: result.briefingId, feedback }) }],
+            details: { status: "completed", briefingId: result.briefingId, feedback },
+          };
+        } finally {
+          restoreCommandTools();
+        }
+      },
+
+      renderCall(_args, theme) {
+        return new Text(theme.fg("toolTitle", theme.bold("briefing_demo ")) + theme.fg("muted", "bundled demo"), 0, 0);
+      },
+
+      renderResult(result, { expanded, isPartial }, theme) {
+        const details = result.details as { status?: string; url?: string; scope?: string; feedback?: Feedback } | undefined;
+        if (isPartial && details?.url) {
+          let text = theme.fg("warning", "Briefing: ") + theme.fg("accent", details.url);
+          if (expanded) text += `\n${theme.fg("dim", "Esc or /brief-cancel to cancel")}`;
+          return new Text(text, 0, 0);
+        }
+        if (isPartial) return new Text(theme.fg("warning", "Preparing briefing..."), 0, 0);
+        if (!details?.feedback) return new Text(result.content[0]?.type === "text" ? result.content[0].text : "", 0, 0);
+        return new Text(theme.fg("success", "✓ Briefing demo complete") + theme.fg("muted", ` - ${summary(details.feedback)}`), 0, 0);
+      },
+    });
+
+    pi.registerTool({
+      name: RESULT_TOOL_NAME,
+      label: "Briefing Result",
+      description: "Recover a briefing by id and return stored feedback or reopen it. Used only by /brief-result.",
+      promptSnippet: "Recover a briefing result when /brief-result is requested",
+      executionMode: "sequential",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string", description: "Briefing id to recover" } },
+        required: ["id"],
+        additionalProperties: false,
+      } as any,
+
+      async execute(_toolCallId, params, signal, onUpdate, toolCtx) {
+        const input = params as { id?: unknown };
+        const id = forcedResultId ?? (typeof input.id === "string" ? input.id.trim() : "");
+        if (!id) throw new Error("Missing briefing id");
+        try {
+          const result = await run(["await", id, "--json"], undefined, toolCtx, signal, (ready) => {
+            onUpdate?.({
+              content: [{ type: "text", text: `Briefing: ${ready.url}` }],
+              details: { status: "open", briefingId: ready.id, url: ready.url, scope: ready.scope },
+            });
+          });
+          if (result.status !== "completed") {
+            toolCtx.abort();
+            throw new Error(`Briefing ${id} ${result.status}`);
+          }
+          const feedback = result.feedback;
+          return {
+            content: [{ type: "text", text: JSON.stringify({ status: "completed", briefingId: result.briefingId, feedback }) }],
+            details: { status: "completed", briefingId: result.briefingId, feedback },
+          };
+        } finally {
+          forcedResultId = undefined;
+          restoreCommandTools();
+        }
+      },
+
+      renderCall(args, theme) {
+        const input = args as { id?: unknown };
+        const id = typeof input.id === "string" && input.id ? input.id : forcedResultId ?? "briefing";
+        return new Text(theme.fg("toolTitle", theme.bold("briefing_result ")) + theme.fg("muted", id), 0, 0);
+      },
+
+      renderResult(result, { expanded, isPartial }, theme) {
+        const details = result.details as { status?: string; url?: string; scope?: string; feedback?: Feedback } | undefined;
+        if (isPartial && details?.url) {
+          let text = theme.fg("warning", "Briefing: ") + theme.fg("accent", details.url);
+          if (expanded) text += `\n${theme.fg("dim", "Esc or /brief-cancel to cancel")}`;
+          return new Text(text, 0, 0);
+        }
+        if (isPartial) return new Text(theme.fg("warning", "Recovering briefing..."), 0, 0);
+        if (!details?.feedback) return new Text(result.content[0]?.type === "text" ? result.content[0].text : "", 0, 0);
+        return new Text(theme.fg("success", "✓ Briefing recovered") + theme.fg("muted", ` - ${summary(details.feedback)}`), 0, 0);
+      },
+    });
+
+    pi.registerTool({
       name: "brief_user",
       label: "Brief the user",
       description:
@@ -165,7 +289,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       async execute(_toolCallId, params, signal, onUpdate, toolCtx) {
         const result = await run(["present", "--json"], JSON.stringify(params), toolCtx, signal, (ready) => {
           onUpdate?.({
-            content: [{ type: "text", text: `Briefing open at ${ready.url}` }],
+            content: [{ type: "text", text: `Briefing: ${ready.url}` }],
             details: { status: "open", briefingId: ready.id, url: ready.url, scope: ready.scope },
           });
         });
@@ -190,7 +314,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       renderResult(result, { expanded, isPartial }, theme) {
         const details = result.details as { status?: string; url?: string; scope?: string; feedback?: Feedback } | undefined;
         if (isPartial && details?.url) {
-          let text = theme.fg("warning", "Briefing open: ") + theme.fg("accent", details.url) + theme.fg("muted", ` (${details.scope})`);
+          let text = theme.fg("warning", "Briefing: ") + theme.fg("accent", details.url);
           if (expanded) text += `\n${theme.fg("dim", "Esc or /brief-cancel to cancel")}`;
           return new Text(text, 0, 0);
         }
@@ -199,9 +323,25 @@ export default function briefingExtension(pi: ExtensionAPI) {
         return new Text(theme.fg("success", "✓ Briefing complete") + theme.fg("muted", ` - ${summary(details.feedback)}`), 0, 0);
       },
     });
+
+    pi.setActiveTools(pi.getActiveTools().filter((name) => name !== DEMO_TOOL_NAME && name !== RESULT_TOOL_NAME));
   });
 
   pi.on("before_agent_start", async (event) => {
+    if (forceDemoNextTurn) {
+      forceDemoNextTurn = false;
+      return {
+        systemPrompt: `${event.systemPrompt}\n\nThe user explicitly requested the bundled briefing demo. Call ${DEMO_TOOL_NAME} exactly once now. Do not call brief_user for this request. After the tool returns completed feedback, respond only to that feedback.`,
+      };
+    }
+
+    if (forceResultNextTurn) {
+      forceResultNextTurn = false;
+      return {
+        systemPrompt: `${event.systemPrompt}\n\nThe user explicitly requested recovery for briefing ${forcedResultId}. Call ${RESULT_TOOL_NAME} exactly once now with id ${JSON.stringify(forcedResultId)}. Do not call brief_user for this request. After the tool returns completed feedback, respond only to that feedback.`,
+      };
+    }
+
     if (!forceBriefingNextTurn) return;
     forceBriefingNextTurn = false;
     return {
@@ -220,32 +360,28 @@ export default function briefingExtension(pi: ExtensionAPI) {
     },
   });
 
-  /** Run a briefing outside a tool call and hand its feedback to Pi as a user message. */
-  async function briefToMessage(args: string[], label: string, preface: string, ctx: ExtensionContext) {
-    if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
-    try {
-      const result = await run(args, undefined, ctx);
-      if (result.status === "completed") {
-        pi.sendUserMessage(`${preface}\n\n${JSON.stringify(result.feedback, null, 2)}`);
-      } else {
-        ctx.ui.notify(`${label} ${result.status}`, "info");
-      }
-    } catch (error) {
-      ctx.ui.notify(describe(error), "error");
-    }
-  }
-
   pi.registerCommand("brief-demo", {
-    description: "Open the bundled briefing demo; feedback is sent to Pi as a message",
-    handler: (_args, ctx) => briefToMessage(["demo", "--json"], "Briefing demo", "I just reviewed the briefing demo. Here is my structured feedback from it:", ctx),
+    description: "Open the bundled briefing demo through an agent tool call",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy; wait for the current turn", "warning");
+      enableCommandTool(DEMO_TOOL_NAME);
+      forceDemoNextTurn = true;
+      pi.sendUserMessage("Open the bundled briefing demo.");
+    },
   });
 
   pi.registerCommand("brief-result", {
     description: "Recover a briefing by id: fetch its stored feedback, or reopen it with a fresh link",
     handler: async (args, ctx) => {
+      if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
+      if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy; wait for the current turn", "warning");
       const id = args.trim();
       if (!id) return ctx.ui.notify("Usage: /brief-result <briefingId>", "warning");
-      return briefToMessage(["await", id, "--json"], `Briefing ${id}`, `Here is my feedback from briefing ${id} (recovered after the earlier session was interrupted); respond to it:`, ctx);
+      forcedResultId = id;
+      enableCommandTool(RESULT_TOOL_NAME);
+      forceResultNextTurn = true;
+      pi.sendUserMessage(`Recover briefing ${id}.`);
     },
   });
 
@@ -277,8 +413,17 @@ export default function briefingExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.on("agent_settled", async () => {
+    forcedResultId = undefined;
+    restoreCommandTools();
+  });
+
   pi.on("session_shutdown", async () => {
     forceBriefingNextTurn = false;
+    forceDemoNextTurn = false;
+    forceResultNextTurn = false;
+    forcedResultId = undefined;
+    restoreCommandTools();
     active?.child.kill("SIGINT");
   });
 }

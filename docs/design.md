@@ -87,7 +87,7 @@ the same page serves every harness.
 | Harness | Shape | Commands |
 |---|---|---|
 | MCP (Claude Code, Codex, others) | `brief_user` returns the link at once; `await_briefing` blocks until submit; `cancel_briefing` | none |
-| Pi extension | a single blocking `brief_user` that shows the link in Pi's UI | `/brief <request>`, `/brief-demo`, `/brief-reopen`, `/brief-cancel`, `/brief-result <id>`, `/brief-status` |
+| Pi extension | blocking `brief_user` for real briefings; `/brief-demo` and `/brief-result` temporarily enable command-only tools so they use the same active-tool UI mechanics | `/brief <request>`, `/brief-demo`, `/brief-reopen`, `/brief-cancel`, `/brief-result <id>`, `/brief-status` |
 | CLI | `briefing present spec.json`, `briefing demo`, `briefing await <id>`, `briefing status` | |
 
 Why the MCP shape is two calls, and how the wait survives client timeouts, is in the
