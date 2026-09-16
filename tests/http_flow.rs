@@ -237,6 +237,7 @@ async fn hub_agent_api_and_dashboard() {
     let csp = dashboard.headers().get("content-security-policy").unwrap().to_str().unwrap().to_string();
     let html = dashboard.text().await.unwrap();
     assert!(html.contains("Awaiting feedback"));
+    assert!(html.contains("Cancel"));
     let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap();
     assert!(html.contains(&format!("nonce=\"{nonce}\"")));
 
@@ -307,6 +308,23 @@ async fn hub_agent_api_and_dashboard() {
     assert_eq!(listed["briefings"].as_array().unwrap().len(), 1);
     assert_eq!(listed["briefings"][0]["url"], url);
     assert_eq!(listed["briefings"][0]["status"], "cancelled");
+
+    let second: Value = client
+        .post(format!("{origin}/agent/briefings"))
+        .json(&json!({"presentation": demo()}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    let agent_cancel: Value =
+        client.post(format!("{origin}/agent/briefings/{second_id}/cancel")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(agent_cancel, json!({"ok": true, "cancelled": true}));
+    let agent_cancel_again: Value =
+        client.post(format!("{origin}/agent/briefings/{second_id}/cancel")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(agent_cancel_again, json!({"ok": true, "cancelled": false}));
     assert_eq!(client.post(format!("{origin}/agent/briefings/nope/cancel")).send().await.unwrap().status(), 404);
 
     running.stop().await;

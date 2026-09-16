@@ -215,9 +215,9 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
 ```
 
 - Defaults to Tailscale when available, otherwise loopback. Override with `--bind`.
-- Serves briefing pages, a dashboard at `/` listing briefings awaiting feedback (with links and
-  progress) and recent results, the agent API (`/agent/briefings`), and with `--mcp` a
-  streamable-HTTP MCP endpoint at `/mcp`.
+- Serves briefing pages, a dashboard at `/` listing briefings awaiting feedback (with links,
+  progress, and a cancel action) and recent results, the agent API (`/agent/briefings`), and
+  with `--mcp` a streamable-HTTP MCP endpoint at `/mcp`.
 - `--finished-ttl 6h` / `--active-ttl 14d` tune retention; the embedded server uses the same
   defaults.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
