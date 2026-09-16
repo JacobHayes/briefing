@@ -13,14 +13,26 @@ node = "latest"
 zig = "0.16.0"
 
 [tasks.check]
-description = "format, apply clippy fixes, regenerate the skill, then verify clippy and tests"
+description = "verify format, generated skill, clippy, and tests"
 run = """
+set -eu
+cargo fmt --all -- --check
+generated_skill="$(mktemp)"
+trap 'rm -f "$generated_skill"' EXIT
+cargo run --quiet --locked -- guidance skill > "$generated_skill"
+diff -u skills/briefing/SKILL.md "$generated_skill"
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+"""
+
+[tasks.fix]
+description = "format, apply clippy fixes, and regenerate the skill"
+run = """
+set -eu
 cargo fmt --all
 cargo clippy --fix --allow-dirty --allow-staged --all-targets --locked -- -D warnings
 cargo fmt --all
 cargo run --quiet --locked -- guidance skill > skills/briefing/SKILL.md
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
 """
 
 [tasks.demo]

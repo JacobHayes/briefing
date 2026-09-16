@@ -258,7 +258,8 @@ Explicit IPs never fall back. Wildcards (`0.0.0.0`, `::`) listen on all interfac
 
 ```sh
 mise install         # rust (+ clippy, rustfmt, release targets), zig, cargo-zigbuild, node
-mise run check       # format, clippy --fix, regenerate skill, clippy -D warnings, tests
+mise run check       # verify format, generated skill, clippy -D warnings, tests
+mise run fix         # format, clippy --fix, regenerate skill
 mise use -g github:JacobHayes/briefing@latest   # or: cargo install --path . --locked
 mise run assets:update
 cargo zigbuild --release --target aarch64-apple-darwin   # any release target, from Linux
@@ -270,7 +271,7 @@ Vega, Vega-Lite, vega-embed). `build.rs` installs the versions pinned in
 be available; offline builds can point `BRIEFING_VENDOR_DIR` at a directory holding the
 seven files.
 
-CI (`.rwx/ci.yml`) runs `mise run check`, fails if it leaves a diff, and cross-builds every
+CI (`.rwx/ci.yml`) runs the non-mutating `mise run check` and cross-builds every
 push; releases (`.rwx/release.yml`) are immutable calver tags `vYYYY.MM.DD.N`, published
 daily when `main` moved. The release build sets `BRIEFING_VERSION` to the tag, which
 `build.rs` bakes into `briefing --version`; other
