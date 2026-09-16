@@ -70,7 +70,9 @@ call validates the content, registers it, and hands back a link. What the user s
   in the browser, so a refresh, a crash of the agent's process, or opening the link on another
   device continues where the user left off. Annotations re-anchor from semantic section
   identity, text offsets, and quote context rather than DOM ranges, so highlights survive
-  navigation and refresh.
+  navigation and refresh. Selection boundaries come from the selected text rather than the raw
+  DOM range, so a selection that spills past the end of a paragraph still anchors, while one
+  whose text spans two regions still does not.
 
 Keyboard: Left/Right move between screens when focus is outside a form control; `c` after a
 keyboard selection opens the comment composer; `n` opens the Notes panel; Cmd/Ctrl+Enter saves

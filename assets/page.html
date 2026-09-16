@@ -1161,13 +1161,45 @@
       return rect && (rect.width > 0 || rect.height > 0) ? rect : null;
     }
 
+    // A paragraph selection ends outside the reading region on the browser's
+    // trailing newline, which would push the range's common ancestor past the
+    // region. Return a copy narrowed to the selected non-whitespace text, or
+    // null when only whitespace is selected. Real content outside the region
+    // still widens the range, so cross-region selections stay unannotatable.
+    function trimRangeToText(range) {
+      const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT);
+      walker.currentNode = range.startContainer;
+      let first = null;
+      let last = null;
+      let started = false;
+      // Text nodes arrive in document order from the range's start, so the first
+      // one that no longer intersects is past its end.
+      let text = range.startContainer.nodeType === 3 ? range.startContainer : walker.nextNode();
+      for (; text; text = walker.nextNode()) {
+        if (!range.intersectsNode(text)) { if (started) break; continue; }
+        started = true;
+        const from = text === range.startContainer ? range.startOffset : 0;
+        const to = text === range.endContainer ? range.endOffset : text.length;
+        const selected = text.data.slice(from, to);
+        const trimmed = selected.trim();
+        if (!trimmed) continue;
+        const lead = from + selected.length - selected.trimStart().length;
+        first ||= { node: text, offset: lead };
+        last = { node: text, offset: lead + trimmed.length };
+      }
+      if (!first) return null;
+      const trimmedRange = range.cloneRange();
+      trimmedRange.setStart(first.node, first.offset);
+      trimmedRange.setEnd(last.node, last.offset);
+      return trimmedRange;
+    }
+
     function annotatableRegion(range) {
       const node = range.commonAncestorContainer;
       const elt = node.nodeType === 1 ? node : node.parentElement;
       if (!elt) return null;
       const region = elt.closest("[data-section]");
       if (!region) return null;
-      if (!region.contains(range.startContainer) || !region.contains(range.endContainer)) return null;
       // Never annotate form controls even if a future region were to contain one.
       const start = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
       if (start && start.closest("input, textarea, select, button")) return null;
@@ -1178,17 +1210,16 @@
       if (submitted || composer) { hideCommentButton(); return; }
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || !sel.rangeCount) { hideCommentButton(); return; }
-      const range = sel.getRangeAt(0);
+      const range = trimRangeToText(sel.getRangeAt(0));
+      if (!range) { hideCommentButton(); return; }
       const region = annotatableRegion(range);
       if (!region) { hideCommentButton(); return; }
-      const raw = sel.toString();
-      const quote = raw.trim();
-      const anchorRaw = range.toString();
-      const anchorQuote = anchorRaw.trim();
-      if (!quote || !anchorQuote) { hideCommentButton(); return; }
-      const lead = anchorRaw.length - anchorRaw.trimStart().length;
+      const quote = sel.toString().trim();
+      // Both boundaries sit on non-whitespace, so the anchor needs no correction.
+      const anchorQuote = range.toString();
+      if (!quote) { hideCommentButton(); return; }
       const { text } = linearize(region);
-      const start = linearStart(region, range) + lead;
+      const start = linearStart(region, range);
       const clipped = quote.slice(0, MAX_QUOTE);
       const clippedAnchor = anchorQuote.slice(0, MAX_QUOTE);
       const end = start + clippedAnchor.length;
