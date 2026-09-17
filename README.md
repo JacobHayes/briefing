@@ -219,7 +219,7 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
   progress, and a cancel action) and recent results, the agent API (`/agent/briefings`), and
   with `--mcp` a streamable-HTTP MCP endpoint at `/mcp`.
 - `--finished-ttl 6h` / `--active-ttl 14d` tune retention; the embedded server uses the same
-  defaults.
+  defaults. Long-lived hubs sweep expired records in the background once a minute.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
 - `--on-create` runs a shell command with `BRIEFING_URL/ID/TITLE` so a remote session can push
   the URL to your phone. It applies however the briefing was created: the agent API, `/mcp`, or

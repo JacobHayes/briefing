@@ -235,7 +235,7 @@ pub fn random_token(bytes: usize) -> String {
 
 /// How often a waiter re-reads the on-disk record, in case another process finished it.
 const RECONCILE_EVERY: Duration = Duration::from_secs(2);
-const SWEEP_EVERY: Duration = Duration::from_secs(60);
+pub const SWEEP_EVERY: Duration = Duration::from_secs(60);
 
 /// A record serialized under the lock, to be written to disk once it is released.
 struct Pending(Option<(String, Vec<u8>)>);

@@ -377,12 +377,21 @@ pub struct RunningServer {
     pub local_addr: SocketAddr,
     pub shutdown: CancellationToken,
     pub task: tokio::task::JoinHandle<()>,
+    background: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl RunningServer {
+    pub(crate) fn with_background_task(mut self, task: tokio::task::JoinHandle<()>) -> Self {
+        self.background.push(task);
+        self
+    }
+
     pub async fn stop(self) {
         self.shutdown.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), self.task).await;
+        for task in self.background {
+            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        }
     }
 }
 
@@ -402,7 +411,7 @@ pub fn serve_listener(router: Router, listener: tokio::net::TcpListener) -> std:
             tracing::error!(%error, "briefing http server stopped");
         }
     });
-    Ok(RunningServer { local_addr, shutdown, task })
+    Ok(RunningServer { local_addr, shutdown, task, background: Vec::new() })
 }
 
 pub fn origin_for(public_host: IpAddr, port: u16) -> String {

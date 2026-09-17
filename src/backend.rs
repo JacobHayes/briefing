@@ -6,12 +6,13 @@ use std::time::Duration;
 use axum::Router;
 use serde::Serialize;
 use tokio::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 
 use crate::bind::{BindMode, BindTarget, Scope};
 use crate::browser;
 use crate::content::{self, Briefing};
 use crate::http::{self, HttpConfig, RunningServer};
-use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance};
+use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance, SWEEP_EVERY};
 use crate::response::Outcome;
 
 /// What a caller learns after creating a briefing.
@@ -96,7 +97,12 @@ impl Site {
             open_browser: options.open_browser,
             on_create: options.on_create,
         });
-        let running = http::serve_listener(http::router(site.clone(), mcp(&site)), listener)?;
+        let mut running = http::serve_listener(http::router(site.clone(), mcp(&site)), listener)?;
+        if site.config.agent_api {
+            let shutdown = running.shutdown.clone();
+            let sweeper = start_hub_sweeper(site.hub.clone(), shutdown, SWEEP_EVERY);
+            running = running.with_background_task(sweeper);
+        }
         Ok((site, running))
     }
 
@@ -144,6 +150,17 @@ impl Site {
             info.url = self.url_for(&info.id);
         }
     }
+}
+
+fn start_hub_sweeper(hub: Arc<Hub>, shutdown: CancellationToken, every: Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tokio::time::sleep(every) => hub.sweep(),
+            }
+        }
+    })
 }
 
 fn run_on_create_hook(command: &str, url: &str, id: &str, title: &str) {
@@ -486,6 +503,26 @@ impl Backend {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn background_sweeper_expires_records() {
+        let hub =
+            Arc::new(Hub::new(HubConfig { finished_ttl: Duration::ZERO, active_ttl: Duration::ZERO, store: None }));
+        let created = hub.create(content::demo(), None);
+        let shutdown = CancellationToken::new();
+        let task = start_hub_sweeper(hub.clone(), shutdown.clone(), Duration::from_millis(10));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while hub.status(&created.id).is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        shutdown.cancel();
+        task.await.unwrap();
+    }
 
     #[tokio::test]
     async fn remote_wait_retries_hub_request_timeouts() {
