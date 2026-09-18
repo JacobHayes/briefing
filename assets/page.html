@@ -307,7 +307,7 @@
     const MARGIN_RAIL_MIN_USABLE = 150;
     const TOUCH_CALLOUT_CLEARANCE = 60;
     const DELETE_ARM_MS = 5000;
-    const errorMessage = error => errorMessage(error);
+    const errorMessage = error => String(error?.message ?? error); // Do not recurse: Safari can optimize tail recursion into an infinite loop, freezing error handling.
 
     const el = (tag, attrs = {}, children = []) => {
       const node = document.createElement(tag);
