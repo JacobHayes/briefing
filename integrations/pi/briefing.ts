@@ -79,25 +79,32 @@ function summary(feedback: Feedback): string {
 
 export default function briefingExtension(pi: ExtensionAPI) {
   let active: Active | undefined;
-  let forceBriefingNextTurn = false;
 
-  // A command-only tool (`/brief-demo`, `/brief-result`) is enabled for exactly one turn: the
-  // command records what to run, `before_agent_start` injects the prompt that steers the model
-  // to it, and `agent_settled` tears the tool back down. `cliArgs` also carries the recovery
-  // id, so the tool needs no model-supplied parameters.
-  type Forced = { tool: string; cliArgs: string[]; prompt: string };
+  // `/brief`, `/brief-demo` and `/brief-result` all queue one instruction for the next turn: the
+  // command records it, `before_agent_start` appends `prompt` to the system prompt, and
+  // `agent_settled` tears it back down. Naming a `tool` additionally enables that command-only
+  // tool for the turn and carries everything it needs (the recovery id), so the tool itself takes
+  // no model-supplied parameters.
+  type Forced =
+    | { tool?: undefined; prompt: string }
+    | { tool: typeof DEMO_TOOL_NAME; prompt: string }
+    | { tool: typeof RESULT_TOOL_NAME; id: string; prompt: string };
   let forced: Forced | undefined;
 
-  function forceCommandTool(next: Forced) {
+  function forceNextTurn(next: Forced) {
+    clearForced();
     forced = next;
-    pi.setActiveTools([...new Set([...pi.getActiveTools(), next.tool])]);
+    if (next.tool) pi.setActiveTools([...new Set([...pi.getActiveTools(), next.tool])]);
   }
 
-  function clearForcedTool() {
-    if (!forced) return;
-    const { tool } = forced;
+  function clearForced() {
+    const tool = forced?.tool;
     forced = undefined;
-    pi.setActiveTools(pi.getActiveTools().filter((name) => name !== tool));
+    if (tool) pi.setActiveTools(pi.getActiveTools().filter((name) => name !== tool));
+  }
+
+  function forcedResultId(): string | undefined {
+    return forced?.tool === RESULT_TOOL_NAME ? forced.id : undefined;
   }
 
   /** Run the CLI to completion; `onReady` fires once the link is known. */
@@ -196,7 +203,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
             details: { status: "completed", briefingId: result.briefingId, feedback },
           };
         } finally {
-          restoreCommandTools();
+          clearForced();
         }
       },
 
@@ -223,16 +230,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
       description: "Recover a briefing by id and return stored feedback or reopen it. Used only by /brief-result.",
       promptSnippet: "Recover a briefing result when /brief-result is requested",
       executionMode: "sequential",
-      parameters: {
-        type: "object",
-        properties: { id: { type: "string", description: "Briefing id to recover" } },
-        required: ["id"],
-        additionalProperties: false,
-      } as any,
+      parameters: { type: "object", properties: {}, additionalProperties: false } as any,
 
-      async execute(_toolCallId, params, signal, onUpdate, toolCtx) {
-        const input = params as { id?: unknown };
-        const id = forcedResultId ?? (typeof input.id === "string" ? input.id.trim() : "");
+      async execute(_toolCallId, _params, signal, onUpdate, toolCtx) {
+        const id = forcedResultId();
         if (!id) throw new Error("Missing briefing id");
         try {
           const result = await run(["await", id, "--json"], undefined, toolCtx, signal, (ready) => {
@@ -251,14 +252,12 @@ export default function briefingExtension(pi: ExtensionAPI) {
             details: { status: "completed", briefingId: result.briefingId, feedback },
           };
         } finally {
-          forcedResultId = undefined;
-          restoreCommandTools();
+          clearForced();
         }
       },
 
-      renderCall(args, theme) {
-        const input = args as { id?: unknown };
-        const id = typeof input.id === "string" && input.id ? input.id : forcedResultId ?? "briefing";
+      renderCall(_args, theme) {
+        const id = forcedResultId() ?? "briefing";
         return new Text(theme.fg("toolTitle", theme.bold("briefing_result ")) + theme.fg("muted", id), 0, 0);
       },
 
@@ -328,25 +327,8 @@ export default function briefingExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event) => {
-    if (forceDemoNextTurn) {
-      forceDemoNextTurn = false;
-      return {
-        systemPrompt: `${event.systemPrompt}\n\nThe user explicitly requested the bundled briefing demo. Call ${DEMO_TOOL_NAME} exactly once now. Do not call brief_user for this request. After the tool returns completed feedback, respond only to that feedback.`,
-      };
-    }
-
-    if (forceResultNextTurn) {
-      forceResultNextTurn = false;
-      return {
-        systemPrompt: `${event.systemPrompt}\n\nThe user explicitly requested recovery for briefing ${forcedResultId}. Call ${RESULT_TOOL_NAME} exactly once now with id ${JSON.stringify(forcedResultId)}. Do not call brief_user for this request. After the tool returns completed feedback, respond only to that feedback.`,
-      };
-    }
-
-    if (!forceBriefingNextTurn) return;
-    forceBriefingNextTurn = false;
-    return {
-      systemPrompt: `${event.systemPrompt}\n\nThe user explicitly requested a briefing for this turn. Do the necessary work, then call brief_user for the final presentation rather than emitting a long normal response.`,
-    };
+    if (!forced) return;
+    return { systemPrompt: `${event.systemPrompt}\n\n${forced.prompt}` };
   });
 
   pi.registerCommand("brief", {
@@ -355,7 +337,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
       if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
       if (!args.trim()) return ctx.ui.notify("Usage: /brief <request>", "warning");
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy; wait for the current turn", "warning");
-      forceBriefingNextTurn = true;
+      forceNextTurn({
+        prompt:
+          "The user explicitly requested a briefing for this turn. Do the necessary work, then call brief_user for the final presentation rather than emitting a long normal response.",
+      });
       pi.sendUserMessage(args.trim());
     },
   });
@@ -365,8 +350,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy; wait for the current turn", "warning");
-      enableCommandTool(DEMO_TOOL_NAME);
-      forceDemoNextTurn = true;
+      forceNextTurn({
+        tool: DEMO_TOOL_NAME,
+        prompt: `The user explicitly requested the bundled briefing demo. Call ${DEMO_TOOL_NAME} exactly once now. Do not call brief_user for this request. After the tool returns completed feedback, respond only to that feedback.`,
+      });
       pi.sendUserMessage("Open the bundled briefing demo.");
     },
   });
@@ -378,9 +365,11 @@ export default function briefingExtension(pi: ExtensionAPI) {
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy; wait for the current turn", "warning");
       const id = args.trim();
       if (!id) return ctx.ui.notify("Usage: /brief-result <briefingId>", "warning");
-      forcedResultId = id;
-      enableCommandTool(RESULT_TOOL_NAME);
-      forceResultNextTurn = true;
+      forceNextTurn({
+        tool: RESULT_TOOL_NAME,
+        id,
+        prompt: `The user explicitly requested recovery for briefing ${JSON.stringify(id)}. Call ${RESULT_TOOL_NAME} exactly once now; it takes no parameters and already has that id. Do not call brief_user for this request. After the tool returns completed feedback, respond only to that feedback.`,
+      });
       pi.sendUserMessage(`Recover briefing ${id}.`);
     },
   });
@@ -414,16 +403,11 @@ export default function briefingExtension(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async () => {
-    forcedResultId = undefined;
-    restoreCommandTools();
+    clearForced();
   });
 
   pi.on("session_shutdown", async () => {
-    forceBriefingNextTurn = false;
-    forceDemoNextTurn = false;
-    forceResultNextTurn = false;
-    forcedResultId = undefined;
-    restoreCommandTools();
+    clearForced();
     active?.child.kill("SIGINT");
   });
 }

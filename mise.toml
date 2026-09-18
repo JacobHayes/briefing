@@ -12,8 +12,21 @@ rust = { version = "latest", profile = "minimal", components = ["clippy", "rustf
 node = "latest"
 zig = "0.16.0"
 
+[tasks."pi:check"]
+description = "verify the Pi extension typecheck and command-state smoke test"
+dir = "integrations/pi"
+run = """
+set -eu
+# Like build.rs does for assets/, install only when the tree is missing or behind the lockfile,
+# so the gate does not refetch ~170 packages on every run.
+if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+  npm ci --ignore-scripts --no-audit --no-fund
+fi
+npm run check
+"""
+
 [tasks.check]
-description = "verify format, generated skill, clippy, and tests"
+description = "verify the full project: format, generated skill, clippy, tests, and Pi extension"
 run = """
 set -eu
 cargo fmt --all -- --check
@@ -23,6 +36,7 @@ cargo run --quiet --locked -- guidance skill > "$generated_skill"
 diff -u skills/briefing/SKILL.md "$generated_skill"
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
+mise run pi:check
 """
 
 [tasks.fix]

@@ -260,7 +260,8 @@ Explicit IPs never fall back. Wildcards (`0.0.0.0`, `::`) listen on all interfac
 
 ```sh
 mise install         # rust (+ clippy, rustfmt, release targets), zig, cargo-zigbuild, node
-mise run check       # verify format, generated skill, clippy -D warnings, tests
+mise run check       # full project gate: format, generated skill, clippy -D warnings, tests, Pi extension
+mise run pi:check    # focused Pi extension typecheck/smoke
 mise run fix         # format, clippy --fix, regenerate skill
 mise use -g github:JacobHayes/briefing@latest   # or: cargo install --path . --locked
 mise run assets:update
