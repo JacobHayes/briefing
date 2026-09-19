@@ -20,10 +20,10 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@earendil-works/pi-tui": "^0.85.1",
-    "@types/node": "^22.19.19",
-    "jiti": "^2.7.0",
-    "typescript": "^5.9.3"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "*",
+    "jiti": "*",
+    "typescript": "*"
   }
 }
