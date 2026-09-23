@@ -45,10 +45,6 @@ struct Common {
         help = format!("Where to listen: {}. Explicit addresses never fall back", bind::ACCEPTED)
     )]
     bind: Option<BindMode>,
-    /// Shell command run when a briefing is created (gets BRIEFING_URL, BRIEFING_ID,
-    /// BRIEFING_TITLE); use it to push the link to your phone from a headless box.
-    #[arg(long, env = "BRIEFING_ON_CREATE", global = true)]
-    on_create: Option<String>,
     /// Open new briefings in this machine's system browser (`--open false` to suppress). Left
     /// unset, the config file then a built-in `true` decide. When using `--hub`, the client opens
     /// the hub URL locally; `serve` ignores it because the hub itself stays headless.
@@ -185,7 +181,6 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 struct Settings {
     bind: Option<BindMode>,
     hub: Option<String>,
-    on_create: Option<String>,
     open: Option<bool>,
 }
 
@@ -218,7 +213,6 @@ impl Settings {
     fn overlay(self, common: &mut Common) {
         common.bind = common.bind.or(self.bind);
         common.hub = common.hub.take().or(self.hub);
-        common.on_create = common.on_create.take().or(self.on_create);
         common.open = common.open.or(self.open);
     }
 }
@@ -247,7 +241,7 @@ impl Common {
     /// What a [`Site`] in this process does with the briefings it creates. The one place the
     /// `Role` differences live.
     fn site_options(&self, role: Role, public_origin: Option<String>) -> SiteOptions {
-        SiteOptions { agent_api: role == Role::Hub, public_origin, on_create: self.on_create.clone() }
+        SiteOptions { agent_api: role == Role::Hub, public_origin }
     }
 }
 
@@ -571,14 +565,12 @@ mod tests {
             r#"
             bind = "local"
             hub = "https://hub.example"
-            on_create = "notify"
             open = false
             "#,
         )
         .unwrap();
         assert_eq!(config.bind, Some(BindMode::Local));
         assert_eq!(config.hub.as_deref(), Some("https://hub.example"));
-        assert_eq!(config.on_create.as_deref(), Some("notify"));
         assert_eq!(config.open, Some(false));
 
         assert!(toml::from_str::<Settings>(r#"binding = "local""#).is_err());
@@ -589,31 +581,24 @@ mod tests {
 
     /// A `Common` with everything unset, as clap leaves it before the file overlay.
     fn bare_common() -> Common {
-        Common { hub: None, bind: None, on_create: None, open: None }
+        Common { hub: None, bind: None, open: None }
     }
 
     #[test]
     fn overlay_fills_only_unset_fields() {
         // A file value wins only where clap left the field unset; an argument/env value stands.
         // Every field is set on both layers so a forgotten `overlay` line cannot hide here.
-        let mut common =
-            Common { bind: Some(BindMode::Tailscale), on_create: Some("flag".into()), open: Some(true), hub: None };
-        Settings {
-            bind: Some(BindMode::Local),
-            hub: Some("https://hub.example".into()),
-            on_create: Some("file".into()),
-            open: Some(false),
-        }
-        .overlay(&mut common);
+        let mut common = Common { bind: Some(BindMode::Tailscale), open: Some(true), hub: None };
+        Settings { bind: Some(BindMode::Local), hub: Some("https://hub.example".into()), open: Some(false) }
+            .overlay(&mut common);
         assert_eq!(common.bind, Some(BindMode::Tailscale)); // set on CLI, file ignored
-        assert_eq!(common.on_create.as_deref(), Some("flag")); // set on CLI, file ignored
         assert!(common.open_browser()); // set on CLI, file ignored
         assert_eq!(common.hub.as_deref(), Some("https://hub.example")); // filled from file
 
         // With nothing on the CLI the file fills every hole.
         let mut common = bare_common();
-        Settings { on_create: Some("file".into()), open: Some(false), ..Settings::default() }.overlay(&mut common);
-        assert_eq!(common.on_create.as_deref(), Some("file"));
+        Settings { hub: Some("file".into()), open: Some(false), ..Settings::default() }.overlay(&mut common);
+        assert_eq!(common.hub.as_deref(), Some("file"));
         assert!(!common.open_browser());
 
         // Absent everywhere, the fallbacks are the built-in defaults.

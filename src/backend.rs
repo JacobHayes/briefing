@@ -54,9 +54,6 @@ pub struct SiteOptions {
     pub agent_api: bool,
     /// Origin to put in briefing URLs when behind a reverse proxy; by default the bound address.
     pub public_origin: Option<String>,
-    /// Shell command run when a briefing is created; receives `BRIEFING_URL`, `BRIEFING_ID`,
-    /// `BRIEFING_TITLE`.
-    pub on_create: Option<String>,
 }
 
 /// One briefing server: the registry, how it is reached, and the side effects of creating a
@@ -66,7 +63,6 @@ pub struct Site {
     pub hub: Arc<Hub>,
     pub config: HttpConfig,
     pub target: BindTarget,
-    on_create: Option<String>,
 }
 
 impl Site {
@@ -87,12 +83,8 @@ impl Site {
             .public_origin
             .map(|origin| origin.trim_end_matches('/').to_string())
             .unwrap_or_else(|| http::origin_for(target.host, port));
-        let site = Arc::new(Site {
-            hub,
-            config: HttpConfig::new(public_origin, target.host, options.agent_api),
-            target,
-            on_create: options.on_create,
-        });
+        let site =
+            Arc::new(Site { hub, config: HttpConfig::new(public_origin, target.host, options.agent_api), target });
         let mut running = http::serve_listener(http::router(site.clone(), mcp(&site)), listener)?;
         if site.config.agent_api {
             let shutdown = running.shutdown.clone();
@@ -102,17 +94,13 @@ impl Site {
         Ok((site, running))
     }
 
-    /// Validate and register a presentation, remember its link, and run the on-create hook.
+    /// Validate and register a presentation and remember its link.
     /// Opening a browser is the creating [`Backend`]'s job, not the server's.
     pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
         let validated = content::validate(&presentation)?;
-        let title = validated.title.clone();
         let created = self.hub.create(validated, source);
         let url = self.config.briefing_url(&created.token);
         self.hub.set_url(&created.id, &url);
-        if let Some(hook) = &self.on_create {
-            run_on_create_hook(hook, &url, &created.id, &title);
-        }
         Ok(Created {
             id: created.id,
             url,
@@ -147,29 +135,6 @@ fn start_hub_sweeper(hub: Arc<Hub>, shutdown: CancellationToken, every: Duration
             }
         }
     })
-}
-
-fn run_on_create_hook(command: &str, url: &str, id: &str, title: &str) {
-    let command = command.to_string();
-    let (url, id, title) = (url.to_string(), id.to_string(), title.to_string());
-    tokio::spawn(async move {
-        let result = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .env("BRIEFING_URL", url)
-            .env("BRIEFING_ID", id)
-            .env("BRIEFING_TITLE", title)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await;
-        match result {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                tracing::warn!(status = %output.status, stderr = %String::from_utf8_lossy(&output.stderr), "on-create hook failed")
-            }
-            Err(error) => tracing::warn!(%error, "on-create hook could not start"),
-        }
-    });
 }
 
 enum Server {

@@ -175,7 +175,6 @@ Exit codes: 0 completed, 2 cancelled, 3 still pending after `--wait-seconds`, 13
 |---|---|
 | `--bind auto\|local\|tailscale\|IP` (`BRIEFING_BIND`) | Where the server listens: `auto` prefers Tailscale, otherwise loopback; `local` uses `127.0.0.1`; `tailscale` and literal IPv4/IPv6 addresses fail instead of falling back |
 | `--open true\|false` (`BRIEFING_OPEN`) | Whether this client opens new briefings in the local browser, including hub-created briefings. `serve` ignores it because the hub process stays headless |
-| `--on-create 'cmd'` (`BRIEFING_ON_CREATE`) | Shell hook run with `BRIEFING_URL/ID/TITLE`, e.g. to push the link to ntfy from a headless box |
 | `--hub URL` (`BRIEFING_HUB`) | Use a hub instead of the embedded server |
 | `BRIEFING_STATE_DIR` | Where records are mirrored (default `$XDG_STATE_HOME/briefing/briefings`) |
 | `BRIEFING_CONFIG` | Override the settings file path |
@@ -190,7 +189,6 @@ command-line arguments. For example,
 ```toml
 bind = "local"                    # auto | local | tailscale | literal IPv4/IPv6 address
 hub = "https://briefings.example" # use a remote hub instead of the embedded server
-on_create = "notify-send"         # shell hook run with BRIEFING_URL/ID/TITLE
 open = false                      # do not open the system browser from this client
 ```
 
@@ -212,7 +210,7 @@ running elsewhere (Claude Code web, Codex cloud, a headless box), `briefing serv
 long-lived server that any harness on any machine can use:
 
 ```sh
-briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-topic'
+briefing serve --mcp
 ```
 
 - Defaults to Tailscale when available, otherwise loopback. Override with `--bind`.
@@ -222,10 +220,8 @@ briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" https://ntfy.sh/my-
 - `--finished-ttl 6h` / `--active-ttl 14d` tune retention; the embedded server uses the same
   defaults. Long-lived hubs sweep expired records in the background once a minute.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
-- `--on-create` runs a shell command with `BRIEFING_URL/ID/TITLE` so a remote session can push
-  the URL to your phone. It applies however the briefing was created: the agent API, `/mcp`, or
-  a CLI pointed at the hub. The hub never tries to open a browser itself; clients using the hub
-  can still open the returned URL locally with their own `--open`/`BRIEFING_OPEN`/config setting.
+- The hub never tries to open a browser itself; clients using the hub can still open the
+  returned URL locally with their own `--open`/`BRIEFING_OPEN`/config setting.
 - `GET /agent/briefings/{id}/wait?timeout_secs=N` answers with the same
   `{ "briefingId", "status": "completed" | "cancelled" | "pending", "feedback"? }` shape as
   the CLI's `--json` output.

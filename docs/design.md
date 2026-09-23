@@ -98,7 +98,7 @@ README's "Long waits" section; the per-client budgets are `PROFILES` in `src/mcp
 The CLI's built-in bind default remains `auto` for every harness. Every invocation loads the
 per-machine `config.toml`, then overlays environment variables, then explicit CLI arguments.
 clap owns the argument layer and most environment parsing declaratively; the file is a fallback
-below it in `run`. Only per-machine settings (`bind`, `hub`, `on_create`, `open`) live in the
+below it in `run`. Only per-machine settings (`bind`, `hub`, `open`) live in the
 file; per-client settings such as `hold` stay argument/environment only, since one binary serves
 several MCP clients and each client's launcher sets its own. Configuration is strict so
 misspelled or invalid file settings fail even when a later layer would override them, rather
@@ -160,8 +160,8 @@ user text 20 000 characters; request body 8 MiB.
   could break the page.
 - The embedded server starts lazily on the first briefing, not at process start, and serves
   for the life of the process. Every way of creating a briefing (CLI, MCP over stdio or HTTP,
-  the hub's agent API) goes through the one site's create path, so validation, the recorded
-  link, and `--on-create` behave the same everywhere. Opening the browser happens a layer
+  the hub's agent API) goes through the one site's create path, so validation and the
+  recorded link behave the same everywhere. Opening the browser happens a layer
   up, in the client's `Backend`, so embedded and hub-served briefings open in the creating
   client's browser unless disabled, and the hub never opens one itself. A browser opener that
   fails only logs a warning; the briefing stays live and the caller still shows the link.

@@ -17,7 +17,7 @@ async fn run(file_bind: Option<&str>, env_bind: Option<&str>, cli_bind: Option<&
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     std::fs::write(&config, file_bind.map(|bind| format!("bind = {bind:?}\n")).unwrap_or_default()).unwrap();
-    // No caller settings, notification hooks, browser launch, or persistent records.
+    // No caller settings, browser launch, or persistent records.
     let mut command = common::briefing_command();
     command.env("BRIEFING_CONFIG", config).env("BRIEFING_STATE_DIR", dir.path().join("state"));
     command.args(args).args(["--open", "false"]);

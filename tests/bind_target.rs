@@ -42,8 +42,7 @@ async fn roundtrip(ip: &str) {
 async fn serve_and_check(ip: &str, public_origin: Option<&str>) {
     briefing::tls::init();
     let target = bind_mode(ip).target().await.unwrap();
-    let options =
-        SiteOptions { agent_api: true, public_origin: public_origin.map(str::to_string), ..Default::default() };
+    let options = SiteOptions { agent_api: true, public_origin: public_origin.map(str::to_string) };
     let (site, running) =
         Site::start(Arc::new(Hub::new(HubConfig::default())), target, 0, options, |_| None).await.unwrap();
     assert_eq!(running.local_addr.ip(), ip.parse::<IpAddr>().unwrap());

@@ -214,18 +214,11 @@ async fn briefing_recovered_by_another_process() {
     second.shutdown().await;
 }
 
-/// The hub agent API creates briefings through the same path as the CLI and MCP, so the
-/// on-create hook runs for it too.
+/// The hub agent API creates briefings through the same path as the CLI and MCP.
 #[tokio::test]
 async fn hub_agent_api_and_dashboard() {
     briefing::tls::init();
-    let hook_dir = tempfile::tempdir().unwrap();
-    let hook_file = hook_dir.path().join("hook.txt");
-    let options = SiteOptions {
-        agent_api: true,
-        on_create: Some(format!("echo \"$BRIEFING_ID $BRIEFING_URL $BRIEFING_TITLE\" > {}", hook_file.display())),
-        ..SiteOptions::default()
-    };
+    let options = SiteOptions { agent_api: true, ..SiteOptions::default() };
     let hub = Arc::new(Hub::new(HubConfig::default()));
     let (site, running) = Site::start(hub, BindTarget::local(None), 0, options, |_| None).await.unwrap();
     let origin = site.config.public_origin.clone();
@@ -266,16 +259,6 @@ async fn hub_agent_api_and_dashboard() {
     assert_eq!(info["status"], "active");
     assert_eq!(info["url"], url);
     assert_eq!(info["source"], "codex@laptop");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let hook = loop {
-        if let Ok(text) = std::fs::read_to_string(&hook_file) {
-            break text;
-        }
-        assert!(std::time::Instant::now() < deadline, "on-create hook did not run");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    assert_eq!(hook.trim(), format!("{id} {url} {}", demo().title));
 
     let pending: Value = client
         .get(format!("{origin}/agent/briefings/{id}/wait?timeout_secs=0"))

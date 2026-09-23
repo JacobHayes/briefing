@@ -25,12 +25,7 @@ if you already submitted, or a fresh link with your draft intact if not.
 ## Headless box, browser elsewhere
 
 The embedded server binds to the box's Tailscale address when Tailscale is running, and the
-model shows you the link, so opening it from a laptop or phone on the tailnet just works. To
-get the link pushed to you as well:
-
-```sh
-claude mcp add --scope user briefing -e BRIEFING_ON_CREATE='curl -s -d "$BRIEFING_URL" ntfy.sh/your-topic' -- briefing mcp
-```
+model shows you the link, so opening it from a laptop or phone on the tailnet just works.
 
 ## Remote sessions (Claude Code web, another machine)
 
@@ -38,7 +33,7 @@ Run a hub on a box you can reach from both the agent and your browser, then poin
 
 ```sh
 # on the hub box (Tailscale address is picked automatically)
-briefing serve --mcp --on-create 'curl -s -d "$BRIEFING_URL" ntfy.sh/your-topic'
+briefing serve --mcp
 
 # on the agent side, either stdio with a remote backend...
 claude mcp add --scope user briefing -e BRIEFING_HUB=http://100.x.y.z:7789 -- briefing mcp
