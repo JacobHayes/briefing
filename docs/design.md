@@ -109,10 +109,11 @@ fail in clap even when a CLI flag would override them.
 `local`, `tailscale`, or a literal IPv4/IPv6 address without a port or zone identifier. Explicit
 IPs never fall back and report scope `explicit`, without implying network trust.
 
-`open` is per-machine rather than per-command, so the layers resolve it once. What differs
-between an embedded server and the hub is a `Role` in `src/main.rs`, the single place that says
-a hub serves the agent API and never opens a browser; a `serve` run that was given an explicit
-`--open true` says so rather than ignoring it silently.
+`open` is per-machine rather than per-command, so the layers resolve it once. Opening is a
+client concern: `Backend::create` in `src/backend.rs` opens the URL on the creating process's
+machine, whether the briefing is served in-process or by a hub. The server side (`Site`) never
+opens a browser, so `serve` is headless by construction, and a `serve` run that was given an
+explicit `--open true` says so rather than ignoring it silently.
 
 ## Content contract
 
@@ -160,9 +161,10 @@ user text 20 000 characters; request body 8 MiB.
 - The embedded server starts lazily on the first briefing, not at process start, and serves
   for the life of the process. Every way of creating a briefing (CLI, MCP over stdio or HTTP,
   the hub's agent API) goes through the one site's create path, so validation, the recorded
-  link, and `--on-create` behave the same everywhere. Embedded briefings open in the local
-  browser unless disabled; the long-running hub never opens a browser itself. A briefing whose
-  browser opener fails is cancelled rather than left dangling.
+  link, and `--on-create` behave the same everywhere. Opening the browser happens a layer
+  up, in the client's `Backend`, so embedded and hub-served briefings open in the creating
+  client's browser unless disabled, and the hub never opens one itself. A browser opener that
+  fails only logs a warning; the briefing stays live and the caller still shows the link.
 - A wait ends in exactly one of `pending`, `completed`, or `cancelled`, carried as a tagged
   `status` with the feedback alongside; the CLI's `--json` output, the hub API, and the MCP
   `await_briefing` result all use that shape (MCP adds `reopened` for a recovered briefing). Records are written to the user's state directory with

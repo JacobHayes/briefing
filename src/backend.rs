@@ -54,8 +54,6 @@ pub struct SiteOptions {
     pub agent_api: bool,
     /// Origin to put in briefing URLs when behind a reverse proxy; by default the bound address.
     pub public_origin: Option<String>,
-    /// Try to open new briefings in this machine's browser.
-    pub open_browser: bool,
     /// Shell command run when a briefing is created; receives `BRIEFING_URL`, `BRIEFING_ID`,
     /// `BRIEFING_TITLE`.
     pub on_create: Option<String>,
@@ -68,7 +66,6 @@ pub struct Site {
     pub hub: Arc<Hub>,
     pub config: HttpConfig,
     pub target: BindTarget,
-    open_browser: bool,
     on_create: Option<String>,
 }
 
@@ -94,7 +91,6 @@ impl Site {
             hub,
             config: HttpConfig::new(public_origin, target.host, options.agent_api),
             target,
-            open_browser: options.open_browser,
             on_create: options.on_create,
         });
         let mut running = http::serve_listener(http::router(site.clone(), mcp(&site)), listener)?;
@@ -106,8 +102,8 @@ impl Site {
         Ok((site, running))
     }
 
-    /// Validate and register a presentation, remember its link, run the on-create hook, and
-    /// open the browser when configured. A browser opener that fails cancels the briefing.
+    /// Validate and register a presentation, remember its link, and run the on-create hook.
+    /// Opening a browser is the creating [`Backend`]'s job, not the server's.
     pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
         let validated = content::validate(&presentation)?;
         let title = validated.title.clone();
@@ -117,16 +113,6 @@ impl Site {
         if let Some(hook) = &self.on_create {
             run_on_create_hook(hook, &url, &created.id, &title);
         }
-        let mut opened = false;
-        if self.open_browser {
-            match browser::open_url(&url).await {
-                Ok(did_open) => opened = did_open,
-                Err(error) => {
-                    self.hub.cancel(&created.id);
-                    return Err(error);
-                }
-            }
-        }
         Ok(Created {
             id: created.id,
             url,
@@ -134,7 +120,7 @@ impl Site {
             label: self.target.label.clone(),
             bind_host: Some(self.target.host.to_string()),
             diagnostics: self.target.diagnostics.clone(),
-            opened_browser: opened,
+            opened_browser: false,
         })
     }
 
@@ -451,49 +437,72 @@ impl RemoteBackend {
 #[error("briefing not found on the hub")]
 struct NotFound;
 
-pub enum Backend {
+/// Where briefings live.
+pub enum BackendKind {
     Local(LocalBackend),
     Remote(RemoteBackend),
 }
 
+/// How a client process creates and follows briefings: a [`BackendKind`] plus what this
+/// machine does once one is created. Opening the browser lives here, not on the server, so it
+/// behaves the same whether the briefing is served in-process or by a hub.
+pub struct Backend {
+    kind: BackendKind,
+    open_browser: bool,
+}
+
 impl Backend {
+    pub fn new(kind: BackendKind, open_browser: bool) -> Self {
+        Self { kind, open_browser }
+    }
+
+    /// Create a briefing and, when configured, try to open it in this machine's browser. The
+    /// briefing is live either way, so a failed opener is only a warning: the caller still has
+    /// the link to show.
     pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
-        match self {
-            Backend::Local(local) => local.create(presentation, source).await,
-            Backend::Remote(remote) => remote.create(presentation, source).await,
+        let mut created = match &self.kind {
+            BackendKind::Local(local) => local.create(presentation, source).await?,
+            BackendKind::Remote(remote) => remote.create(presentation, source).await?,
+        };
+        if self.open_browser {
+            match browser::open_url(&created.url).await {
+                Ok(opened) => created.opened_browser = opened,
+                Err(error) => tracing::warn!(error = format!("{error:#}"), "could not open the browser"),
+            }
         }
+        Ok(created)
     }
 
     pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
-        match self {
-            Backend::Local(local) => local.wait(id, timeout).await,
-            Backend::Remote(remote) => remote.wait(id, timeout).await,
+        match &self.kind {
+            BackendKind::Local(local) => local.wait(id, timeout).await,
+            BackendKind::Remote(remote) => remote.wait(id, timeout).await,
         }
     }
 
     pub async fn cancel(&self, id: &str) -> anyhow::Result<bool> {
-        match self {
-            Backend::Local(local) => Ok(local.cancel(id)),
-            Backend::Remote(remote) => remote.cancel(id).await,
+        match &self.kind {
+            BackendKind::Local(local) => Ok(local.cancel(id)),
+            BackendKind::Remote(remote) => remote.cancel(id).await,
         }
     }
 
     pub async fn info(&self, id: &str) -> anyhow::Result<Option<BriefingInfo>> {
-        match self {
-            Backend::Local(local) => local.info(id).await,
-            Backend::Remote(remote) => remote.info(id).await,
+        match &self.kind {
+            BackendKind::Local(local) => local.info(id).await,
+            BackendKind::Remote(remote) => remote.info(id).await,
         }
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<BriefingInfo>> {
-        match self {
-            Backend::Local(local) => Ok(local.list()),
-            Backend::Remote(remote) => remote.list().await,
+        match &self.kind {
+            BackendKind::Local(local) => Ok(local.list()),
+            BackendKind::Remote(remote) => remote.list().await,
         }
     }
 
     pub async fn shutdown(self) {
-        if let Backend::Local(local) = self {
+        if let BackendKind::Local(local) = self.kind {
             local.shutdown().await;
         }
     }

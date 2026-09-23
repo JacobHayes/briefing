@@ -70,7 +70,7 @@ pub struct OpenOutput {
     pub briefing_id: String,
     /// Link the user must open. Show it verbatim.
     pub url: String,
-    /// Whether the server opened a browser on its own machine.
+    /// Whether this MCP server process opened a browser on its own machine.
     pub opened_browser: bool,
     /// How far the link reaches; `explicit` implies no network trust.
     pub scope: Scope,
@@ -449,7 +449,7 @@ impl BriefingMcp {
             .await
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         let opened = if created.opened_browser {
-            "A browser was opened on the server's machine, but still show the user the link."
+            "A browser was opened on this MCP server's machine, but still show the user the link."
         } else {
             "No browser was opened; the user must open the link themselves (they may be on another machine)."
         };

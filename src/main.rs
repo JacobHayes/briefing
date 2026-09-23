@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use briefing::backend::{Backend, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
+use briefing::backend::{Backend, BackendKind, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
 use briefing::bind::{self, BindMode};
 use briefing::content::{self, Briefing};
 use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance};
@@ -49,9 +49,9 @@ struct Common {
     /// BRIEFING_TITLE); use it to push the link to your phone from a headless box.
     #[arg(long, env = "BRIEFING_ON_CREATE", global = true)]
     on_create: Option<String>,
-    /// Open new local briefings in the system browser (`--open false` to suppress). Left unset,
-    /// the config file then a built-in `true` decide. `serve` ignores it - a headless hub never
-    /// opens a browser.
+    /// Open new briefings in this machine's system browser (`--open false` to suppress). Left
+    /// unset, the config file then a built-in `true` decide. When using `--hub`, the client opens
+    /// the hub URL locally; `serve` ignores it because the hub itself stays headless.
     #[arg(long, global = true, env = "BRIEFING_OPEN")]
     open: Option<bool>,
 }
@@ -229,7 +229,7 @@ impl Settings {
 enum Role {
     /// Started on demand by a CLI or stdio-MCP run, on the machine the user is sitting at.
     Embedded,
-    /// The long-running headless hub: it serves the agent API and never opens a browser.
+    /// The long-running headless hub: it serves the dashboard and agent API.
     Hub,
 }
 
@@ -238,32 +238,30 @@ impl Common {
         self.bind.unwrap_or_default()
     }
 
-    /// Whether creating a local briefing should open it: `--open`/`BRIEFING_OPEN`, else the config
-    /// file, else a built-in `true`.
+    /// Whether creating a briefing should open it on this machine: `--open`/`BRIEFING_OPEN`, else
+    /// the config file, else a built-in `true`.
     fn open_browser(&self) -> bool {
         self.open.unwrap_or(true)
     }
 
     /// What a [`Site`] in this process does with the briefings it creates. The one place the
-    /// `Role` differences live, so `serve` carries no open-browser literal of its own.
+    /// `Role` differences live.
     fn site_options(&self, role: Role, public_origin: Option<String>) -> SiteOptions {
-        SiteOptions {
-            agent_api: role == Role::Hub,
-            public_origin,
-            open_browser: role == Role::Embedded && self.open_browser(),
-            on_create: self.on_create.clone(),
-        }
+        SiteOptions { agent_api: role == Role::Hub, public_origin, on_create: self.on_create.clone() }
     }
 }
 
+/// The client side of a CLI or stdio-MCP run: an embedded server or a hub, plus this machine's
+/// `open` preference, which applies the same to both.
 fn backend(common: &Common) -> anyhow::Result<Backend> {
-    match &common.hub {
-        Some(hub) => Ok(Backend::Remote(RemoteBackend::new(hub)?)),
+    let kind = match &common.hub {
+        Some(hub) => BackendKind::Remote(RemoteBackend::new(hub)?),
         None => {
             let options = common.site_options(Role::Embedded, None);
-            Ok(Backend::Local(LocalBackend::new(common.bind_mode(), options, HubConfig::with_default_store())))
+            BackendKind::Local(LocalBackend::new(common.bind_mode(), options, HubConfig::with_default_store()))
         }
-    }
+    };
+    Ok(Backend::new(kind, common.open_browser()))
 }
 
 fn cli_source() -> String {
@@ -382,7 +380,9 @@ async fn run_mcp_stdio(common: &Common, hold: HoldArgs) -> anyhow::Result<()> {
 
 /// MCP over streamable HTTP at `/mcp`, backed by the site this process serves.
 fn mcp_router(site: &Arc<Site>, hold: &HoldArgs) -> axum::Router<Arc<Site>> {
-    let backend = Arc::new(Backend::Local(LocalBackend::attached(site.clone())));
+    // The hub is headless: briefings created over its `/mcp` never open a browser here; the
+    // agent hands the link to the user instead.
+    let backend = Arc::new(Backend::new(BackendKind::Local(LocalBackend::attached(site.clone())), false));
     let (hold, max_wait) = (hold.hold, hold.max_wait_secs.map(Duration::from_secs));
     let config = StreamableHttpServerConfig::default().with_allowed_hosts(site.config.allowed_hosts());
     let service = StreamableHttpService::new(
@@ -473,7 +473,8 @@ async fn main() {
 
 async fn run(mut cli: Cli) -> anyhow::Result<i32> {
     // Only an explicit argument/environment `--open true` is worth reporting to a `serve` run; a
-    // config-file value is this machine's default for its own briefings, not a hub instruction.
+    // config-file value is this machine's default for client-created briefings, not a hub
+    // instruction.
     let open_requested = cli.common.open == Some(true);
     // The config file sits below the argument/environment layers, filling only their holes.
     let settings = load_file_config()?;
@@ -618,15 +619,6 @@ mod tests {
         // Absent everywhere, the fallbacks are the built-in defaults.
         assert_eq!(bare_common().bind_mode(), BindMode::Auto);
         assert!(bare_common().open_browser());
-    }
-
-    #[test]
-    fn the_hub_never_opens_a_browser_whatever_the_layers_say() {
-        let common = Common { open: Some(true), ..bare_common() };
-        let embedded = common.site_options(Role::Embedded, None);
-        let hub = common.site_options(Role::Hub, None);
-        assert!(embedded.open_browser && !embedded.agent_api);
-        assert!(!hub.open_browser && hub.agent_api);
     }
 
     #[test]

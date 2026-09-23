@@ -54,7 +54,7 @@ async fn run(command: &str, args: &[&str]) -> anyhow::Result<()> {
         } else if !stdout.is_empty() {
             stdout
         } else {
-            format!("exit {}", output.status)
+            output.status.to_string()
         };
         anyhow::bail!("Failed to open the briefing in the browser: {detail}");
     }
