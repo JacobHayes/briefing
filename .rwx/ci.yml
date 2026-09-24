@@ -64,3 +64,13 @@ tasks:
       find "$ASSETS" -type f | sort
       for sums in "$ASSETS"/*/*.sha256; do (cd "$(dirname "$sums")" && sha256sum -c "$(basename "$sums")"); done
       tar tzf "$ASSETS"/*/briefing-x86_64-unknown-linux-musl.tar.gz
+
+  # Every green push to main publishes a release (see release.yml). It rebuilds rather than
+  # reusing `build`, because the release binaries bake the tag into `briefing --version`.
+  - key: release
+    call: ${{ run.dir }}/release.yml
+    after: [check, package-check]
+    if: ${{ init.branch == 'main' }}
+    init:
+      commit-sha: ${{ init.commit-sha }}
+      force: "false"

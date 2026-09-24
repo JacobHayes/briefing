@@ -277,7 +277,7 @@ seven files.
 
 CI (`.rwx/ci.yml`) runs the non-mutating `mise run check` and cross-builds every
 push; releases (`.rwx/release.yml`) are immutable calver tags `vYYYY.MM.DD.N`, published
-daily when `main` moved. The release build sets `BRIEFING_VERSION` to the tag, which
+by every push to `main` once its CI passes. The release build sets `BRIEFING_VERSION` to the tag, which
 `build.rs` bakes into `briefing --version`; other
 builds report the Cargo version with a `-dev` suffix. The workflow files
 carry the details. Fresh releases can be hidden by mise's `minimum_release_age` for a while;

@@ -6,7 +6,8 @@
 # replacing anything. Plain (non-prerelease) tags mean `mise use
 # github:JacobHayes/briefing@latest` resolves them without --prerelease.
 #
-# - Daily cron -> a release at main HEAD, skipped when main has not moved since the last one.
+# - ci.yml embeds this run after every push to main whose checks pass, so each green push
+#   is released; it is skipped when that commit already has a release.
 # - `rwx run .rwx/release.yml` publishes from the CLI (use `--init
 #   force=true` to publish even if main has not moved).
 #
@@ -16,20 +17,14 @@
 # Cloning and listing releases need no token (public repo). Creating releases does, so
 # `publish` uses BRIEFING_GITHUB_TOKEN from the RWX vault `briefing`: a fine-grained PAT with
 # Contents: read/write on JacobHayes/briefing (`rwx vaults secrets set --vault briefing
-# BRIEFING_GITHUB_TOKEN=...`). It is its own vault because the cron trigger has no user behind
-# it and can only reach a vault whose access rules admit this repository.
+# BRIEFING_GITHUB_TOKEN=...`). It is its own vault because a push-triggered run has no user
+# behind it and can only reach a vault whose access rules admit this repository.
 
 on:
   cli:
     init:
       commit-sha: ${{ event.git.sha }}
       force: "false"
-  cron:
-    - key: daily
-      schedule: '0 9 * * *' # 09:00 UTC daily
-      init:
-        commit-sha: ${{ event.git.sha }}
-        force: "false"
 
 concurrency-pools:
   - id: JacobHayes/briefing:release
@@ -70,7 +65,7 @@ tasks:
       # Skip when the newest release already points at this commit.
       last="$(printf '%s\n' "$releases" | head -n1 | cut -f2)"
       if [ "$last" = "$sha" ] && [ "$FORCE" != "true" ]; then
-        echo "main unchanged since the last release ($sha); nothing to publish"; publish=false
+        echo "$sha already has the latest release; nothing to publish"; publish=false
       fi
       # Next counter for today: one past the highest existing vYYYY.MM.DD.N.
       n="$(printf '%s\n' "$releases" | cut -f1 | { grep -E "^v${day//./\\.}\.[0-9]+$" || true; } | sed 's/.*\.//' | sort -n | tail -n1)"
