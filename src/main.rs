@@ -432,7 +432,12 @@ fn print_status_table(infos: &[BriefingInfo]) {
             extras.push(source.clone());
         }
         if let Some(draft) = &info.draft {
-            extras.push(format!("screen {}/{}, {} comments", draft.screen, draft.screens, draft.annotations));
+            let position = if draft.review {
+                "on review".to_string()
+            } else {
+                format!("screen {}/{}", draft.screen, draft.screens)
+            };
+            extras.push(format!("{position}, {} comments", draft.annotations));
         }
         if info.provenance == Provenance::DiskOnly && info.status == BriefingStatus::Active {
             extras.push(format!(

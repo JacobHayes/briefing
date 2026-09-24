@@ -78,7 +78,7 @@
       meta.push(`created ${ago(Math.max(0, now() - b.createdAt))}`);
       if (b.finishedAt) meta.push(`${b.status} ${ago(Math.max(0, now() - b.finishedAt))}`);
       if (b.draft) {
-        const parts = [`screen ${b.draft.screen}/${b.draft.screens}`];
+        const parts = [b.draft.review ? "on review" : `screen ${b.draft.screen}/${b.draft.screens}`];
         if (b.draft.annotations) parts.push(`${b.draft.annotations} comment${b.draft.annotations === 1 ? "" : "s"}`);
         if (b.draft.sectionNotes) parts.push(`${b.draft.sectionNotes} section note${b.draft.sectionNotes === 1 ? "" : "s"}`);
         if (b.draft.decisions) parts.push(`${b.draft.decisions} decision${b.draft.decisions === 1 ? "" : "s"}`);
