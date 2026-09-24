@@ -54,8 +54,12 @@ call validates the content, registers it, and hands back a link. What the user s
   Saved comments highlight their passage in place; hovering or focusing a highlight shows a
   read-only preview, clicking it pins the note with `Edit` and `Delete` (a two-step in-page
   confirm, never a browser dialog). Notes sit in the right margin when there is room and
-  never cover presentation text. Mermaid nodes and edges and Vega-Lite charts can be
-  commented on directly; those comments carry structured target metadata.
+  never cover presentation text. The `Comment` action and composer stay attached to the
+  selected text as the page scrolls, and a composer too tall for the visible space (high zoom,
+  a short window) sits below the selection and extends the page rather than covering the
+  text. Mermaid nodes and edges and Vega-Lite charts can be commented on directly; those
+  comments carry structured target metadata, and a Mermaid diagram can be expanded to fill
+  most of the screen.
 - **A free-standing Notes panel**, opened from the header on any screen, holds thoughts that
   belong to no section (inline comments and per-section responses cover those). It docks in
   the left margin on wide viewports and is a bottom sheet on narrow ones. Notes return to the

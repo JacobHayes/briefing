@@ -39,7 +39,7 @@ flowchart LR
 | ![A decision card with a recommended option and tradeoffs](docs/screenshots/05-decision.png) | ![The review screen listing every answer, decision, and comment before submit](docs/screenshots/06-review.png) |
 | Decisions come with a recommendation and honest tradeoffs. | The review screen shows exactly what goes back, and nothing else. |
 | ![A Mermaid diagram inside a chunk with its own Comment button](docs/screenshots/02-rich-content.png) | ![A Vega-Lite bar chart inside a chunk](docs/screenshots/02b-chart.png) |
-| Markdown, GFM tables, code, and Mermaid diagrams render inline; nodes and edges are commentable. | Vega-Lite charts too, all served from the binary with no CDN. |
+| Markdown, GFM tables, code, and Mermaid diagrams render inline; nodes and edges are commentable, and a diagram expands to fill the screen. | Vega-Lite charts too, all served from the binary with no CDN. |
 
 Try it yourself: `briefing demo`.
 
