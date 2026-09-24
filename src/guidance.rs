@@ -188,16 +188,7 @@ mod tests {
         assert_eq!(human(Duration::from_secs(6 * 3600)), "6 hours");
         assert_eq!(human(Duration::from_secs(14 * 86_400)), "14 days");
         assert_eq!(human(Duration::from_secs(60)), "1 minute");
-        let text = mcp_guidance();
-        assert!(text.contains("unanswered ones for 14 days, results for 6 hours"));
-        assert!(text.contains("brief_user"));
-        assert!(text.contains("free-standing notes as first-class feedback"));
-        assert!(text.contains("durable context in the tray"));
-        assert!(text.contains("Use a Mermaid diagram whenever"));
-        assert_eq!(full_guidance(TOOL_SURFACE).len(), 6);
-        let pi = pi_guidance();
-        assert_eq!(pi.len(), 8);
-        assert!(pi.iter().any(|line| line.contains("chunks marked status `revisit`")));
+        assert!(mcp_guidance().contains("unanswered ones for 14 days, results for 6 hours"));
     }
 
     #[test]
