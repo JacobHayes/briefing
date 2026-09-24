@@ -97,9 +97,12 @@ pub struct CreatedBriefing {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftSummary {
-    /// 1-based screen the user is on (chunks, then decisions, then the review screen).
+    /// 1-based screen the user is on (chunks, then decisions), counted as the page counts its
+    /// steps: the review screen is not one of them, and reading it reports `review` instead.
     pub screen: u64,
     pub screens: u64,
+    #[serde(default)]
+    pub review: bool,
     pub annotations: u64,
     pub section_notes: u64,
     pub decisions: u64,
@@ -162,9 +165,12 @@ pub fn draft_summary(presentation: &Briefing, draft: &Value) -> DraftSummary {
         value.as_object().map(|m| m.values().filter(|v| keep(v)).count()).unwrap_or(0) as u64
     };
     let non_empty = |v: &Value, key: &str| v[key].as_str().is_some_and(|s| !s.trim().is_empty());
+    let screens = (presentation.chunks.len() + presentation.decisions.len()) as u64;
+    let current = draft["current"].as_u64().unwrap_or(0);
     DraftSummary {
-        screen: draft["current"].as_u64().unwrap_or(0) + 1,
-        screens: (presentation.chunks.len() + presentation.decisions.len()) as u64 + 1,
+        screen: current.min(screens.saturating_sub(1)) + 1,
+        screens,
+        review: current >= screens,
         annotations: state["annotations"].as_array().map(|a| a.len()).unwrap_or(0) as u64,
         section_notes: count_map(&state["chunks"], &|c| {
             non_empty(c, "note") || non_empty(c, "checkpoint") || c["status"].as_str() == Some("revisit")
@@ -573,7 +579,11 @@ mod tests {
         assert_eq!(summary.screen, 3);
         assert_eq!(summary.annotations, 1);
         assert_eq!(summary.section_notes, 1);
-        assert_eq!(summary.screens, (demo().chunks.len() + demo().decisions.len() + 1) as u64);
+        assert_eq!(summary.screens, (demo().chunks.len() + demo().decisions.len()) as u64);
+        assert!(!summary.review);
+        let review = draft_summary(&demo(), &json!({"current": summary.screens}));
+        assert!(review.review);
+        assert_eq!(review.screen, summary.screens);
         hub.cancel(&created.id);
         assert!(matches!(hub.save_draft(&created.token, None, json!({})), Err(HubError::AlreadyFinished(_))));
     }

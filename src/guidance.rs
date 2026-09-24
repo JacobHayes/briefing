@@ -44,8 +44,10 @@ fn authoring_guidance() -> String {
 }
 
 fn rich_text_guidance() -> String {
-    "Text fields accept Markdown, GFM tables, fenced code with a language tag, Mermaid fences, and Vega-Lite fences; use \
-     them only when they clarify."
+    "Text fields accept Markdown, GFM tables, fenced code with a language tag, and ```mermaid and ```vega-lite fences, \
+     which render as diagrams and charts the user can comment on. Use a Mermaid diagram whenever structure is \
+     easier to see than read (flows, architecture, sequences, state machines, dependencies), and a Vega-Lite chart for \
+     magnitudes or trends; skip them when they would only decorate."
         .into()
 }
 
@@ -191,6 +193,7 @@ mod tests {
         assert!(text.contains("brief_user"));
         assert!(text.contains("free-standing notes as first-class feedback"));
         assert!(text.contains("durable context in the tray"));
+        assert!(text.contains("Use a Mermaid diagram whenever"));
         assert_eq!(full_guidance(TOOL_SURFACE).len(), 6);
         let pi = pi_guidance();
         assert_eq!(pi.len(), 8);
