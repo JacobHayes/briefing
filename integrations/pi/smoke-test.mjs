@@ -6,6 +6,7 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { moduleCache: false, interopDefault: true });
 const extensionPath = fileURLToPath(new URL("./briefing.ts", import.meta.url));
 const extension = await jiti.import(extensionPath, { default: true });
+const { pendingBriefingId } = await jiti.import(extensionPath);
 
 const baseTools = ["read", "bash", "brief_user"];
 
@@ -32,6 +33,7 @@ function createHarness() {
     sendUserMessage(message) {
       messages.push(message);
     },
+    appendEntry() {},
   };
 
   extension(pi);
@@ -99,5 +101,25 @@ assert.doesNotMatch(demoPrompt, /abc123/, "the superseded result prompt does not
 await harness.handlers.get("session_shutdown")();
 assert.deepEqual(harness.activeTools, baseTools, "session_shutdown restores the original tool list");
 assert.equal(await forcedPrompt(), undefined, "session_shutdown clears the queued prompt");
+
+// Session entries decide which briefing a resumed session reattaches to.
+const custom = (customType, id) => ({ type: "custom", customType, data: { id } });
+assert.equal(pendingBriefingId([]), undefined, "no entries, nothing to resume");
+assert.equal(
+  pendingBriefingId([custom("briefing-pending", "a"), { type: "message" }, custom("briefing-settled", "a")]),
+  undefined,
+  "a settled briefing is not resumed",
+);
+assert.equal(
+  pendingBriefingId([custom("briefing-pending", "a"), custom("briefing-pending", "b"), custom("briefing-settled", "b")]),
+  "a",
+  "the latest briefing still open is resumed",
+);
+assert.equal(
+  pendingBriefingId([custom("briefing-pending", "a"), custom("briefing-settled", "a"), custom("briefing-pending", "a")]),
+  "a",
+  "a reopened briefing is open again",
+);
+assert.equal(pendingBriefingId([custom("other", "x"), custom("briefing-pending", undefined)]), undefined, "foreign entries are ignored");
 
 console.log("briefing pi extension smoke passed");

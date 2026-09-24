@@ -39,7 +39,7 @@ flowchart LR
 | ![A decision card with a recommended option and tradeoffs](docs/screenshots/05-decision.png) | ![The review screen listing every answer, decision, and comment before submit](docs/screenshots/06-review.png) |
 | Decisions come with a recommendation and honest tradeoffs. | The review screen shows exactly what goes back, and nothing else. |
 | ![A Mermaid diagram inside a chunk with its own Comment button](docs/screenshots/02-rich-content.png) | ![A Vega-Lite bar chart inside a chunk](docs/screenshots/02b-chart.png) |
-| Markdown, GFM tables, code, and Mermaid diagrams render inline; nodes and edges are commentable. | Vega-Lite charts too, all served from the binary with no CDN. |
+| Markdown, GFM tables, code, and Mermaid diagrams render inline; nodes and edges are commentable, and a diagram expands to fill the screen. | Vega-Lite charts too, all served from the binary with no CDN. |
 
 Try it yourself: `briefing demo`.
 
@@ -121,7 +121,10 @@ plan. The per-client table, with sources, is `PROFILES` in
 Pi's own extension has no client-side tool timeout to work around, so it exposes a single
 blocking `brief_user` that shows the link in Pi's UI and returns the feedback directly. The
 `/brief-demo` and `/brief-result` commands route through temporary command-only tools so they
-exercise the same active-tool UI mechanics. When using a remote hub, individual long-poll
+exercise the same active-tool UI mechanics. Quitting or killing Pi while a briefing is open
+leaves the briefing open (only Esc or `/brief-cancel` cancels it), and resuming that session
+reattaches to it through the `/brief-result` path: the stored feedback if the user has
+submitted, otherwise a fresh link and a new wait. When using a remote hub, individual long-poll
 HTTP requests may still time out; `briefing await` treats those as pending and repolls
 internally, so callers never see the timeout.
 
