@@ -277,6 +277,7 @@ impl Hub {
     pub fn create(&self, presentation: Briefing, source: Option<String>) -> CreatedBriefing {
         self.sweep_if_due();
         let stored = StoredRecord {
+            schema_version: crate::migrate::SCHEMA_VERSION,
             id: random_token(12),
             token: random_token(24),
             presentation,

@@ -10,6 +10,7 @@ pub mod guidance;
 pub mod http;
 pub mod hub;
 pub mod mcp;
+pub mod migrate;
 pub mod response;
 pub mod store;
 pub mod tailscale;

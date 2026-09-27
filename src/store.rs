@@ -4,6 +4,10 @@
 //! `BRIEFING_STATE_DIR`). Files are written on create, on every draft save, and on
 //! completion; any `briefing` process can adopt one (`briefing await <id>`), and the sweep
 //! deletes them on the same TTLs as the in-memory registry. Nothing here is long-term state.
+//!
+//! Each file records its `schemaVersion`. Opening the store upgrades every older file in place
+//! (see [`crate::migrate`]), and loading one migrates it too, for files an older process wrote
+//! after startup.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,11 +17,14 @@ use serde_json::Value;
 
 use crate::content::Briefing;
 use crate::hub::BriefingStatus;
+use crate::migrate::{self, Migration};
 use crate::response::BriefingResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredRecord {
+    /// Shape of this file; always [`migrate::SCHEMA_VERSION`] once loaded.
+    pub schema_version: u64,
     pub id: String,
     pub token: String,
     pub presentation: Briefing,
@@ -86,7 +93,10 @@ impl Store {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
-        Ok(Store { dir: dir.to_path_buf() })
+        let store = Store { dir: dir.to_path_buf() };
+        // Loading upgrades and rewrites any record in an older shape.
+        store.list();
+        Ok(store)
     }
 
     fn path(&self, id: &str) -> Option<PathBuf> {
@@ -124,13 +134,19 @@ impl Store {
     pub fn load(&self, id: &str) -> Option<StoredRecord> {
         let path = self.path(id)?;
         let bytes = std::fs::read(path).ok()?;
-        match serde_json::from_slice(&bytes) {
-            Ok(record) => Some(record),
-            Err(error) => {
-                tracing::warn!(%error, id, "ignoring unreadable briefing record");
-                None
+        let unreadable = |error: &dyn std::fmt::Display| {
+            tracing::warn!(%error, id, "ignoring unreadable briefing record");
+        };
+        let mut value: Value = serde_json::from_slice(&bytes).map_err(|error| unreadable(&error)).ok()?;
+        let migration = migrate::migrate(&mut value).map_err(|error| unreadable(&error)).ok()?;
+        let record: StoredRecord = serde_json::from_value(value).map_err(|error| unreadable(&error)).ok()?;
+        if let Migration::Upgraded { from } = migration {
+            match self.save(&record) {
+                Ok(()) => tracing::info!(id, from, to = migrate::SCHEMA_VERSION, "migrated briefing record"),
+                Err(error) => tracing::warn!(%error, id, "could not rewrite migrated briefing record"),
             }
         }
+        Some(record)
     }
 
     pub fn remove(&self, id: &str) {
@@ -201,6 +217,7 @@ mod tests {
 
     fn record(id: &str, finished_at: Option<u64>) -> StoredRecord {
         StoredRecord {
+            schema_version: migrate::SCHEMA_VERSION,
             id: id.into(),
             token: format!("tok-{id}"),
             presentation: demo(),
@@ -234,5 +251,27 @@ mod tests {
             let mode = std::fs::metadata(dir.path().join("abc.json")).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn opening_the_store_upgrades_older_records_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        // A pre-versioning record: no schemaVersion, a v1 decision and a v1 result.
+        let legacy = serde_json::json!({
+            "id": "legacy", "token": "tok-legacy", "status": "completed", "createdAt": now_secs(), "finishedAt": now_secs(),
+            "presentation": { "title": "T", "goal": "G", "chunks": [{ "title": "C", "mainPoint": "M" }],
+                              "decisions": [{ "question": "Q?", "options": [{ "label": "A" }, { "label": "B" }] }] },
+            "result": { "chunks": [], "decisions": [{ "question": "Q?", "selected": "A", "note": "" }], "annotations": [], "overallNote": "done" }
+        });
+        std::fs::write(dir.path().join("legacy.json"), legacy.to_string()).unwrap();
+
+        let store = Store::open(dir.path()).unwrap();
+        let on_disk: Value = serde_json::from_slice(&std::fs::read(dir.path().join("legacy.json")).unwrap()).unwrap();
+        assert_eq!(on_disk["schemaVersion"], migrate::SCHEMA_VERSION);
+        let record = store.load("legacy").unwrap();
+        assert_eq!(record.presentation.questions[0].question, "Q?");
+        let result = record.result.unwrap();
+        assert_eq!(result.questions[0].selected, vec!["A"]);
+        assert_eq!(result.notes, vec!["done"]);
     }
 }
