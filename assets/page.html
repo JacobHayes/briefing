@@ -886,14 +886,22 @@
       if (!Array.isArray(state.annotations)) state.annotations = [];
       if (!Array.isArray(state.notes)) state.notes = [];
       state.notes = state.notes.filter(n => n && typeof n.text === "string").map(n => ({ id: n.id || uid(), text: n.text, at: n.at || 0 }));
-      // Drafts from before per-section responses and the Overall response were folded into
-      // Notes keep their text as notes.
+      // Drafts from before questions, and before per-section responses and the Overall response
+      // were folded into Notes, keep everything typed in them as notes: section notes and
+      // checkpoint answers, decision picks and guidance, and the overall response.
+      const legacyNote = (label, text) => { text = String(text || "").trim(); if (text) state.notes.push({ id: uid(), text: label ? label + ": " + text : text, at: 0 }); };
+      const chunkTitle = index => presentation.chunks[index]?.title || "Section " + (Number(index) + 1);
       for (const [index, legacy] of Object.entries(state.chunks || {})) {
-        const text = (legacy?.note || "").trim();
-        if (text) state.notes.push({ id: uid(), text: (presentation.chunks[index]?.title ? presentation.chunks[index].title + ": " : "") + text, at: 0 });
+        legacyNote(chunkTitle(index), legacy?.checkpoint);
+        legacyNote(chunkTitle(index), legacy?.note);
       }
-      if (typeof state.overallNote === "string" && state.overallNote.trim()) state.notes.push({ id: uid(), text: state.overallNote.trim(), at: 0 });
+      for (const [key, legacy] of Object.entries(state.decisions || {})) {
+        const where = String(key).startsWith("chunk:") ? chunkTitle(String(key).slice(6)) + " (decision)" : "Decision " + (Number(key) + 1);
+        legacyNote(where, [legacy?.selected, legacy?.note].map(part => String(part || "").trim()).filter(Boolean).join(" — "));
+      }
+      legacyNote("", state.overallNote);
       delete state.chunks;
+      delete state.decisions;
       delete state.overallNote;
       // In-progress text: the Notes box, an open comment box, a note being edited.
       if (typeof state.noteDraft !== "string") state.noteDraft = "";
