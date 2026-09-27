@@ -39,7 +39,9 @@ fn content_guidance(surface: Surface) -> String {
 
 fn authoring_guidance() -> String {
     "Put durable context in the tray instead of repeating it in chunks; use remember only for anchors needed later; keep \
-     decision tradeoffs concrete and neutral; do not open a briefing merely because rich rendering could be used."
+     decision tradeoffs concrete and neutral; do not open a briefing merely because rich rendering could be used. When a \
+     briefing builds on an earlier one, give a short refresher of each specific it relies on (what was proposed, decided \
+     or rejected, and why) instead of referring back to it: the reader may remember the gist but not the details."
         .into()
 }
 
