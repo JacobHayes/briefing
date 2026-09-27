@@ -45,7 +45,7 @@ pub enum HoldMode {
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AwaitParams {
     /// The briefingId returned by brief_user.
     pub briefing_id: String,
@@ -55,7 +55,7 @@ pub struct AwaitParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CancelParams {
     /// The briefingId returned by brief_user.
     pub briefing_id: String,

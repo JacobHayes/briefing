@@ -48,6 +48,8 @@
       for (const child of [].concat(children)) if (child) node.append(child);
       return node;
     };
+    // The agent API answers in the shapes of the protocol a request names.
+    const PROTOCOL = "{{PROTOCOL}}";
     const ago = secs => secs < 60 ? `${secs}s ago` : secs < 3600 ? `${Math.floor(secs / 60)}m ago` : secs < 86400 ? `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago` : `${Math.floor(secs / 86400)}d ago`;
     const now = () => Math.floor(Date.now() / 1000);
     const cancelling = new Set();
@@ -58,7 +60,7 @@
       button.disabled = true;
       button.textContent = "Cancelling…";
       try {
-        const response = await fetch(`/agent/briefings/${encodeURIComponent(b.id)}/cancel`, { method: "POST" });
+        const response = await fetch(`/agent/briefings/${encodeURIComponent(b.id)}/cancel`, { method: "POST", headers: { "briefing-protocol": PROTOCOL } });
         if (!response.ok) throw new Error("HTTP " + response.status);
         const result = await response.json();
         document.getElementById("summary").textContent = result.cancelled ? "Briefing cancelled; refreshing…" : "Briefing was already finished; refreshing…";
@@ -107,7 +109,7 @@
 
     async function refresh() {
       try {
-        const response = await fetch("/agent/briefings", { cache: "no-store" });
+        const response = await fetch("/agent/briefings", { cache: "no-store", headers: { "briefing-protocol": PROTOCOL } });
         if (!response.ok) throw new Error("HTTP " + response.status);
         const { briefings } = await response.json();
         const active = briefings.filter(b => b.status === "active");

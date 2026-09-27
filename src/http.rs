@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -25,6 +25,7 @@ use crate::assets;
 use crate::backend::Site;
 use crate::content::{self, Briefing};
 use crate::hub::{DraftSave, HubError, random_token};
+use crate::protocol;
 use crate::response::BriefingOutcome;
 
 /// Browser submission cap: 500 annotations of 2 KB quote + 4 KB comment plus notes fits well inside.
@@ -146,9 +147,29 @@ impl IntoResponse for HubError {
         let status = match self {
             HubError::NotFound => StatusCode::NOT_FOUND,
             HubError::AlreadyFinished(_) => StatusCode::CONFLICT,
+            HubError::Invalid(_) => StatusCode::BAD_REQUEST,
         };
         json_response(status, json!({"error": self.to_string()}))
     }
+}
+
+/// The protocol a request speaks (see [`crate::protocol`]).
+#[derive(Clone, Copy)]
+struct Protocol(u32);
+
+/// Negotiate the protocol: requests outside what this hub translates get a 426 naming both
+/// versions, and every response names the hub's.
+async fn protocol_layer(mut request: Request<Body>, next: Next) -> Response {
+    let header = request.headers().get(protocol::HEADER).and_then(|v| v.to_str().ok());
+    let mut response = match protocol::requested(header) {
+        Ok(version) => {
+            request.extensions_mut().insert(Protocol(version));
+            next.run(request).await
+        }
+        Err(error) => json_response(StatusCode::UPGRADE_REQUIRED, json!({"error": error})),
+    };
+    response.headers_mut().insert(protocol::HEADER, HeaderValue::from(protocol::PROTOCOL));
+    response
 }
 
 async fn check_host(State(state): State<AppState>, request: Request<Body>, next: Next) -> Response {
@@ -225,11 +246,18 @@ fn origin_ok(state: &AppState, headers: &HeaderMap) -> bool {
     headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).is_some_and(|origin| state.config.origin_allowed(origin))
 }
 
-async fn submit(state: AppState, headers: HeaderMap, token: String, body: Value, cancelled: bool) -> Response {
+async fn submit(
+    state: AppState,
+    headers: HeaderMap,
+    token: String,
+    body: Value,
+    cancelled: bool,
+    protocol: u32,
+) -> Response {
     if !origin_ok(&state, &headers) {
         return text(StatusCode::FORBIDDEN, "Forbidden");
     }
-    match state.hub.submit_by_token(&token, &body, cancelled) {
+    match state.hub.submit_by_token(&token, &body, cancelled, protocol) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
         Err(error) => error.into_response(),
     }
@@ -238,23 +266,25 @@ async fn submit(state: AppState, headers: HeaderMap, token: String, body: Value,
 async fn complete(
     State(state): State<AppState>,
     Path(token): Path<String>,
+    Extension(Protocol(protocol)): Extension<Protocol>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    submit(state, headers, token, body, false).await
+    submit(state, headers, token, body, false, protocol).await
 }
 
 async fn cancel_from_browser(
     State(state): State<AppState>,
     Path(token): Path<String>,
+    Extension(Protocol(protocol)): Extension<Protocol>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    submit(state, headers, token, body, true).await
+    submit(state, headers, token, body, true, protocol).await
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DraftRequest {
     /// Revision the browser last loaded or saved; omit to overwrite unconditionally.
     #[serde(default)]
@@ -287,7 +317,7 @@ async fn save_draft(
 // ---- Agent API (hub mode) ----
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateRequest {
     pub presentation: Briefing,
     /// Who created it, e.g. `claude-code@laptop`; shown on the dashboard.
@@ -295,7 +325,20 @@ pub struct CreateRequest {
     pub source: Option<String>,
 }
 
-async fn agent_create(State(site): State<AppState>, Json(body): Json<CreateRequest>) -> Response {
+async fn agent_create(
+    State(site): State<AppState>,
+    Extension(Protocol(protocol)): Extension<Protocol>,
+    Json(mut body): Json<Value>,
+) -> Response {
+    if protocol == 1
+        && let Some(presentation) = body.get_mut("presentation")
+    {
+        protocol::presentation_from_v1(presentation);
+    }
+    let body: CreateRequest = match serde_json::from_value(body) {
+        Ok(body) => body,
+        Err(error) => return json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()})),
+    };
     match site.create(body.presentation, body.source).await {
         Ok(created) => json_response(StatusCode::CREATED, json!({"id": created.id, "url": created.url})),
         Err(error) if error.is::<content::ValidationError>() => {
@@ -305,19 +348,32 @@ async fn agent_create(State(site): State<AppState>, Json(body): Json<CreateReque
     }
 }
 
-async fn agent_list(State(site): State<AppState>) -> Response {
+async fn agent_list(State(site): State<AppState>, Extension(Protocol(protocol)): Extension<Protocol>) -> Response {
     let mut briefings = site.hub.list();
     site.with_live_urls(&mut briefings);
+    let mut briefings = serde_json::to_value(briefings).unwrap_or_default();
+    if protocol == 1 {
+        briefings.as_array_mut().into_iter().flatten().for_each(protocol::info_to_v1);
+    }
     json_response(StatusCode::OK, json!({"briefings": briefings}))
 }
 
-async fn agent_info(State(site): State<AppState>, Path(id): Path<String>) -> Result<Response, HubError> {
+async fn agent_info(
+    State(site): State<AppState>,
+    Extension(Protocol(protocol)): Extension<Protocol>,
+    Path(id): Path<String>,
+) -> Result<Response, HubError> {
     let mut info = site.hub.info(&id).ok_or(HubError::NotFound)?;
     info.url = site.url_for(&id);
-    Ok(json_response(StatusCode::OK, serde_json::to_value(info).unwrap_or_default()))
+    let mut info = serde_json::to_value(info).unwrap_or_default();
+    if protocol == 1 {
+        protocol::info_to_v1(&mut info);
+    }
+    Ok(json_response(StatusCode::OK, info))
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WaitQuery {
     #[serde(default)]
     pub timeout_secs: Option<u64>,
@@ -330,11 +386,15 @@ pub fn clamp_wait(requested: Option<u64>) -> Duration {
 /// `GET /agent/briefings/{id}/wait`: a [`BriefingOutcome`], `pending` once the timeout passes.
 async fn agent_wait(
     State(site): State<AppState>,
+    Extension(Protocol(protocol)): Extension<Protocol>,
     Path(id): Path<String>,
     Query(query): Query<WaitQuery>,
 ) -> Result<Response, HubError> {
     let outcome = site.hub.wait(&id, clamp_wait(query.timeout_secs)).await?;
-    let body = serde_json::to_value(BriefingOutcome { briefing_id: id, outcome }).unwrap_or_default();
+    let mut body = serde_json::to_value(BriefingOutcome { briefing_id: id, outcome }).unwrap_or_default();
+    if protocol == 1 {
+        protocol::outcome_to_v1(&mut body);
+    }
     Ok(json_response(StatusCode::OK, body))
 }
 
@@ -370,7 +430,9 @@ pub fn router(site: Arc<Site>, mcp: Option<Router<Arc<Site>>>) -> Router {
         }
         app = app.merge(agent);
     }
-    app.layer(middleware::from_fn_with_state(state.clone(), check_host)).with_state(state)
+    app.layer(middleware::from_fn(protocol_layer))
+        .layer(middleware::from_fn_with_state(state.clone(), check_host))
+        .with_state(state)
 }
 
 pub struct RunningServer {

@@ -116,7 +116,7 @@ fn demo_presentation() -> Value {
 fn submit(url: &str, body: Value) {
     briefing::tls::init();
     let (origin, token) = url.rsplit_once("/briefing/").unwrap();
-    let client = reqwest::blocking::Client::new();
+    let client = common::blocking_client();
     let response =
         client.post(format!("{origin}/api/{token}/complete")).header("origin", origin).json(&body).send().unwrap();
     assert_eq!(response.status(), 200);
@@ -164,7 +164,11 @@ fn progress_hold_roundtrip() {
         assert!(message["params"]["message"].as_str().unwrap().contains(&url));
         if !submitted {
             submitted = true;
-            submit(&url, json!({"notes": ["looks right"], "questions": [{"question": "Q", "selected": ["A"]}]}));
+            submit(&url, {
+                let mut body = common::demo_submission(&["looks right"]);
+                body["questions"][0]["selected"] = json!(["Paced, one chunk per screen"]);
+                body
+            });
         }
     });
     let result = &response["result"];
@@ -172,7 +176,7 @@ fn progress_hold_roundtrip() {
     assert_eq!(result["structuredContent"]["status"], "completed");
     let feedback = &result["structuredContent"]["feedback"];
     assert_eq!(feedback["notes"][0], "looks right");
-    assert_eq!(feedback["questions"][0]["selected"][0], "A");
+    assert_eq!(feedback["questions"][0]["selected"][0], "Paced, one chunk per screen");
     assert_eq!(feedback["questions"][0]["status"], "answered");
     assert!(result["content"][0]["text"].as_str().unwrap().contains("1 answered questions"));
 
@@ -223,7 +227,7 @@ fn elicitation_hold_for_codex() {
             url = Some(text.split_whitespace().find(|w| w.starts_with("http://127.0.0.1:")).unwrap().to_string());
             assert_eq!(message["params"]["mode"], "form");
             elicitation_id = Some(message["id"].clone());
-            submit(url.as_ref().unwrap(), json!({"notes": ["via codex"]}));
+            submit(url.as_ref().unwrap(), common::demo_submission(&["via codex"]));
             // The server cancels the elicitation once the submission lands; respond anyway
             // to make sure a late answer is tolerated.
             this.send(json!({"jsonrpc": "2.0", "id": message["id"], "result": {"action": "accept", "content": {"submitted": true}}}));
@@ -271,7 +275,7 @@ fn recover_briefing_in_new_process() {
 
     // Second await blocks; submit through the new link while it waits.
     second.send_request(4, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
-    submit(&url, json!({"notes": ["recovered"]}));
+    submit(&url, common::demo_submission(&["recovered"]));
     let done = second.read_response(4, |_, _| {});
     assert_eq!(done["result"]["structuredContent"]["status"], "completed", "{done}");
     assert_eq!(done["result"]["structuredContent"]["feedback"]["notes"][0], "recovered");

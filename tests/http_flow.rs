@@ -1,6 +1,8 @@
 //! End-to-end HTTP behaviour: embedded server, browser API, drafts, host/origin checks,
 //! the hub agent API and dashboard, and recovery of a briefing from another process.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +28,7 @@ async fn embedded_server_roundtrip() {
     assert_eq!(created.scope, Scope::Local);
     assert!(!created.opened_browser);
 
-    let client = reqwest::Client::new();
+    let client = common::client();
     let origin = created.url.rsplit_once("/briefing/").unwrap().0.to_string();
     let token = created.url.rsplit('/').next().unwrap().to_string();
 
@@ -103,14 +105,13 @@ async fn embedded_server_roundtrip() {
     let ok = client
         .post(format!("{origin}/api/{token}/complete"))
         .header("origin", &origin)
-        .json(&json!({
-            "questions": [
-                {"question": "Which reading mode should a briefing open in?", "section": "One idea at a time", "selected": ["Paced, one chunk per screen"], "answer": ""},
-                {"question": "How should briefing be triggered by default?", "selected": [], "answer": ""}
-            ],
-            "annotations": [{"location": "One idea at a time", "quote": "Use Next and Back", "comment": "nice"}],
-            "notes": ["ship it"]
-        }))
+        .json(&{
+            let mut body = common::demo_submission(&["ship it"]);
+            body["questions"][0]["selected"] = json!(["Paced, one chunk per screen"]);
+            body["annotations"] =
+                json!([{"location": "One idea at a time", "quote": "Use Next and Back", "comment": "nice"}]);
+            body
+        })
         .send()
         .await
         .unwrap();
@@ -152,7 +153,7 @@ async fn briefing_recovered_by_another_process() {
     briefing::tls::init();
     let dir = tempfile::tempdir().unwrap();
     let config = || HubConfig { store: Some(Store::open(dir.path()).unwrap()), ..HubConfig::default() };
-    let client = reqwest::Client::new();
+    let client = common::client();
 
     let first = local(config());
     let created = first.create(demo(), Some("first".into())).await.unwrap();
@@ -199,7 +200,7 @@ async fn briefing_recovered_by_another_process() {
     let ok = client
         .post(format!("{origin2}/api/{token}/complete"))
         .header("origin", &origin2)
-        .json(&json!({"notes": ["recovered"]}))
+        .json(&common::demo_submission(&["recovered"]))
         .send()
         .await
         .unwrap();
@@ -228,7 +229,7 @@ async fn hub_agent_api_and_dashboard() {
     let (site, running) = Site::start(hub, BindTarget::local(None), 0, options, |_| None).await.unwrap();
     let origin = site.config.public_origin.clone();
     assert_eq!(origin, format!("http://127.0.0.1:{}", running.local_addr.port()));
-    let client = reqwest::Client::new();
+    let client = common::client();
 
     let dashboard = client.get(format!("{origin}/")).send().await.unwrap();
     assert_eq!(dashboard.status(), 200);
@@ -314,6 +315,101 @@ async fn hub_agent_api_and_dashboard() {
         client.post(format!("{origin}/agent/briefings/{second_id}/cancel")).send().await.unwrap().json().await.unwrap();
     assert_eq!(agent_cancel_again, json!({"ok": true, "cancelled": false}));
     assert_eq!(client.post(format!("{origin}/agent/briefings/nope/cancel")).send().await.unwrap().status(), 404);
+
+    running.stop().await;
+}
+
+/// Clients and pages from before protocol versioning (protocol 1) keep working for one version:
+/// the hub translates their requests and answers them in their shapes. Newer protocols are
+/// refused with both versions named, and unknown fields are rejected, not dropped.
+#[tokio::test]
+async fn protocol_one_clients_and_version_negotiation() {
+    briefing::tls::init();
+    let options = SiteOptions { agent_api: true, ..SiteOptions::default() };
+    let hub = Arc::new(Hub::new(HubConfig::default()));
+    let (site, running) = Site::start(hub, BindTarget::local(None), 0, options, |_| None).await.unwrap();
+    let origin = site.config.public_origin.clone();
+    let old = reqwest::Client::new(); // sends no protocol header, like a protocol 1 build
+    let current = common::client();
+
+    // A protocol 1 client creates a briefing in the old shape.
+    let v1_presentation = json!({
+        "title": "Old", "goal": "g",
+        "chunks": [{ "title": "C", "mainPoint": "m", "checkpoint": "Why?",
+                     "decision": { "question": "Pick?", "required": true, "options": [{ "label": "A" }, { "label": "B" }] } }],
+        "decisions": [{ "question": "Ship?", "options": [{ "label": "Yes" }, { "label": "No" }] }]
+    });
+    let created = old
+        .post(format!("{origin}/agent/briefings"))
+        .json(&json!({ "presentation": v1_presentation }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    assert_eq!(created.headers()[briefing::protocol::HEADER], briefing::protocol::PROTOCOL.to_string());
+    let created: Value = created.json().await.unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let token = created["url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+
+    // ...and it arrives as questions.
+    let page: Value =
+        current.get(format!("{origin}/api/{token}/presentation")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        page["chunks"][0]["questions"],
+        json!([
+            { "question": "Pick?", "options": [{ "label": "A" }, { "label": "B" }] },
+            { "question": "Why?" }
+        ])
+    );
+    assert_eq!(page["questions"][0]["question"], "Ship?");
+
+    // A protocol 1 page (an old tab) submits the old shape.
+    let submitted = old
+        .post(format!("{origin}/api/{token}/complete"))
+        .header("origin", &origin)
+        .json(&json!({
+            "chunks": [{ "title": "C", "status": "unmarked", "checkpoint": "because", "note": "" }],
+            "decisions": [{ "question": "Pick?", "selected": "A", "note": "" }, { "question": "Ship?", "selected": "", "note": "" }],
+            "annotations": [], "notes": [], "overallNote": "overall"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submitted.status(), 200, "{}", submitted.text().await.unwrap());
+
+    // Each client reads the result in its own shape.
+    let v1: Value = old.get(format!("{origin}/agent/briefings/{id}/wait")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v1["feedback"]["decisions"][0], json!({ "question": "Pick?", "selected": "A", "note": "" }));
+    assert_eq!(v1["feedback"]["overallNote"], "");
+    assert_eq!(v1["feedback"]["notes"], json!(["overall"]));
+    let v2: Value =
+        current.get(format!("{origin}/agent/briefings/{id}/wait")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        v2["feedback"]["questions"][1],
+        json!({ "question": "Why?", "section": "C", "selected": [], "answer": "because", "status": "answered" })
+    );
+    assert_eq!(v2["feedback"]["questions"][2]["status"], "unresolved");
+    assert!(v2["feedback"].get("decisions").is_none());
+
+    // A protocol newer than the hub gets a 426 naming both versions.
+    let newer = current
+        .get(format!("{origin}/agent/briefings"))
+        .header(briefing::protocol::HEADER, (briefing::protocol::PROTOCOL + 1).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(newer.status(), 426);
+    assert!(newer.text().await.unwrap().contains("upgrade the hub"));
+
+    // Current clients get strict parsing: an unknown field is an error, not silently dropped.
+    let unknown = current
+        .post(format!("{origin}/agent/briefings"))
+        .json(&json!({ "presentation": { "title": "T", "goal": "g", "chunks": [{ "title": "c", "mainPoint": "m", "decision": {} }] } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 400);
+    assert!(unknown.text().await.unwrap().contains("unknown field `decision`"));
 
     running.stop().await;
 }

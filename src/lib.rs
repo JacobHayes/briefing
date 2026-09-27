@@ -11,6 +11,7 @@ pub mod http;
 pub mod hub;
 pub mod mcp;
 pub mod migrate;
+pub mod protocol;
 pub mod response;
 pub mod store;
 pub mod tailscale;

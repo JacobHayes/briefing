@@ -21,7 +21,7 @@ pub const MAX_PRESENTATION_BYTES: usize = 1024 * 1024;
 pub const MAX_FENCED_SOURCE_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Chunk {
     /// Short descriptive title for this semantic chunk.
     pub title: String,
@@ -48,7 +48,7 @@ pub struct Chunk {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QuestionOption {
     /// Short option label.
     pub label: String,
@@ -68,7 +68,7 @@ pub struct QuestionOption {
 /// own words instead); without options it is an open question. Answers are never required: a
 /// question left unanswered comes back as `unresolved`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Question {
     /// The concrete question for the user.
     pub question: String,
@@ -86,7 +86,7 @@ pub struct Question {
 
 /// Optional Context panel content: stable context, running summary, and open questions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Tray {
     /// Stable context the user should not have to remember.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,7 +103,7 @@ pub struct Tray {
 
 /// A paced browser briefing: semantic chunks in dependency order, optional context panel, and questions. Every prose field accepts Markdown (GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, ```vega-lite fences for charts); use them only when they clarify.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Briefing {
     /// Short title for the briefing.
     pub title: String,

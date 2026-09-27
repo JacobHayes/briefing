@@ -28,9 +28,9 @@ pub fn asset(name: &str) -> Option<&'static [u8]> {
     ASSETS.iter().find(|(n, _)| *n == name).map(|(_, bytes)| *bytes)
 }
 
-/// An embedded page with the CSP nonce substituted in.
+/// An embedded page with the CSP nonce and the protocol it speaks substituted in.
 pub fn render(html: &str, nonce: &str) -> String {
-    html.replace("{{NONCE}}", nonce)
+    html.replace("{{NONCE}}", nonce).replace("{{PROTOCOL}}", &crate::protocol::PROTOCOL.to_string())
 }
 
 #[cfg(test)]

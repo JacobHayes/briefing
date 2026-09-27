@@ -1,5 +1,7 @@
 //! Explicit bind targets: actual sockets, URL authorities, and proxy Host/Origin handling.
 
+mod common;
+
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -7,7 +9,6 @@ use briefing::backend::{Site, SiteOptions};
 use briefing::bind::{BindMode, Scope};
 use briefing::content::demo;
 use briefing::hub::{Hub, HubConfig};
-use serde_json::json;
 
 fn bind_mode(ip: &str) -> BindMode {
     ip.parse().unwrap()
@@ -59,7 +60,12 @@ async fn serve_and_check(ip: &str, public_origin: Option<&str>) {
     assert_eq!(status(health().header("Host", running.local_addr.to_string())).await, 200);
     assert_eq!(status(health().header("Host", "evil.example")).await, 403);
     assert_eq!(status(client.get(format!("{origin}/briefing/{token}"))).await, 200);
-    let complete = || client.post(format!("{origin}/api/{token}/complete")).json(&json!({}));
+    let complete = || {
+        client
+            .post(format!("{origin}/api/{token}/complete"))
+            .header(briefing::protocol::HEADER, briefing::protocol::PROTOCOL.to_string())
+            .json(&common::demo_submission(&[]))
+    };
     assert_eq!(status(complete().header("Origin", "http://evil.example")).await, 403);
     let mut submit = complete().header("Origin", &site.config.public_origin);
     if public_origin.is_some() {

@@ -90,7 +90,7 @@ fn decision_to_question(decision: &Value) -> Value {
     question
 }
 
-fn v1_presentation(presentation: &mut Value) {
+pub(crate) fn v1_presentation(presentation: &mut Value) {
     if let Some(chunks) = presentation.get_mut("chunks").and_then(Value::as_array_mut) {
         for chunk in chunks.iter_mut().filter_map(as_object) {
             chunk.remove("sources");
@@ -152,7 +152,7 @@ fn v1_draft_state(state: &mut Value, chunk_titles: &[String]) {
 }
 
 /// A v1 submitted result in the v2 feedback shape.
-fn v1_result(result: &Value, presentation: &Value) -> Value {
+pub(crate) fn v1_result(result: &Value, presentation: &Value) -> Value {
     let mut questions = Vec::new();
     let mut notes: Vec<Value> = result["notes"].as_array().cloned().unwrap_or_default();
     let checkpoint_for = |title: &str| {

@@ -13,7 +13,7 @@ use crate::browser;
 use crate::content::{self, Briefing};
 use crate::http::{self, HttpConfig, RunningServer};
 use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance, SWEEP_EVERY};
-use crate::response::Outcome;
+use crate::response::{BriefingOutcome, Outcome};
 
 /// What a caller learns after creating a briefing.
 #[derive(Debug, Clone, Serialize)]
@@ -261,17 +261,20 @@ pub struct RemoteBackend {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RemoteCreated {
     id: String,
     url: String,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RemoteError {
     error: String,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RemoteList {
     briefings: Vec<BriefingInfo>,
 }
@@ -294,8 +297,11 @@ impl RemoteBackend {
     ) -> anyhow::Result<serde_json::Value> {
         use http_body_util::BodyExt;
         let uri: ::http::Uri = format!("{}{path}", self.base).parse()?;
-        let mut request =
-            ::http::Request::builder().method(method).uri(uri).header(::http::header::ACCEPT, "application/json");
+        let mut request = ::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(::http::header::ACCEPT, "application/json")
+            .header(crate::protocol::HEADER, crate::protocol::PROTOCOL.to_string());
         let payload = match body {
             Some(value) => {
                 request = request.header(::http::header::CONTENT_TYPE, "application/json");
@@ -307,6 +313,14 @@ impl RemoteBackend {
         let response =
             tokio::time::timeout(timeout, self.client.request(request)).await.map_err(|_| HubRequestTimeout)??;
         let status = response.status();
+        // A hub on another protocol answers in shapes this client would misread, so stop here
+        // with both versions named. A 426 carries the hub's own explanation instead.
+        let hub_protocol = response.headers().get(crate::protocol::HEADER).and_then(|v| v.to_str().ok());
+        if status != ::http::StatusCode::UPGRADE_REQUIRED
+            && let Err(error) = crate::protocol::check_hub(hub_protocol, &self.base)
+        {
+            anyhow::bail!(error);
+        }
         let bytes = response.into_body().collect().await?.to_bytes();
         let value = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes)? };
         if status.is_success() {
@@ -368,7 +382,7 @@ impl RemoteBackend {
                 Err(error) if error.is::<HubRequestTimeout>() => continue,
                 Err(error) => return Err(error),
             };
-            match serde_json::from_value(value)? {
+            match serde_json::from_value::<BriefingOutcome>(value)?.outcome {
                 Outcome::Pending => continue,
                 done => return Ok(done),
             }
@@ -515,7 +529,12 @@ mod tests {
             let response = reqwest::Client::new()
                 .post(format!("{submit_origin}/api/{token}/complete"))
                 .header("origin", &submit_origin)
-                .json(&json!({"notes": ["retried"]}))
+                .header(crate::protocol::HEADER, crate::protocol::PROTOCOL.to_string())
+                .json(&{
+                    let mut body = crate::response::blank_submission(&content::demo());
+                    body["notes"] = json!(["retried"]);
+                    body
+                })
                 .send()
                 .await
                 .unwrap();

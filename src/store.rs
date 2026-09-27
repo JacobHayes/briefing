@@ -21,7 +21,7 @@ use crate::migrate::{self, Migration};
 use crate::response::BriefingResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredRecord {
     /// Shape of this file; always [`migrate::SCHEMA_VERSION`] once loaded.
     pub schema_version: u64,

@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::content::Briefing;
-use crate::response::{BriefingResponse, Outcome, parse_browser_result};
+use crate::response::{BriefingResponse, Outcome, parse_submission};
 use crate::store::{Store, StoredRecord, now_secs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +72,8 @@ pub enum HubError {
     NotFound,
     #[error("briefing already {0}")]
     AlreadyFinished(BriefingStatus),
+    #[error("{0}")]
+    Invalid(String),
 }
 
 /// Outcome of a draft save.
@@ -95,7 +97,7 @@ pub struct CreatedBriefing {
 
 /// Where the user is in a briefing, derived from the saved draft.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DraftSummary {
     /// 1-based chunk screen the user is on, counted as the page counts its steps: the review
     /// screen is not one of them, and reading it reports `review` instead.
@@ -111,7 +113,7 @@ pub struct DraftSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BriefingInfo {
     pub id: String,
     pub title: String,
@@ -427,10 +429,26 @@ impl Hub {
     }
 
     /// Browser submission (`complete` or `cancel`) for the presentation behind `token`.
-    pub fn submit_by_token(&self, token: &str, body: &Value, cancelled: bool) -> Result<(), HubError> {
+    /// Finish a briefing with what its page submitted, parsed strictly against the briefing.
+    /// `protocol` is the page's (see [`crate::protocol`]): protocol 1 pages post the old shape.
+    pub fn submit_by_token(&self, token: &str, body: &Value, cancelled: bool, protocol: u32) -> Result<(), HubError> {
         let id = self.id_for_token(token).ok_or(HubError::NotFound)?;
+        match self.status(&id) {
+            Some(BriefingStatus::Active) => {}
+            Some(status) => return Err(HubError::AlreadyFinished(status)),
+            None => return Err(HubError::NotFound),
+        }
+        let presentation = self.with_record(&id, |r| r.stored.presentation.clone()).ok_or(HubError::NotFound)?;
+        let body = if protocol == 1 {
+            let presentation = serde_json::to_value(&presentation).unwrap_or_default();
+            crate::protocol::submission_from_v1(body, &presentation)
+        } else {
+            body.clone()
+        };
+        let feedback =
+            parse_submission(&body, &presentation, cancelled).map_err(|e| HubError::Invalid(e.to_string()))?;
         let status = if cancelled { BriefingStatus::Cancelled } else { BriefingStatus::Completed };
-        self.finish(&id, parse_browser_result(body), status)
+        self.finish(&id, feedback, status)
     }
 
     /// Agent-side cancellation. Returns false when the briefing was not active.
@@ -546,13 +564,15 @@ mod tests {
 
         assert_eq!(hub.wait(&created.id, Duration::from_millis(20)).await, Ok(Outcome::Pending));
 
-        hub.submit_by_token(&created.token, &json!({"notes": ["great"]}), false).unwrap();
+        let mut body = crate::response::blank_submission(&demo());
+        body["notes"] = json!(["great"]);
+        hub.submit_by_token(&created.token, &body, false, crate::protocol::PROTOCOL).unwrap();
         match hub.wait(&created.id, Duration::from_secs(1)).await.unwrap() {
             Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["great"]),
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(
-            hub.submit_by_token(&created.token, &json!({}), false),
+            hub.submit_by_token(&created.token, &json!({}), false, crate::protocol::PROTOCOL),
             Err(HubError::AlreadyFinished(BriefingStatus::Completed))
         );
         assert_eq!(HubError::AlreadyFinished(BriefingStatus::Completed).to_string(), "briefing already completed");
@@ -635,7 +655,9 @@ mod tests {
 
         // A third process (the one the browser talks to) submits; B's waiter sees it via disk.
         let c = Hub::new(config());
-        c.submit_by_token(&created.token, &json!({"notes": ["done"]}), false).unwrap();
+        let mut body = crate::response::blank_submission(&demo());
+        body["notes"] = json!(["done"]);
+        c.submit_by_token(&created.token, &body, false, crate::protocol::PROTOCOL).unwrap();
         match b.wait(&created.id, Duration::from_secs(1)).await.unwrap() {
             Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["done"]),
             other => panic!("unexpected {other:?}"),

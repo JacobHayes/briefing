@@ -344,6 +344,10 @@
     const TOUCH_CALLOUT_CLEARANCE = 60;
     const SHORT_CELL = 24;
     const DELETE_ARM_MS = 5000;
+    // Every API call names the protocol this page speaks, so the hub can tell it from a page
+    // loaded before an upgrade.
+    const PROTOCOL = "{{PROTOCOL}}";
+    const api = (path, init = {}) => fetch("/api/" + path, { ...init, headers: { ...(init.headers || {}), "briefing-protocol": PROTOCOL } });
     const errorMessage = error => String(error?.message ?? error); // Do not recurse: Safari can optimize tail recursion into an infinite loop, freezing error handling.
 
     const el = (tag, attrs = {}, children = []) => {
@@ -974,7 +978,7 @@
       syncTimer = null;
       cacheLocally(snapshot());
       try {
-        const response = await fetch("/api/" + presentation.token + "/draft", {
+        const response = await api(presentation.token + "/draft", {
           method: "PUT", headers: { "content-type": "application/json" }, keepalive: flush,
           body: JSON.stringify({ baseRevision: draftRevision, draft: snapshot() }),
         });
@@ -999,7 +1003,7 @@
       if (submitted || refreshing) return;
       refreshing = true;
       try {
-        const response = await fetch("/api/" + presentation.token + "/presentation", { cache: "no-store" });
+        const response = await api(presentation.token + "/presentation", { cache: "no-store" });
         if (!response.ok) return;
         const latest = await response.json();
         if (latest.status !== "active") { submitted = true; renderDone(latest.status === "cancelled"); return; }
@@ -2231,7 +2235,7 @@
         notes: state.notes.map(n => n.text.trim()).filter(Boolean),
       };
       try {
-        const response = await fetch("/api/" + presentation.token + "/complete", {
+        const response = await api(presentation.token + "/complete", {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
         });
         if (!response.ok) throw new Error("HTTP " + response.status);
@@ -2250,7 +2254,7 @@
     async function cancel() {
       if (!confirm("Cancel this briefing?")) return;
       try {
-        const response = await fetch("/api/" + presentation.token + "/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        const response = await api(presentation.token + "/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
         if (!response.ok) throw new Error("HTTP " + response.status);
       } catch (error) {
         // Only say "cancelled" once the server has agreed; otherwise the briefing is still open.
@@ -2350,7 +2354,7 @@
     (async () => {
       try {
         const token = location.pathname.split("/").filter(Boolean).pop();
-        const response = await fetch("/api/" + token + "/presentation", { cache: "no-store" });
+        const response = await api(token + "/presentation", { cache: "no-store" });
         if (!response.ok) throw new Error("Presentation unavailable");
         presentation = await response.json();
         presentation.token = token;

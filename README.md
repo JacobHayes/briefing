@@ -230,6 +230,11 @@ briefing serve --mcp
   the CLI's `--json` output.
 - Clients either point the stdio server at it (`briefing mcp --hub URL`) or connect to
   `/mcp` directly. `briefing --hub URL await|cancel|status` work against a hub.
+- Clients, pages, and the hub name their wire protocol in a `Briefing-Protocol` header. A hub
+  serves its own protocol and the one before it (translating for the older one), and answers
+  anything else with a 426 naming both; a client refuses a hub on a different protocol. So
+  after upgrading the hub, agent sessions started on the previous release keep working until
+  they restart; two releases behind, they get a clear error instead of misread data.
 
 ### Behind a reverse proxy
 

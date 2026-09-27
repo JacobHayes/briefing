@@ -163,6 +163,13 @@ Output: up to 500 annotations, each with a 2 000-character quote, 4 000-characte
 and 300-character location; up to 100 free-standing notes of 20 000 characters each; other
 user text 20 000 characters; request body 8 MiB.
 
+Parsing is strict everywhere: presentations, page submissions, API requests and responses, and
+stored records all reject unknown fields, so a stale client or page fails loudly instead of
+losing data. A page submission is also checked against the briefing it answers (only the
+questions it asked, only the options it offered, one choice unless `multiSelect`, every
+question accounted for) and rejected rather than repaired. The one opaque value is the page's
+draft, which only the page reads.
+
 ## Security and lifecycle
 
 - Default to loopback/Tailscale. Explicit IPs are opt-in; wildcards expose all interfaces.
