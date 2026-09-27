@@ -96,8 +96,8 @@ All three tools (`brief_user`, `await_briefing`, `cancel_briefing`) declare an
 `outputSchema`. Caps: 500 inline comments, 4 000-character comments, 100 free-standing notes,
 20 000-character notes.
 
-The page itself is a single calm reading column: `Step X of Y`, Back and Next, an always
-available **View all**, and no timers or auto-advance. The full interaction model, the
+The page itself is a single calm reading column: `Step X of Y`, Back and Next, an **Outline**
+to jump to any section, and no timers or auto-advance. The full interaction model, the
 content contract the agent follows, and the non-goals are in
 [docs/design.md](docs/design.md).
 

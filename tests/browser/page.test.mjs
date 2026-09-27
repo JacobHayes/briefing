@@ -252,3 +252,26 @@ test("a chosen option can be cleared, and skipped questions go back as unresolve
   assert.equal(questions[2].section, undefined);
   await done(page);
 });
+
+test("the Outline jumps to a section, and switching tabs keeps unsent note text", async () => {
+  // Wide enough for the docked sidebar, which stays open after a jump.
+  const page = await open(await serve(), { viewport: { width: 1400, height: 800 } });
+  await page.click("#notes-toggle");
+  await page.fill("#note-composer", "unsent");
+  await page.click('[data-tab="outline"]');
+  await page.click(".outline-item >> nth=1");
+  await page.waitForTimeout(300);
+  assert.equal(await page.textContent(".progress-step"), "Step 2 of 2");
+  await page.click('[data-tab="notes"]');
+  assert.equal(await page.inputValue("#note-composer"), "unsent");
+  await done(page);
+});
+
+test("a link to an earlier section jumps to it", async () => {
+  const page = await open(await serve());
+  await goToScreen(page, 1);
+  await page.click('a[href="#section-1"]');
+  await page.waitForTimeout(300);
+  assert.equal(await page.textContent(".progress-step"), "Step 1 of 2");
+  await done(page);
+});

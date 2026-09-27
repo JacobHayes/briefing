@@ -8,7 +8,7 @@
       "mainPoint": "A briefing presents one meaningful concept at a time while keeping the goal and prior context available.",
       "keyPoints": [
         "Use Next and Back to control pace.",
-        "View all is always available when sequential reading is too slow.",
+        "The Outline lists every section, so you can jump ahead or back at any time.",
         "Nothing advances automatically."
       ],
       "details": "Rich content can clarify a chunk without changing the authoring model.\n\n| Content | Useful when |\n|---|---|\n| Tables | Evidence or tradeoffs are easier to compare in rows |\n| Mermaid | A flow, architecture, or state transition is easier to see than read |\n| Vega-Lite | A compact chart explains relative magnitude or trend |\n\n```mermaid\nflowchart LR\n  agent[Agent reasoning] --> briefing[Browser briefing]\n  briefing --> feedback[Notes, comments and answers]\n  feedback --> agent\n```",
@@ -22,16 +22,16 @@
           "options": [
             {
               "label": "Paced, one chunk per screen",
-              "description": "Open in the step-by-step view; View all stays one click away.",
+              "description": "Open in the step-by-step view; the Outline lists every section.",
               "tradeoffs": [
                 "Keeps attention on one idea",
-                "One more click to skim"
+                "Skimming means jumping through the Outline"
               ],
               "recommended": true
             },
             {
-              "label": "View all first",
-              "description": "Open the full-page view and let the reader switch to pacing.",
+              "label": "All sections on one page",
+              "description": "Show every section in one long page instead of pacing them.",
               "tradeoffs": [
                 "Fast to skim",
                 "Loses the one-idea-at-a-time framing"
@@ -47,11 +47,11 @@
     {
       "title": "Return only useful signal",
       "purpose": "Avoid making the briefing itself create more information overload.",
-      "mainPoint": "The agent receives your answers, notes, inline comments, and sections flagged for follow-up - not a noisy transcript of every click. A question you skip goes back as unresolved, never as approval.",
-      "details": "Your draft is saved as you go, so a refresh, a crash, or another device picks up where you left off. The server binds to a single Tailscale 100.x address when available, otherwise 127.0.0.1, and uses an unguessable URL for each presentation.\n\n```vega-lite\n{\n  \"$schema\": \"https://vega.github.io/schema/vega-lite/v5.json\",\n  \"data\": { \"values\": [\n    { \"signal\": \"notes\", \"count\": 2 },\n    { \"signal\": \"answers\", \"count\": 1 },\n    { \"signal\": \"comments\", \"count\": 3 }\n  ] },\n  \"mark\": \"bar\",\n  \"encoding\": {\n    \"x\": { \"field\": \"signal\", \"type\": \"nominal\" },\n    \"y\": { \"field\": \"count\", \"type\": \"quantitative\" }\n  }\n}\n```",
+      "mainPoint": "The agent receives your answers, notes, and inline comments - not a noisy transcript of every click. A question you skip goes back as unresolved, never as approval.",
+      "details": "Your draft is saved as you go, so a refresh, a crash, or another device picks up where you left off (the reading-mode question in [One idea at a time](#section-1) is kept too). The server binds to a single Tailscale 100.x address when available, otherwise 127.0.0.1, and uses an unguessable URL for each presentation.\n\n```vega-lite\n{\n  \"$schema\": \"https://vega.github.io/schema/vega-lite/v5.json\",\n  \"data\": { \"values\": [\n    { \"signal\": \"notes\", \"count\": 2 },\n    { \"signal\": \"answers\", \"count\": 1 },\n    { \"signal\": \"comments\", \"count\": 3 }\n  ] },\n  \"mark\": \"bar\",\n  \"encoding\": {\n    \"x\": { \"field\": \"signal\", \"type\": \"nominal\" },\n    \"y\": { \"field\": \"count\", \"type\": \"quantitative\" }\n  }\n}\n```",
       "remember": [
         "Notes are optional.",
-        "Flagging a section gives the agent explicit follow-up direction."
+        "A comment or a note is how you ask for a follow-up."
       ],
       "questions": [
         {
@@ -68,7 +68,7 @@
               "recommended": true
             },
             {
-              "label": "Sections flagged for follow-up"
+              "label": "Answers to its questions"
             }
           ]
         },

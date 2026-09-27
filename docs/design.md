@@ -61,10 +61,14 @@ call validates the content, registers it, and hands back a link. What the user s
   text. Mermaid nodes and edges and Vega-Lite charts can be commented on directly; those
   comments carry structured target metadata, and a Mermaid diagram can be expanded to fill
   most of the screen.
-- **A free-standing Notes panel**, opened from the header on any screen, holds thoughts that
-  belong to no one passage, including anything about the briefing as a whole. It docks in
-  the left margin on wide viewports and is a bottom sheet on narrow ones. Notes return to the
-  agent next to the other feedback and carry the same weight.
+- **A sidebar with Outline and Notes tabs**, opened from the header on any screen. The Outline
+  lists every chunk (with how many of its questions are still open) plus the review screen,
+  and jumps to any of them; chunks can also link back to an earlier one with
+  `[text](#section-N)`. Notes hold thoughts that belong to no one passage, including anything
+  about the briefing as a whole; they return to the agent next to the other feedback and carry
+  the same weight. Switching tabs keeps each one's scroll position and unsent text. The
+  sidebar docks in the left margin on wide viewports and is a full-screen panel on narrow ones
+  (sized to the visible viewport, so a touch keyboard never covers it).
 - **Questions** sit at the bottom of the chunk they depend on (a chunk may carry several;
   questions about the whole briefing are asked on the review screen). One with options is a
   choice, recommended option first with its tradeoffs; a selection can be cleared, and
@@ -72,7 +76,7 @@ call validates the content, registers it, and hands back a link. What the user s
   Nothing is required: an unanswered question goes back to the agent as `unresolved`. The first
   `Next` (or `Submit`) instead scrolls to an unanswered question whose heading has not yet been
   on screen, so none is skipped unseen.
-- **Navigation** is Back, Next, and an always-available `View all` escape hatch; a final review
+- **Navigation** is Back, Next, and the Outline; a final review
   screen lists everything the user wrote (with an `Add a note` shortcut) before `Submit`. No
   timers, no automatic advancement.
 - **Drafts persist.** Everything typed, including a half-written note or comment, is saved

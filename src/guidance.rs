@@ -34,7 +34,8 @@ fn content_guidance(surface: Surface) -> String {
          depends on (several per chunk are fine) so it sits right under its context; use top-level `questions` only for \
          ones that span the whole briefing. Give a choice {MIN_OPTIONS}-{MAX_OPTIONS} distinct options with the \
          recommended one first and marked (set `multiSelect` when the options are independent), or no options for an \
-         open question. Answers are optional, and the user can always answer in their own words instead.",
+         open question. Answers are optional, and the user can always answer in their own words instead. To refer back \
+         to an earlier chunk, link it as `[text](#section-N)` (N is its 1-based position); the page jumps there.",
         surface.create_action
     )
 }

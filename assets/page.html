@@ -211,9 +211,6 @@
     .link-edit:hover { color: var(--accent); }
 
     /* Overview */
-    .overview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
-    .overview-item { padding: 26px 0; border-bottom: 1px solid var(--line); }
-    .overview-item:last-child { border-bottom: 0; }
 
     /* Done */
     .done { min-height: 70vh; display: grid; place-items: center; text-align: center; padding: 24px; }
@@ -261,14 +258,24 @@
     .composer-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
     .composer-actions .btn { padding: 8px 14px; }
 
-    /* Notes panel: free-standing notes, not tied to any section. A bottom sheet by
-       default; docked in the empty left margin when the viewport has room. The
-       reading column never moves and the right margin stays free for comments. */
-    .notes { position: fixed; z-index: 25; left: 0; right: 0; bottom: 0; max-height: min(100svh, max(50vh, 300px)); display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.18); }
-    .notes-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px 6px; }
-    .notes-title { font-size: .72rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); font-weight: 650; }
+    /* Sidebar with Outline and Notes tabs. Docked in the empty left margin when the viewport has
+       room (the reading column never moves and the right margin stays free for comments);
+       otherwise a full-screen panel, which leaves a touch keyboard plenty of room. */
+    .notes { position: fixed; z-index: 25; inset: 0; display: flex; flex-direction: column; background: var(--surface); }
+    .notes-head { display: flex; align-items: center; gap: 4px; padding: 8px 12px 6px; border-bottom: 1px solid var(--line); }
+    .sidebar-tab { border: 0; background: transparent; color: var(--muted); padding: 6px 10px; border-radius: 8px; font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; font-weight: 650; }
+    .sidebar-tab[aria-selected="true"] { color: var(--accent); background: var(--accent-soft); }
     .notes-close { margin-left: auto; }
-    .notes-list { flex: 1; min-height: 0; overflow: auto; padding: 0 16px; }
+    .sidebar-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .sidebar-pane[hidden] { display: none; }
+    .notes-list, .outline-list { flex: 1; min-height: 0; overflow: auto; padding: 0 16px; }
+    .outline-list { margin: 0; padding: 8px 8px 16px; list-style: none; }
+    .outline-item { display: flex; gap: 10px; width: 100%; text-align: left; border: 0; background: transparent; padding: 9px 10px; border-radius: 10px; color: var(--text); line-height: 1.35; }
+    .outline-item:hover { background: var(--line); }
+    .outline-item[aria-current="step"] { background: var(--accent-soft); color: var(--accent); font-weight: 620; }
+    .outline-number { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 1.4em; }
+    .outline-meta { display: block; margin-top: 2px; color: var(--muted); font-size: .78rem; font-weight: 450; }
+    body.sidebar-modal { overflow: hidden; }
     .notes-empty { margin: 4px 0 10px; color: var(--muted); font-size: .9rem; }
     .note-item, .note-editor { padding: 10px 0; border-top: 1px solid var(--line); }
     .note-item .markdown { font-size: .95rem; }
@@ -280,7 +287,7 @@
     .notes-hint { margin-right: auto; color: var(--muted); font-size: .78rem; }
     @media (pointer: coarse) { .notes-hint { display: none; } }
     @media (min-width: 1200px) {
-      .notes { left: 16px; right: auto; top: 88px; bottom: 16px; max-height: none; width: min(320px, calc((100vw - var(--content)) / 2 - 44px)); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,.12); }
+      .notes { inset: 88px auto 16px 16px; width: min(320px, calc((100vw - var(--content)) / 2 - 44px)); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,.12); }
     }
 
     /* Short viewports (high browser zoom, landscape phones): a more compact composer. */
@@ -312,7 +319,6 @@
     let presentation;
     let screens = [];
     let current = 0;
-    let overview = false;
     let submitted = false;
     let contextOpen = false;
     let pendingFocus = null;
@@ -322,8 +328,11 @@
     let composerReturnFocus = null;
     let state = { questions: {}, annotations: [], notes: [] };
     let disclosureState = {};
+    // The sidebar (Outline and Notes tabs): whether it is open and which tab, per browser.
     const NOTES_OPEN_KEY = "briefing:notesOpen";
+    const SIDEBAR_TAB_KEY = "briefing:sidebarTab";
     let notesOpen = (() => { try { return localStorage.getItem(NOTES_OPEN_KEY) === "1"; } catch { return false; } })();
+    let sidebarTab = (() => { try { return localStorage.getItem(SIDEBAR_TAB_KEY) === "outline" ? "outline" : "notes"; } catch { return "notes"; } })();
     let noteEditing = null;
     const MAX_ANNOTATIONS = 500;
     const MAX_QUOTE = 2000;
@@ -422,6 +431,8 @@
       const renderer = new api.Renderer();
       renderer.link = function(token) {
         const label = this.parser.parseInline(token.tokens || []);
+        // A reference to an earlier chunk: `[text](#section-2)` jumps to chunk 2.
+        if (SECTION_LINK.test(token.href || "")) return '<a href="' + escapeHtml(token.href) + '">' + label + '</a>';
         const href = safeMarkdownUrl(token.href);
         if (!href) return label;
         const title = token.title ? ' title="' + escapeHtml(token.title) + '"' : "";
@@ -450,8 +461,10 @@
       });
     }
 
+    const SECTION_LINK = /^#section-\d+$/;
     function normalizeSanitizedLinks(root) {
       root.querySelectorAll("a[href]").forEach(link => {
+        if (SECTION_LINK.test(link.getAttribute("href"))) return;
         const safe = safeMarkdownUrl(link.getAttribute("href"));
         if (!safe) link.removeAttribute("href");
         else {
@@ -1753,17 +1766,20 @@
       }
       actions.append(el("span", { id: "sync-status", class: "sync-status", role: "status", hidden: !unsynced, text: "Not synced · kept in this browser" }));
       actions.append(el("button", {
-        id: "notes-toggle", class: "ghost", "aria-expanded": String(notesOpen), "aria-controls": "notes-panel",
-        text: notesButtonText(), onclick: () => toggleNotes(),
+        id: "outline-toggle", class: "ghost", "aria-expanded": String(notesOpen && sidebarTab === "outline"), "aria-controls": "notes-panel",
+        text: "Outline", onclick: () => toggleSidebar("outline"),
       }));
-      actions.append(el("button", { class: "ghost", text: overview ? "Paced view" : "View all", onclick: () => { overview = !overview; render({ top: true }); } }));
+      actions.append(el("button", {
+        id: "notes-toggle", class: "ghost", "aria-expanded": String(notesOpen && sidebarTab === "notes"), "aria-controls": "notes-panel",
+        text: notesButtonText(), onclick: () => toggleSidebar("notes"),
+      }));
 
       const inner = el("div", { class: "header-inner" }, [
         el("div", { class: "header-row" }, [
           el("div", { class: "wordmark" }, [el("span", { class: "mark", "aria-hidden": "true", text: "◆" }), el("span", { class: "briefing-title", title: presentation.title, text: presentation.title })]),
           actions,
         ]),
-        overview ? null : el("div", { class: "progress-line" }, [
+        el("div", { class: "progress-line" }, [
           el("div", { class: "progress", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": total, "aria-valuenow": stepNow, "aria-label": "Progress through briefing" },
             (() => { const f = el("div", { class: "progress-fill" }); f.style.width = percent + "%"; return f; })()),
           el("span", { class: "progress-step", text: isReview ? "Review" : "Step " + stepNow + " of " + total }),
@@ -1892,16 +1908,49 @@
       return true;
     }
 
-    // --- Notes panel: free-standing notes, not tied to any section ---
-    function setNotesOpen(open) {
+    // --- Sidebar: the Outline and free-standing Notes, not tied to any section ---
+    function setNotesOpen(open, tab = sidebarTab) {
       notesOpen = open;
-      try { localStorage.setItem(NOTES_OPEN_KEY, open ? "1" : "0"); } catch { /* storage unavailable */ }
+      sidebarTab = tab;
+      try {
+        localStorage.setItem(NOTES_OPEN_KEY, open ? "1" : "0");
+        localStorage.setItem(SIDEBAR_TAB_KEY, tab);
+      } catch { /* storage unavailable */ }
     }
     const notesButtonText = () => state.notes.length ? "Notes · " + state.notes.length : "Notes";
-    // Swap only the panel and the header count so focus and scroll elsewhere survive.
+    function syncSidebarButtons() {
+      const notes = document.getElementById("notes-toggle");
+      if (notes) { notes.textContent = notesButtonText(); notes.setAttribute("aria-expanded", String(notesOpen && sidebarTab === "notes")); }
+      document.getElementById("outline-toggle")?.setAttribute("aria-expanded", String(notesOpen && sidebarTab === "outline"));
+    }
+    // Switch tabs in place: both panes stay in the DOM, so each keeps its scroll and input.
+    function showSidebarTab(tab) {
+      setNotesOpen(true, tab);
+      const panel = document.getElementById("notes-panel");
+      panel?.querySelectorAll("[data-tab]").forEach(button => button.setAttribute("aria-selected", String(button.dataset.tab === tab)));
+      panel?.querySelectorAll("[data-pane]").forEach(pane => { pane.hidden = pane.dataset.pane !== tab; });
+      syncSidebarButtons();
+    }
+    // Scroll positions of the two panes, carried across rebuilds of the panel.
+    const paneScroll = { outline: 0, notes: 0 };
+    function rememberPaneScroll() {
+      const panel = document.getElementById("notes-panel");
+      if (!panel) return;
+      paneScroll.outline = panel.querySelector(".outline-list")?.scrollTop ?? paneScroll.outline;
+      paneScroll.notes = panel.querySelector(".notes-list")?.scrollTop ?? paneScroll.notes;
+    }
+    function restorePaneScroll() {
+      const panel = document.getElementById("notes-panel");
+      if (!panel) return;
+      const outline = panel.querySelector(".outline-list");
+      const notes = panel.querySelector(".notes-list");
+      if (outline) outline.scrollTop = paneScroll.outline;
+      if (notes) notes.scrollTop = paneScroll.notes;
+    }
+    // Swap only the panel and the header buttons so focus and scroll elsewhere survive.
     function refreshNotes(focusSelector) {
-      const button = document.getElementById("notes-toggle");
-      if (button) { button.textContent = notesButtonText(); button.setAttribute("aria-expanded", String(notesOpen)); }
+      syncSidebarButtons();
+      rememberPaneScroll();
       const existing = document.getElementById("notes-panel");
       const fresh = notesOpen && !submitted ? notesPanel() : null;
       const field = document.getElementById("note-composer");
@@ -1915,31 +1964,29 @@
       else if (existing && fresh) existing.replaceWith(fresh);
       else if (existing) existing.remove();
       else if (fresh) app.append(fresh);
+      restorePaneScroll();
       layoutNotes();
       // Focus synchronously: iOS only raises the keyboard for a focus made inside the tap handler.
       // Never scroll for it: the Notes toggle is in the header, which is off screen once the reader
       // has scrolled down, and the panel itself is fixed.
       if (focusSelector) document.querySelector(focusSelector)?.focus({ preventScroll: true });
     }
-    // As a bottom sheet the panel would cover the Back/Next bar, so lift the bar above it.
     const notesDocked = matchMedia("(min-width: 1200px)");
     function layoutNotes() {
       const panel = document.getElementById("notes-panel");
-      let lift = 0;
-      if (panel && !notesDocked.matches) {
-        // Size the sheet against the visible viewport, not the layout one, so that with the
-        // keyboard up it still leaves room for the nav: half the visible height, but never less
-        // than its head plus composer need.
+      const modal = Boolean(panel) && !notesDocked.matches;
+      document.body.classList.toggle("sidebar-modal", modal);
+      if (modal) {
+        // Full screen, with the content padded into the visible viewport so a touch keyboard
+        // never covers the composer and its buttons. The panel itself still covers everything:
+        // iOS draws its keyboard toolbar translucent, and the page must not show through it.
         const view = visibleRect();
-        panel.style.maxHeight = Math.min(view.height, Math.max(view.height / 2, 260)) + "px";
-        const bottom = Math.max(0, window.innerHeight - view.top - view.height);
-        panel.style.bottom = bottom + "px";
-        lift = bottom + panel.offsetHeight;
+        panel.style.paddingTop = Math.max(0, view.top) + "px";
+        panel.style.paddingBottom = Math.max(0, window.innerHeight - view.top - view.height) + "px";
       } else if (panel) {
-        panel.style.maxHeight = "";
-        panel.style.bottom = "";
+        panel.style.paddingTop = panel.style.paddingBottom = "";
       }
-      document.documentElement.style.setProperty("--sheet", lift + "px");
+      document.documentElement.style.setProperty("--sheet", "0px");
     }
     notesDocked.addEventListener("change", layoutNotes);
     window.addEventListener("resize", layoutNotes);
@@ -1968,14 +2015,22 @@
     // A button that acts on the focused note field must not steal its focus: the keyboard would
     // drop and re-raise, moving every fixed overlay under a fast tap sequence.
     const keepFocus = button => { button.addEventListener("pointerdown", event => event.preventDefault()); return button; };
+    // The header buttons open the sidebar on their tab, switch to it, or close it when it is
+    // already showing.
+    function toggleSidebar(tab) {
+      if (notesOpen && sidebarTab === tab) { toggleNotes(false); return; }
+      if (notesOpen) { showSidebarTab(tab); if (tab === "notes") document.getElementById("note-composer")?.focus({ preventScroll: true }); return; }
+      setNotesOpen(true, tab);
+      refreshNotes(tab === "notes" ? "#note-composer" : null);
+    }
     function toggleNotes(open = !notesOpen) {
-      setNotesOpen(open);
+      setNotesOpen(open, open ? "notes" : sidebarTab);
       refreshNotes(open ? "#note-composer" : "#notes-toggle");
     }
     // The review screen lists notes too, so it re-renders; elsewhere only the panel changes.
     function notesChanged(focusSelector) {
       save();
-      if (!overview && current >= screens.length) { pendingFocus = focusSelector || null; render(); }
+      if (current >= screens.length) { pendingFocus = focusSelector || null; render(); }
       else refreshNotes(focusSelector);
     }
     function addNote() {
@@ -1995,7 +2050,7 @@
     }
     function editNote(id) {
       setNoteEditing(id, state.notes.find(n => n.id === id)?.text ?? "");
-      setNotesOpen(true);
+      setNotesOpen(true, "notes");
       refreshNotes('[data-note-editor="' + id + '"]');
       revealNoteEditor();
     }
@@ -2049,25 +2104,53 @@
         keepFocus(el("button", { class: "btn primary", type: "button", text: "Save", onclick: commit })),
       ])]);
     }
+    // Jump to a screen from the outline (or a section link). On a narrow screen the sidebar is
+    // full-screen, so it closes to show where it jumped.
+    function goToScreen(index) {
+      current = Math.max(0, Math.min(index, screens.length));
+      save();
+      if (!notesDocked.matches && notesOpen) setNotesOpen(false);
+      render({ top: true });
+    }
+    function outlinePane() {
+      const items = screens.map((screen, index) => {
+        const questions = (screen.data.questions || []).map((_, n) => "c" + index + "-" + n);
+        const open = questions.filter(key => !isAnswered(key)).length;
+        const meta = questions.length ? (open ? open + " of " + questions.length + " questions open" : questions.length === 1 ? "question answered" : "questions answered") : null;
+        return el("li", {}, el("button", { class: "outline-item", type: "button", "aria-current": index === current ? "step" : null, onclick: () => goToScreen(index) }, [
+          el("span", { class: "outline-number", text: String(index + 1) }),
+          el("span", {}, [...inlineMarkdown(screen.data.title), meta ? el("span", { class: "outline-meta", text: meta }) : null]),
+        ]));
+      });
+      items.push(el("li", {}, el("button", { class: "outline-item", type: "button", "aria-current": current >= screens.length ? "step" : null, onclick: () => goToScreen(screens.length) }, [
+        el("span", { class: "outline-number", text: "✓" }), el("span", { text: "Review and submit" }),
+      ])));
+      return el("div", { class: "sidebar-pane", "data-pane": "outline", hidden: sidebarTab !== "outline" }, el("ol", { class: "outline-list", "aria-label": "Outline" }, items));
+    }
     function notesPanel() {
-      const panel = el("aside", { id: "notes-panel", class: "notes", "aria-label": "Notes" });
-      panel.append(el("div", { class: "notes-head" }, [
-        el("span", { class: "notes-title", text: "Notes" }),
-        el("button", { class: "ghost notes-close", type: "button", text: "Close", "aria-label": "Close notes", onclick: () => toggleNotes(false) }),
+      const panel = el("aside", { id: "notes-panel", class: "notes", "aria-label": "Outline and notes" });
+      const tab = (name, label) => el("button", { class: "sidebar-tab", type: "button", role: "tab", "data-tab": name, "aria-selected": String(sidebarTab === name), text: label, onclick: () => showSidebarTab(name) });
+      panel.append(el("div", { class: "notes-head", role: "tablist" }, [
+        tab("outline", "Outline"),
+        tab("notes", "Notes"),
+        el("button", { class: "ghost notes-close", type: "button", text: "Close", "aria-label": "Close the sidebar", onclick: () => toggleNotes(false) }),
       ]));
+      panel.append(outlinePane());
+      const pane = el("div", { class: "sidebar-pane", "data-pane": "notes", hidden: sidebarTab !== "notes" });
+      panel.append(pane);
       const list = el("div", { class: "notes-list" });
-      if (!state.notes.length) list.append(el("p", { class: "notes-empty", text: "Thoughts, questions, or tangents that are not about any one section. They go back with your response." }));
+      if (!state.notes.length) list.append(el("p", { class: "notes-empty", text: "Thoughts, questions, or tangents that are not about any one passage, including anything about the briefing as a whole. They go back with your response." }));
       state.notes.forEach(note => list.append(noteEditing === note.id ? noteEditor(note) : noteItem(note)));
-      panel.append(list);
+      pane.append(list);
       // While a note is being edited its editor stands in for the composer, which frees the
-      // room a short (keyboard-up) sheet needs to show the editor and its actions.
+      // room a short (keyboard-up) panel needs to show the editor and its actions.
       if (noteEditing && state.notes.some(n => n.id === noteEditing)) return panel;
       const field = el("textarea", { id: "note-composer", "aria-label": "New note", placeholder: "A thought, question, or tangent — not tied to any section" });
       field.value = state.noteDraft;
       field.addEventListener("input", () => { state.noteDraft = field.value; stamp("noteDraft"); save(); });
       field.addEventListener("keydown", event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); addNote(); } });
       const isMac = /Mac|iPhone|iPad/.test(navigator.platform || "");
-      panel.append(el("div", { class: "notes-composer" }, [
+      pane.append(el("div", { class: "notes-composer" }, [
         field,
         el("div", { class: "notes-actions" }, [
           el("span", { class: "notes-hint", text: (isMac ? "⌘" : "Ctrl+") + "Enter to add" }),
@@ -2124,27 +2207,6 @@
       frag.append(el("div", { class: "error", id: "submit-error", role: "alert", text: submitErrorText("") }));
       return frag;
     }
-
-    function renderOverview() {
-      const main = el("main", {});
-      main.append(el("div", { class: "overview-head" }, [
-        el("h1", { class: "title", text: "All content", tabindex: "-1" }),
-        el("button", { class: "btn", text: "Back to paced view", onclick: () => { overview = false; render({ top: true }); } }),
-      ]));
-      presentation.chunks.forEach((chunk, i) => {
-        const item = el("div", { class: "overview-item", "data-section": "Section: " + chunk.title }, chunkBody(chunk));
-        item.querySelectorAll("details.disclose").forEach(d => d.open = true);
-        (chunk.questions || []).forEach(question => item.append(overviewQuestion(question)));
-        main.append(item);
-      });
-      presentation.questions.forEach(question => main.append(el("div", { class: "overview-item" }, overviewQuestion(question))));
-      return main;
-    }
-    // Read-only: questions are answered in the paced view.
-    const overviewQuestion = question => el("div", { class: "question" }, [
-      questionIntro(question),
-      (question.options || []).length ? el("div", { class: "options" }, question.options.map(option => el("div", { class: "option" }, optionBody(option)))) : null,
-    ]);
 
     const submitErrorText = detail => "Could not submit this briefing" + detail + ". Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to reopen this briefing.";
 
@@ -2226,10 +2288,11 @@
       const frag = document.createDocumentFragment();
       frag.append(header());
 
-      if (overview) frag.append(renderOverview());
-      else frag.append(pacedMain());
+      frag.append(pacedMain());
       if (notesOpen) frag.append(notesPanel());
+      rememberPaneScroll();
       app.replaceChildren(frag);
+      restorePaneScroll();
       layoutNotes();
       decorateHighlights();
       watchQuestions();
@@ -2262,8 +2325,16 @@
       return main;
     }
 
+    document.addEventListener("click", event => {
+      const link = event.target.closest?.('a[href^="#section-"]');
+      if (!link || !SECTION_LINK.test(link.getAttribute("href"))) return;
+      event.preventDefault();
+      const number = Number(link.getAttribute("href").slice("#section-".length));
+      if (number >= 1 && number <= screens.length) goToScreen(number - 1);
+    });
+
     document.addEventListener("keydown", event => {
-      if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement || overview || submitted || event.shiftKey || document.querySelector("dialog[open]")) return;
+      if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement || submitted || event.shiftKey || document.querySelector("dialog[open]")) return;
       if (event.key === "ArrowLeft" && current > 0) { current--; save(); render({ top: true }); }
       if (event.key === "ArrowRight" && current < screens.length && !revealUnseenQuestion()) { current++; save(); render({ top: true }); }
     });
