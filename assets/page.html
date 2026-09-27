@@ -100,8 +100,6 @@
     details.disclose > summary::before { content: "›"; display: inline-block; transition: transform .15s ease; font-size: 1.1em; }
     details.disclose[open] > summary::before { transform: rotate(90deg); }
     .disclose-body { margin-top: 12px; color: var(--text); white-space: pre-wrap; }
-    .source-list { margin: 10px 0 0; padding-left: 1.15rem; color: var(--muted); }
-    .source-list li { margin-top: 4px; }
 
     /* Rich Markdown */
     .markdown { white-space: normal; overflow-wrap: anywhere; }
@@ -1783,7 +1781,7 @@
       return el("div", { class: "context" }, panel);
     }
 
-    function chunkBody(chunk, disclosureScope = "") {
+    function chunkBody(chunk) {
       const nodes = [mdInline("h1", { class: "title", tabindex: "-1" }, chunk.title)];
       if (chunk.purpose) nodes.push(markdownBlock("purpose", chunk.purpose));
       nodes.push(markdownBlock("lede", chunk.mainPoint));
@@ -1793,10 +1791,6 @@
         const anchors = el("div", { class: "anchors" }, el("div", { class: "context-label", text: "Worth remembering" }));
         anchors.append(chunk.remember.length === 1 ? markdownBlock("", chunk.remember[0]) : list(chunk.remember, ""));
         nodes.push(anchors);
-      }
-      if (chunk.sources && chunk.sources.length) {
-        const sources = el("ul", { class: "source-list" }, chunk.sources.map(s => el("li", {}, el("a", { href: s.url, target: "_blank", rel: "noreferrer" }, inlineMarkdown(s.label)))));
-        nodes.push(disclosure("Sources (" + chunk.sources.length + ")", sources, "", disclosureScope ? disclosureScope + ":sources" : ""));
       }
       return nodes;
     }
@@ -1809,7 +1803,7 @@
 
     function chunkScreen(chunk, index) {
       const draft = chunkState(index);
-      const frag = el("div", {}, el("div", { class: "reading", "data-section": "Section: " + chunk.title }, chunkBody(chunk, "chunk:" + index)));
+      const frag = el("div", {}, el("div", { class: "reading", "data-section": "Section: " + chunk.title }, chunkBody(chunk)));
       if (chunk.decision) frag.append(el("div", { class: "inline-decision" }, [decisionIntro(chunk.decision, "h2"), decisionBlock(chunk.decision, "chunk:" + index)]));
 
       const respondBody = el("div", { class: "disclose-body" });

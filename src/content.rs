@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 pub const MAX_CHUNKS: usize = 10;
 pub const MAX_KEY_POINTS: usize = 8;
 pub const MAX_REMEMBER: usize = 4;
-pub const MAX_SOURCES: usize = 6;
 pub const MAX_KEY_CONTEXT: usize = 6;
 pub const MAX_OPEN_QUESTIONS: usize = 5;
 pub const MAX_DECISIONS: usize = 6;
@@ -19,15 +18,6 @@ pub const MAX_OPTIONS: usize = 4;
 pub const MAX_TRADEOFFS: usize = 4;
 pub const MAX_PRESENTATION_BYTES: usize = 1024 * 1024;
 pub const MAX_FENCED_SOURCE_BYTES: usize = 128 * 1024;
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Source {
-    /// Short source label.
-    pub label: String,
-    /// Absolute http(s) source URL.
-    pub url: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -53,10 +43,6 @@ pub struct Chunk {
     /// Optional question or response prompt for the user; when present, the response area opens by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
-    /// Sources directly supporting this chunk.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 6))]
-    pub sources: Option<Vec<Source>>,
     /// A decision that depends on this section: its options render at the bottom of this card, right under their context. Prefer this over a top-level decision whenever the choice refers to one section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<Decision>,
@@ -301,15 +287,6 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
         };
         too_many(chunk.key_points.as_ref().map_or(0, Vec::len), MAX_KEY_POINTS, "keyPoints")?;
         too_many(chunk.remember.as_ref().map_or(0, Vec::len), MAX_REMEMBER, "remember anchors")?;
-        too_many(chunk.sources.as_ref().map_or(0, Vec::len), MAX_SOURCES, "sources")?;
-        for source in chunk.sources.iter().flatten() {
-            require_text(&source.label, &format!("chunk {n} source label"))?;
-            let url = url::Url::parse(&source.url)
-                .map_err(|_| ValidationError(format!("chunk {n} source URL is invalid: {}", source.url)))?;
-            if url.scheme() != "http" && url.scheme() != "https" {
-                return Err(ValidationError(format!("chunk {n} source URL must use http or https")));
-            }
-        }
         if let Some(decision) = &chunk.decision {
             validate_decision(decision, &format!("chunk {n} decision"))?;
         }
@@ -370,7 +347,6 @@ mod tests {
                 details: None,
                 remember: None,
                 checkpoint: None,
-                sources: None,
                 decision: None,
             }],
             tray: None,
@@ -386,14 +362,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_blank_title_and_bad_source() {
+    fn rejects_blank_title() {
         let mut p = minimal();
         p.title = "   ".into();
         assert!(validate(&p).unwrap_err().0.contains("title"));
-
-        let mut p = minimal();
-        p.chunks[0].sources = Some(vec![Source { label: "x".into(), url: "ftp://example.com".into() }]);
-        assert!(validate(&p).unwrap_err().0.contains("http"));
     }
 
     #[test]

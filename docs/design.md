@@ -41,7 +41,7 @@ Activation is proactive: when an answer crosses the complexity threshold the age
 call validates the content, registers it, and hands back a link. What the user sees:
 
 - **One semantic chunk per screen**, presented as an article: title, one-line purpose, lead
-  point, key points, optional inline details, and sources behind a disclosure. A single
+  point, key points, and optional inline details (links cite sources in the text). A single
   progress bar with a `Step X of Y` label sits in a slim sticky header.
 - **Context on demand.** The goal, key context, running summary, and open questions live in a
   `Context` panel opened from the header, not permanently on screen.
@@ -144,9 +144,9 @@ The model should:
 ## Limits
 
 Input: whole presentation at most 1 MiB, fenced blocks at most 128 KB each; 1-10 chunks; per
-chunk up to 8 `keyPoints`, 4 `remember`, 6 `sources`; tray up to 6 `keyContext` and 5
+chunk up to 8 `keyPoints`, 4 `remember`; tray up to 6 `keyContext` and 5
 `openQuestions`; 0-6 top-level decisions plus at most one per chunk, each with 2-4 options and
-up to 4 `tradeoffs`; sources must be absolute http(s) URLs; required text fields non-empty
+up to 4 `tradeoffs`; required text fields non-empty
 after trimming.
 
 Output: up to 500 annotations, each with a 2 000-character quote, 4 000-character comment,
