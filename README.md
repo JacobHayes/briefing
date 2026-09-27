@@ -82,11 +82,9 @@ be on a different machine from the agent). `await_briefing` then blocks until yo
   "status": "completed",
   "briefingId": "7rJ-tS8jIOb8SPX5",
   "feedback": {
-    "chunks":      [{ "title": "...", "status": "revisit", "note": "..." }],
     "questions":   [{ "question": "...", "section": "...", "selected": ["..."], "answer": "...", "status": "answered" }],
     "annotations": [{ "location": "...", "quote": "...", "comment": "...", "target": { "..." : "..." } }],
-    "notes":       ["..."],
-    "overallNote": "..."
+    "notes":       ["..."]
   },
   "instructions": "Respond only to this feedback ..."
 }
@@ -169,7 +167,7 @@ the result on stdout. With `--json` the result is one line, the same `status` sh
 tool and the hub API return:
 
 ```jsonc
-{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "completed", "feedback": { "chunks": [], "questions": [], "annotations": [], "notes": ["..."], "overallNote": "..." } }
+{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "completed", "feedback": { "questions": [], "annotations": [], "notes": ["..."] } }
 { "briefingId": "7rJ-tS8jIOb8SPX5", "status": "cancelled", "feedback": { "..." : "..." } }
 { "briefingId": "7rJ-tS8jIOb8SPX5", "status": "pending" }
 ```

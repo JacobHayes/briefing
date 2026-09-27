@@ -104,7 +104,6 @@ pub struct DraftSummary {
     #[serde(default)]
     pub review: bool,
     pub annotations: u64,
-    pub section_notes: u64,
     /// Questions with a selected option or a written answer.
     pub answered: u64,
     /// Unix milliseconds, as reported by the browser.
@@ -173,9 +172,6 @@ pub fn draft_summary(presentation: &Briefing, draft: &Value) -> DraftSummary {
         screens,
         review: current >= screens,
         annotations: state["annotations"].as_array().map(|a| a.len()).unwrap_or(0) as u64,
-        section_notes: count_map(&state["chunks"], &|c| {
-            non_empty(c, "note") || c["status"].as_str() == Some("revisit")
-        }),
         answered: count_map(&state["questions"], &|q| {
             q["selected"].as_array().is_some_and(|s| !s.is_empty()) || non_empty(q, "answer")
         }),
@@ -549,9 +545,9 @@ mod tests {
 
         assert_eq!(hub.wait(&created.id, Duration::from_millis(20)).await, Ok(Outcome::Pending));
 
-        hub.submit_by_token(&created.token, &json!({"overallNote": "great"}), false).unwrap();
+        hub.submit_by_token(&created.token, &json!({"notes": ["great"]}), false).unwrap();
         match hub.wait(&created.id, Duration::from_secs(1)).await.unwrap() {
-            Outcome::Completed { feedback } => assert_eq!(feedback.overall_note, "great"),
+            Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["great"]),
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(
@@ -568,7 +564,7 @@ mod tests {
     fn drafts_are_revisioned() {
         let hub = Hub::new(HubConfig::default());
         let created = hub.create(demo(), None);
-        let draft = json!({"current": 1, "state": {"chunks": {"0": {"note": "hi", "status": ""}}, "questions": {"c0-0": {"selected": ["A"], "answer": ""}, "c1-0": {"selected": [], "answer": ""}}, "annotations": [{}], "overallNote": ""}, "updatedAt": 5});
+        let draft = json!({"current": 1, "state": {"questions": {"c0-0": {"selected": ["A"], "answer": ""}, "c1-0": {"selected": [], "answer": ""}}, "annotations": [{}]}, "updatedAt": 5});
         assert_eq!(hub.save_draft(&created.token, Some(0), draft.clone()), Ok(DraftSave::Saved { revision: 1 }));
         assert_eq!(hub.save_draft(&created.token, None, draft.clone()), Ok(DraftSave::Saved { revision: 2 }));
         match hub.save_draft(&created.token, Some(1), json!({})).unwrap() {
@@ -581,7 +577,6 @@ mod tests {
         let summary = hub.info(&created.id).unwrap().draft.unwrap();
         assert_eq!(summary.screen, 2);
         assert_eq!(summary.annotations, 1);
-        assert_eq!(summary.section_notes, 1);
         assert_eq!(summary.answered, 1);
         assert_eq!(summary.screens, demo().chunks.len() as u64);
         assert!(!summary.review);
@@ -639,9 +634,9 @@ mod tests {
 
         // A third process (the one the browser talks to) submits; B's waiter sees it via disk.
         let c = Hub::new(config());
-        c.submit_by_token(&created.token, &json!({"overallNote": "done"}), false).unwrap();
+        c.submit_by_token(&created.token, &json!({"notes": ["done"]}), false).unwrap();
         match b.wait(&created.id, Duration::from_secs(1)).await.unwrap() {
-            Outcome::Completed { feedback } => assert_eq!(feedback.overall_note, "done"),
+            Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["done"]),
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(b.status(&created.id), Some(BriefingStatus::Completed));

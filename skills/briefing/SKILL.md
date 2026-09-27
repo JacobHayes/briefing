@@ -37,5 +37,4 @@ briefing await --help
 - Build a presentation JSON file that matches `briefing schema`.
 - Run `briefing present <file> --json` or pipe JSON to `briefing present --json`.
 - When feedback returns, respond only to that feedback: act on question answers (an
-  `unresolved` one is still open, not approval), address inline comments, follow up on revisit
-  flags, and act on notes.
+  `unresolved` one is still open, not approval), address inline comments, and act on notes.

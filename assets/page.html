@@ -160,13 +160,9 @@
     .diagram-modal-body svg { width: 100%; height: 100%; max-width: 100% !important; max-height: 100%; display: block; }
     .vega-embed details { display: none; }
 
-    /* Respond */
-    .respond .disclose-body { white-space: normal; }
-    .prompt { margin: 0 0 10px; color: var(--muted); }
+    /* Text entry */
     textarea { width: 100%; min-height: 84px; resize: vertical; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); line-height: 1.5; }
     textarea:focus { outline: 3px solid var(--focus); outline-offset: 1px; border-color: var(--accent); }
-    .flag { display: flex; align-items: center; gap: 9px; margin-top: 12px; color: var(--muted); cursor: pointer; }
-    .flag input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
 
     /* Questions */
     .question { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); scroll-margin: 96px 0 120px; transition: background-color .4s ease; border-radius: 0 0 12px 12px; }
@@ -197,6 +193,7 @@
     .review-item .markdown p + p, .review-item .markdown p + ul, .review-item .markdown ul + p, .review-item .markdown pre + p { margin-top: .75em; }
     .target-meta { margin: -2px 0 6px; color: var(--muted); font-size: .78rem; }
     .review-empty { margin: 20px 0 0; color: var(--muted); }
+    .add-note { margin-top: 16px; }
 
     /* Navigation */
     .nav { position: sticky; bottom: var(--sheet, 0px); margin-top: 32px; padding: 14px 0; display: flex; align-items: center; gap: 10px; background: linear-gradient(to top, var(--bg) 62%, transparent); }
@@ -323,7 +320,7 @@
     let composer = null;
     let composerRect = null;
     let composerReturnFocus = null;
-    let state = { chunks: {}, questions: {}, annotations: [], notes: [], overallNote: "" };
+    let state = { questions: {}, annotations: [], notes: [] };
     let disclosureState = {};
     const NOTES_OPEN_KEY = "briefing:notesOpen";
     let notesOpen = (() => { try { return localStorage.getItem(NOTES_OPEN_KEY) === "1"; } catch { return false; } })();
@@ -868,7 +865,6 @@
         disclosureState = saved.disclosures;
       }
       if (!state || typeof state !== "object") state = {};
-      if (!state.chunks || typeof state.chunks !== "object") state.chunks = {};
       if (!state.questions || typeof state.questions !== "object") state.questions = {};
       for (const answer of Object.values(state.questions)) {
         if (!Array.isArray(answer.selected)) answer.selected = [];
@@ -877,7 +873,15 @@
       if (!Array.isArray(state.annotations)) state.annotations = [];
       if (!Array.isArray(state.notes)) state.notes = [];
       state.notes = state.notes.filter(n => n && typeof n.text === "string").map(n => ({ id: n.id || uid(), text: n.text, at: n.at || 0 }));
-      if (typeof state.overallNote !== "string") state.overallNote = "";
+      // Drafts from before per-section responses and the Overall response were folded into
+      // Notes keep their text as notes.
+      for (const [index, legacy] of Object.entries(state.chunks || {})) {
+        const text = (legacy?.note || "").trim();
+        if (text) state.notes.push({ id: uid(), text: (presentation.chunks[index]?.title ? presentation.chunks[index].title + ": " : "") + text, at: 0 });
+      }
+      if (typeof state.overallNote === "string" && state.overallNote.trim()) state.notes.push({ id: uid(), text: state.overallNote.trim(), at: 0 });
+      delete state.chunks;
+      delete state.overallNote;
       // In-progress text: the Notes box, an open comment box, a note being edited.
       if (typeof state.noteDraft !== "string") state.noteDraft = "";
       if (!state.composerDraft || typeof state.composerDraft !== "object") state.composerDraft = null;
@@ -1004,7 +1008,6 @@
     document.addEventListener("visibilitychange", () => { if (document.hidden) void syncDraft(true); else void refreshFromServer(); });
     window.addEventListener("focus", () => { void refreshFromServer(); });
     window.addEventListener("pagehide", () => { if (syncTimer) void syncDraft(true); });
-    const chunkState = index => state.chunks[index] ||= { note: "", status: "" };
     // Answers are keyed "c<chunk>-<n>" for a chunk's questions and "b<n>" for the briefing-wide
     // ones (no dots: the key is also a merge path).
     const questionState = key => state.questions[key] ||= { selected: [], answer: "" };
@@ -1805,23 +1808,10 @@
       return key ? bindDisclosure(node, key) : node;
     }
 
+    // Feedback on a chunk goes through inline comments, Notes, and its questions.
     function chunkScreen(chunk, index) {
-      const draft = chunkState(index);
       const frag = el("div", {}, el("div", { class: "reading", "data-section": "Section: " + chunk.title }, chunkBody(chunk)));
       (chunk.questions || []).forEach((question, n) => frag.append(questionBlock(question, "c" + index + "-" + n)));
-
-      const respondBody = el("div", { class: "disclose-body" });
-      const field = el("textarea", { "aria-label": "Note", placeholder: "Optional note or question" });
-      field.value = draft.note || "";
-      field.addEventListener("input", () => { draft.note = field.value; stamp("chunks." + index); save(); });
-      respondBody.append(field);
-
-      const flag = el("input", { type: "checkbox" });
-      flag.checked = draft.status === "revisit";
-      flag.addEventListener("change", () => { draft.status = flag.checked ? "revisit" : ""; stamp("chunks." + index); save(); });
-      respondBody.append(el("label", { class: "flag" }, [flag, el("span", { text: "Flag this section for follow-up" })]));
-
-      frag.append(disclosure("Respond", respondBody, "respond", "chunk:" + index + ":respond"));
       return frag;
     }
 
@@ -2091,17 +2081,9 @@
       const frag = el("div", {}, [
         el("span", { class: "tag", text: "Review" }),
         mdInline("h1", { class: "title", tabindex: "-1" }, presentation.completionPrompt || "Submit"),
-        el("p", { class: "purpose", text: "Only what is listed here is returned — your answers, comments, notes, and anything flagged for follow-up. Questions you skipped go back as unresolved." }),
+        el("p", { class: "purpose", text: "Only what is listed here is returned — your answers, comments, and notes. Questions you skipped go back as unresolved." }),
       ]);
       const grid = el("div", { class: "review" });
-      presentation.chunks.forEach((chunk, index) => {
-        const draft = chunkState(index);
-        if (!draft.note && draft.status !== "revisit") return;
-        const pieces = [];
-        if (draft.status === "revisit") pieces.push("Flagged for follow-up");
-        if (draft.note) pieces.push(draft.note);
-        grid.append(el("div", { class: "review-item" }, [mdInline("strong", {}, chunk.title), markdownBlock("", pieces.join("\n\n"))]));
-      });
       // The chunks' questions, answered or not; the briefing-wide ones are asked below.
       allQuestions().filter(({ section }) => section !== null).forEach(({ question, key }) => {
         const answer = questionState(key);
@@ -2133,14 +2115,12 @@
           ]),
         ]));
       });
-      if (!grid.children.length) frag.append(el("p", { class: "review-empty", text: "Nothing recorded yet. You can still add an overall response below." }));
+      if (!grid.children.length) frag.append(el("p", { class: "review-empty", text: "Nothing recorded yet." }));
       else frag.append(grid);
       presentation.questions.forEach((question, n) => frag.append(questionBlock(question, "b" + n)));
 
-      const overall = el("textarea", { "aria-label": "Overall response", placeholder: "Optional overall response, question, or correction" });
-      overall.value = state.overallNote || "";
-      overall.addEventListener("input", () => { state.overallNote = overall.value; stamp("overallNote"); save(); });
-      frag.append(disclosure("Overall response", overall, "", "review:overall"));
+      // Anything about the briefing as a whole is a note.
+      frag.append(el("button", { class: "btn add-note", type: "button", text: "Add a note", onclick: () => toggleNotes(true) }));
       frag.append(el("div", { class: "error", id: "submit-error", role: "alert", text: submitErrorText("") }));
       return frag;
     }
@@ -2170,11 +2150,6 @@
 
     async function finish() {
       const payload = {
-        chunks: presentation.chunks.map((chunk, index) => ({
-          title: chunk.title,
-          status: chunkState(index).status || "unmarked",
-          note: (chunkState(index).note || "").trim(),
-        })).filter(item => item.status !== "unmarked" || item.note),
         // Every question, answered or not: an unanswered one goes back as unresolved.
         questions: allQuestions().map(({ question, key, section }) => ({
           question: question.question,
@@ -2184,7 +2159,6 @@
         })),
         annotations: (state.annotations || []).map(a => ({ location: a.location, quote: a.quote, comment: a.comment, ...(a.target ? { target: a.target } : {}) })).filter(a => a.quote && a.comment),
         notes: state.notes.map(n => n.text.trim()).filter(Boolean),
-        overallNote: (state.overallNote || "").trim(),
       };
       try {
         const response = await fetch("/api/" + presentation.token + "/complete", {

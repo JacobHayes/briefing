@@ -45,9 +45,11 @@ call validates the content, registers it, and hands back a link. What the user s
   progress bar with a `Step X of Y` label sits in a slim sticky header.
 - **Context on demand.** The goal, key context, running summary, and open questions live in a
   `Context` panel opened from the header, not permanently on screen.
-- **Quiet by default.** Model-authored content that should be read is shown inline. Per-section
-  response controls stay collapsed behind `Respond`: one free-text response plus a `Flag this
-  section for follow-up` marker.
+- **Quiet by default.** Model-authored content that should be read is shown inline, and the
+  only controls on a chunk are its questions.
+- **Three ways to respond, each with a clear target:** an inline comment (a passage), a note
+  (the whole briefing), or an answer (a question). There is no per-section response box and no
+  follow-up flag: a comment or a note says what should be followed up.
 - **Always-on inline commenting.** Selecting any passage in the reading column or the Context
   panel, by mouse, touch, or keyboard, reveals a `Comment` action; there is no mode to enable.
   Saved comments highlight their passage in place; hovering or focusing a highlight shows a
@@ -60,7 +62,7 @@ call validates the content, registers it, and hands back a link. What the user s
   comments carry structured target metadata, and a Mermaid diagram can be expanded to fill
   most of the screen.
 - **A free-standing Notes panel**, opened from the header on any screen, holds thoughts that
-  belong to no section (inline comments and per-section responses cover those). It docks in
+  belong to no one passage, including anything about the briefing as a whole. It docks in
   the left margin on wide viewports and is a bottom sheet on narrow ones. Notes return to the
   agent next to the other feedback and carry the same weight.
 - **Questions** sit at the bottom of the chunk they depend on (a chunk may carry several;
@@ -71,7 +73,8 @@ call validates the content, registers it, and hands back a link. What the user s
   `Next` (or `Submit`) instead scrolls to an unanswered question whose heading has not yet been
   on screen, so none is skipped unseen.
 - **Navigation** is Back, Next, and an always-available `View all` escape hatch; a final review
-  screen lists everything the user wrote before `Submit`. No timers, no automatic advancement.
+  screen lists everything the user wrote (with an `Add a note` shortcut) before `Submit`. No
+  timers, no automatic advancement.
 - **Drafts persist.** Everything typed, including a half-written note or comment, is saved
   server-side (debounced, revisioned) and cached in the browser, so a refresh, a crash of the
   agent's process, or opening the link on another device continues where the user left off.
@@ -88,7 +91,7 @@ keyboard selection opens the comment composer; `n` opens the Notes panel; Cmd/Ct
 a comment; Escape closes the composer or a pinned note; highlights are focusable and
 Enter/Space pins them.
 
-The page uses plain wording ("Respond", "Submitted") rather than naming the agent, because
+The page uses plain wording ("Submit", "Submitted") rather than naming the agent, because
 the same page serves every harness.
 
 ## Harness surfaces

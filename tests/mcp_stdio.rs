@@ -164,14 +164,14 @@ fn progress_hold_roundtrip() {
         assert!(message["params"]["message"].as_str().unwrap().contains(&url));
         if !submitted {
             submitted = true;
-            submit(&url, json!({"overallNote": "looks right", "questions": [{"question": "Q", "selected": ["A"]}]}));
+            submit(&url, json!({"notes": ["looks right"], "questions": [{"question": "Q", "selected": ["A"]}]}));
         }
     });
     let result = &response["result"];
     assert_eq!(result["isError"], false, "{response}");
     assert_eq!(result["structuredContent"]["status"], "completed");
     let feedback = &result["structuredContent"]["feedback"];
-    assert_eq!(feedback["overallNote"], "looks right");
+    assert_eq!(feedback["notes"][0], "looks right");
     assert_eq!(feedback["questions"][0]["selected"][0], "A");
     assert_eq!(feedback["questions"][0]["status"], "answered");
     assert!(result["content"][0]["text"].as_str().unwrap().contains("1 answered questions"));
@@ -223,7 +223,7 @@ fn elicitation_hold_for_codex() {
             url = Some(text.split_whitespace().find(|w| w.starts_with("http://127.0.0.1:")).unwrap().to_string());
             assert_eq!(message["params"]["mode"], "form");
             elicitation_id = Some(message["id"].clone());
-            submit(url.as_ref().unwrap(), json!({"overallNote": "via codex"}));
+            submit(url.as_ref().unwrap(), json!({"notes": ["via codex"]}));
             // The server cancels the elicitation once the submission lands; respond anyway
             // to make sure a late answer is tolerated.
             this.send(json!({"jsonrpc": "2.0", "id": message["id"], "result": {"action": "accept", "content": {"submitted": true}}}));
@@ -234,7 +234,7 @@ fn elicitation_hold_for_codex() {
     });
     assert!(started.elapsed() < Duration::from_secs(10));
     assert_eq!(response["result"]["structuredContent"]["status"], "completed", "{response}");
-    assert_eq!(response["result"]["structuredContent"]["feedback"]["overallNote"], "via codex");
+    assert_eq!(response["result"]["structuredContent"]["feedback"]["notes"][0], "via codex");
 
     // Declining the elicitation cancels the briefing.
     let opened = client.request(11, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
@@ -271,14 +271,14 @@ fn recover_briefing_in_new_process() {
 
     // Second await blocks; submit through the new link while it waits.
     second.send_request(4, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
-    submit(&url, json!({"overallNote": "recovered"}));
+    submit(&url, json!({"notes": ["recovered"]}));
     let done = second.read_response(4, |_, _| {});
     assert_eq!(done["result"]["structuredContent"]["status"], "completed", "{done}");
-    assert_eq!(done["result"]["structuredContent"]["feedback"]["overallNote"], "recovered");
+    assert_eq!(done["result"]["structuredContent"]["feedback"]["notes"][0], "recovered");
 
     // A third process gets the stored result straight away.
     let mut third = McpClient::spawn(&["mcp"], "mcp-inspector", false);
     let stored = third.request(5, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
     assert_eq!(stored["result"]["structuredContent"]["status"], "completed");
-    assert_eq!(stored["result"]["structuredContent"]["feedback"]["overallNote"], "recovered");
+    assert_eq!(stored["result"]["structuredContent"]["feedback"]["notes"][0], "recovered");
 }

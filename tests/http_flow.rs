@@ -71,7 +71,7 @@ async fn embedded_server_roundtrip() {
     assert_eq!(client.get(format!("{origin}/")).send().await.unwrap().status(), 404);
 
     // Drafts: saved with a revision, stale saves return the newer draft, page payload carries it.
-    let draft = |current: u64, note: &str| json!({"current": current, "state": {"chunks": {"0": {"note": note, "status": ""}}, "questions": {}, "annotations": [], "overallNote": ""}, "disclosures": {}, "updatedAt": 1});
+    let draft = |current: u64, note: &str| json!({"current": current, "state": {"questions": {"c0-1": {"selected": [], "answer": note}}, "annotations": [], "notes": []}, "disclosures": {}, "updatedAt": 1});
     let put = |body: Value| client.put(format!("{origin}/api/{token}/draft")).header("origin", &origin).json(&body);
     assert_eq!(
         client.put(format!("{origin}/api/{token}/draft")).json(&json!({"draft": {}})).send().await.unwrap().status(),
@@ -84,7 +84,7 @@ async fn embedded_server_roundtrip() {
     assert_eq!(stale.status(), 409);
     let stale: Value = stale.json().await.unwrap();
     assert_eq!(stale["revision"], 1);
-    assert_eq!(stale["draft"]["state"]["chunks"]["0"]["note"], "one");
+    assert_eq!(stale["draft"]["state"]["questions"]["c0-1"]["answer"], "one");
     let saved: Value = put(json!({"draft": draft(2, "two")})).send().await.unwrap().json().await.unwrap();
     assert_eq!(saved["revision"], 2);
     let presentation: Value =
@@ -104,13 +104,12 @@ async fn embedded_server_roundtrip() {
         .post(format!("{origin}/api/{token}/complete"))
         .header("origin", &origin)
         .json(&json!({
-            "chunks": [{"title": "One idea at a time", "status": "revisit", "note": "more please"}],
             "questions": [
                 {"question": "Which reading mode should a briefing open in?", "section": "One idea at a time", "selected": ["Paced, one chunk per screen"], "answer": ""},
                 {"question": "How should briefing be triggered by default?", "selected": [], "answer": ""}
             ],
             "annotations": [{"location": "One idea at a time", "quote": "Use Next and Back", "comment": "nice"}],
-            "overallNote": "ship it"
+            "notes": ["ship it"]
         }))
         .send()
         .await
@@ -119,7 +118,7 @@ async fn embedded_server_roundtrip() {
     let outcome = waiter.await.unwrap();
     match &outcome {
         Outcome::Completed { feedback } => {
-            assert_eq!(feedback.overall_note, "ship it");
+            assert_eq!(feedback.notes, vec!["ship it"]);
             assert_eq!(feedback.annotations.len(), 1);
         }
         other => panic!("unexpected {other:?}"),
@@ -158,7 +157,7 @@ async fn briefing_recovered_by_another_process() {
     let first = local(config());
     let created = first.create(demo(), Some("first".into())).await.unwrap();
     let (origin1, token) = created.url.rsplit_once("/briefing/").unwrap();
-    let draft = json!({"current": 1, "state": {"chunks": {}, "questions": {}, "annotations": [], "overallNote": ""}, "updatedAt": 7});
+    let draft = json!({"current": 1, "state": {"questions": {}, "annotations": [], "notes": []}, "updatedAt": 7});
     let saved = client
         .put(format!("{origin1}/api/{token}/draft"))
         .header("origin", origin1)
@@ -200,13 +199,13 @@ async fn briefing_recovered_by_another_process() {
     let ok = client
         .post(format!("{origin2}/api/{token}/complete"))
         .header("origin", &origin2)
-        .json(&json!({"overallNote": "recovered"}))
+        .json(&json!({"notes": ["recovered"]}))
         .send()
         .await
         .unwrap();
     assert_eq!(ok.status(), 200);
     match waiter.await.unwrap() {
-        Outcome::Completed { feedback } => assert_eq!(feedback.overall_note, "recovered"),
+        Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["recovered"]),
         other => panic!("unexpected {other:?}"),
     }
     // And a fourth, brand-new process gets the stored result immediately, no server needed.
@@ -290,7 +289,7 @@ async fn hub_agent_api_and_dashboard() {
         client.get(format!("{origin}/agent/briefings/{id}/wait")).send().await.unwrap().json().await.unwrap();
     assert_eq!(done["status"], "cancelled");
     assert_eq!(done["briefingId"], id);
-    assert_eq!(done["feedback"]["overallNote"], "");
+    assert_eq!(done["feedback"]["notes"], json!([]));
     assert!(done.get("result").is_none());
 
     let listed: Value = client.get(format!("{origin}/agent/briefings")).send().await.unwrap().json().await.unwrap();

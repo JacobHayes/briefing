@@ -515,7 +515,7 @@ mod tests {
             let response = reqwest::Client::new()
                 .post(format!("{submit_origin}/api/{token}/complete"))
                 .header("origin", &submit_origin)
-                .json(&json!({"overallNote": "retried"}))
+                .json(&json!({"notes": ["retried"]}))
                 .send()
                 .await
                 .unwrap();
@@ -527,7 +527,7 @@ mod tests {
             .await
             .unwrap();
         match outcome {
-            Outcome::Completed { feedback } => assert_eq!(feedback.overall_note, "retried"),
+            Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["retried"]),
             other => panic!("unexpected {other:?}"),
         }
         submitter.await.unwrap();

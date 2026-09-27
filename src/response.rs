@@ -14,30 +14,6 @@ pub const MAX_ANNOTATION_TARGET_FIELD: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum ChunkStatus {
-    /// Flagged for follow-up.
-    Revisit,
-    Unmarked,
-}
-
-/// One section: the user's free note and whether they flagged it for follow-up.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ChunkResponse {
-    pub title: String,
-    pub status: ChunkStatus,
-    pub note: String,
-}
-
-impl ChunkResponse {
-    /// The user wrote something or flagged the section.
-    pub fn is_substantive(&self) -> bool {
-        self.status == ChunkStatus::Revisit || !self.note.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
 pub enum QuestionStatus {
     /// The user picked at least one option or wrote an answer.
     Answered,
@@ -93,13 +69,11 @@ pub struct Annotation {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BriefingResponse {
-    pub chunks: Vec<ChunkResponse>,
     pub questions: Vec<QuestionResponse>,
     pub annotations: Vec<Annotation>,
     /// Free-standing notes written in the Notes panel; not tied to any section.
     #[serde(default)]
     pub notes: Vec<String>,
-    pub overall_note: String,
 }
 
 /// How a wait on a briefing ended. This is the one shape every wire carries under
@@ -182,19 +156,6 @@ pub fn parse_browser_result(value: &Value) -> BriefingResponse {
         }
     };
 
-    let chunks = rows("chunks")
-        .into_iter()
-        .filter_map(|item| {
-            let row = item.as_object()?;
-            let title = non_empty(trimmed(row.get("title"), 500))?;
-            let status = match row.get("status").and_then(Value::as_str) {
-                Some("revisit") => ChunkStatus::Revisit,
-                _ => ChunkStatus::Unmarked,
-            };
-            Some(ChunkResponse { title, status, note: trimmed(row.get("note"), MAX_USER_TEXT) })
-        })
-        .collect();
-
     let questions = rows("questions")
         .into_iter()
         .filter_map(|item| {
@@ -226,11 +187,9 @@ pub fn parse_browser_result(value: &Value) -> BriefingResponse {
         .collect();
 
     BriefingResponse {
-        chunks,
         questions,
         annotations: parse_annotations(input.get("annotations")),
         notes: rows("notes").into_iter().filter_map(|note| non_empty(trimmed(Some(note), MAX_USER_TEXT))).collect(),
-        overall_note: trimmed(input.get("overallNote"), MAX_USER_TEXT),
     }
 }
 
@@ -266,7 +225,6 @@ fn format_target(target: &AnnotationTarget) -> Option<String> {
 pub struct FeedbackCounts {
     pub answered: usize,
     pub unresolved: usize,
-    pub sections: usize,
     pub comments: usize,
     pub notes: usize,
 }
@@ -275,8 +233,8 @@ impl std::fmt::Display for FeedbackCounts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} answered questions, {} unresolved, {} section responses, {} comments, {} notes",
-            self.answered, self.unresolved, self.sections, self.comments, self.notes
+            "{} answered questions, {} unresolved, {} comments, {} notes",
+            self.answered, self.unresolved, self.comments, self.notes
         )
     }
 }
@@ -286,7 +244,6 @@ impl BriefingResponse {
         FeedbackCounts {
             answered: self.questions.iter().filter(|q| q.status == QuestionStatus::Answered).count(),
             unresolved: self.questions.iter().filter(|q| q.status == QuestionStatus::Unresolved).count(),
-            sections: self.chunks.iter().filter(|c| c.is_substantive()).count(),
             comments: self.annotations.len(),
             notes: self.notes.len(),
         }
@@ -295,16 +252,6 @@ impl BriefingResponse {
     /// The per-item lines shown to the model (no header).
     pub fn detail_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
-        let revisit: Vec<&str> =
-            self.chunks.iter().filter(|c| c.status == ChunkStatus::Revisit).map(|c| c.title.as_str()).collect();
-        if !revisit.is_empty() {
-            lines.push(format!("Sections flagged for follow-up: {}", revisit.join(", ")));
-        }
-        for chunk in &self.chunks {
-            if !chunk.note.is_empty() {
-                lines.push(format!("Note - {}: {}", chunk.title, chunk.note));
-            }
-        }
         for question in &self.questions {
             let place = question.section.as_deref().unwrap_or("whole briefing");
             let mut entry = format!("Question ({place}): {}", question.question);
@@ -333,9 +280,6 @@ impl BriefingResponse {
         }
         for note in &self.notes {
             lines.push(format!("Note: {note}"));
-        }
-        if !self.overall_note.is_empty() {
-            lines.push(format!("Overall response: {}", self.overall_note));
         }
         lines
     }
@@ -372,11 +316,6 @@ mod tests {
     #[test]
     fn parses_and_clamps_browser_payload() {
         let result = parse_browser_result(&json!({
-            "chunks": [
-                {"title": "First", "status": "revisit", "note": "  more "},
-                {"title": "", "status": "understood"},
-                {"title": "Second", "status": "bogus"}
-            ],
             "questions": [
                 {"question": "Q1", "section": "First", "selected": ["A", " ", "B"], "answer": "", "status": "unresolved"},
                 {"question": "Q2", "selected": [], "answer": "  my own  "},
@@ -386,13 +325,8 @@ mod tests {
                 {"location": "First", "quote": "q", "comment": "c", "target": {"contentType": "mermaid", "targetId": "n1", "bogus": "x"}},
                 {"location": "x", "quote": "", "comment": "no quote"}
             ],
-            "notes": ["  a thought ", "", 7],
-            "overallNote": "done"
+            "notes": ["  a thought ", "", 7]
         }));
-        assert_eq!(result.chunks.len(), 2);
-        assert_eq!(result.chunks[0].status, ChunkStatus::Revisit);
-        assert_eq!(result.chunks[0].note, "more");
-        assert_eq!(result.chunks[1].status, ChunkStatus::Unmarked);
         // Status comes from what was actually answered, whatever the page claimed.
         assert_eq!(result.questions[0].selected, vec!["A", "B"]);
         assert_eq!(result.questions[0].status, QuestionStatus::Answered);
@@ -404,21 +338,20 @@ mod tests {
         let target = result.annotations[0].target.as_ref().unwrap();
         assert_eq!(target.content_type.as_deref(), Some("mermaid"));
         assert_eq!(result.notes, vec!["a thought"]);
-        assert_eq!(result.counts(), FeedbackCounts { answered: 2, unresolved: 1, sections: 1, comments: 1, notes: 1 });
+        assert_eq!(result.counts(), FeedbackCounts { answered: 2, unresolved: 1, comments: 1, notes: 1 });
 
         let text = Outcome::Completed { feedback: result }.format_text();
-        assert!(text.contains("Sections flagged for follow-up: First"));
         assert!(text.contains("Target: content=mermaid, id=n1"));
         assert!(text.contains("> q\nComment: c"));
         assert!(text.contains("Question (First): Q1\nSelected: A, B"));
         assert!(text.contains("Question (whole briefing): Q3\nUnresolved"));
-        assert!(text.contains("\nNote: a thought\nOverall response: done"));
+        assert!(text.ends_with("\nNote: a thought"));
     }
 
     #[test]
     fn empty_and_cancelled_results() {
         let empty = parse_browser_result(&json!({}));
-        assert_eq!(empty.counts(), FeedbackCounts { answered: 0, unresolved: 0, sections: 0, comments: 0, notes: 0 });
+        assert_eq!(empty.counts(), FeedbackCounts { answered: 0, unresolved: 0, comments: 0, notes: 0 });
         assert!(Outcome::Completed { feedback: empty }.format_text().contains("returned no notes"));
         assert_eq!(parse_browser_result(&json!(null)), BriefingResponse::default());
         assert!(Outcome::cancelled().format_text().contains("cancelled"));

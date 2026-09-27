@@ -59,8 +59,7 @@ fn result_guidance() -> String {
     "After the feedback arrives, respond only to it; do not repeat the presentation as a chat message. Treat \
      free-standing notes as first-class feedback, act on question answers, and treat an `unresolved` question as \
      still open, never as approval: settle any prerequisite it depends on before asking again, and don't re-ask what \
-     the user's comments already answered. Address inline comments using their location and quote, and follow up on \
-     chunks marked status `revisit`."
+     the user's comments already answered. Address inline comments using their location and quote."
         .into()
 }
 
@@ -99,7 +98,7 @@ pub fn mcp_guidance() -> String {
     let common = full_guidance(TOOL_SURFACE).join(" ");
     format!(
         "Briefing presents complex information in a paced browser interface and returns the user's notes, inline \
-         comments, question answers, and follow-up markers; free-standing notes from the Notes panel count as much as any \
+         comments, and question answers; free-standing notes from the Notes panel count as much as any \
          other feedback.\n\n{common}\n\nResults are returned as structuredContent. brief_user returns immediately with \
          the briefing link and a briefingId; put that exact link in your reply so the user can open it (they may be on \
          a different machine from the agent), then call await_briefing with the briefingId; it blocks until they submit \
@@ -167,8 +166,7 @@ briefing await --help
 - Build a presentation JSON file that matches `briefing schema`.
 - Run `briefing present <file> --json` or pipe JSON to `briefing present --json`.
 - When feedback returns, respond only to that feedback: act on question answers (an
-  `unresolved` one is still open, not approval), address inline comments, follow up on revisit
-  flags, and act on notes.
+  `unresolved` one is still open, not approval), address inline comments, and act on notes.
 "#
     )
 }

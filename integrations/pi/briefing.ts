@@ -40,11 +40,9 @@ type ReadyEvent = {
 };
 
 type Feedback = {
-  chunks: Array<{ title: string; status: string; note: string }>;
   questions: Array<{ question: string; section?: string; selected: string[]; answer: string; status: "answered" | "unresolved" }>;
   annotations: Array<{ location: string; quote: string; comment: string; target?: Record<string, string> }>;
   notes: string[];
-  overallNote: string;
 };
 
 /** What `briefing present|demo|await --json` prints on stdout. */
@@ -97,8 +95,7 @@ export function pendingBriefingId(entries: SessionEntry[]): string | undefined {
 function summary(feedback: Feedback): string {
   const answered = feedback.questions.filter((q) => q.status === "answered").length;
   const unresolved = feedback.questions.length - answered;
-  const sections = feedback.chunks.filter((c) => c.note || c.status === "revisit").length;
-  return `${answered} answered questions, ${unresolved} unresolved, ${sections} section responses, ${feedback.annotations.length} inline comments, ${feedback.notes.length} notes`;
+  return `${answered} answered questions, ${unresolved} unresolved, ${feedback.annotations.length} inline comments, ${feedback.notes.length} notes`;
 }
 
 export default function briefingExtension(pi: ExtensionAPI) {
@@ -347,7 +344,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       name: "brief_user",
       label: "Brief the user",
       description:
-        "Present complex information in a paced browser briefing and return the user's notes, inline comments, question answers, and follow-up markers. Blocks until the user submits.",
+        "Present complex information in a paced browser briefing and return the user's notes, inline comments, and question answers. Blocks until the user submits.",
       promptSnippet: "Present complex information or contextual decisions as a paced browser briefing",
       // Prompt guidance comes from the binary (`briefing guidance pi`) so it matches the CLI and MCP wrappers.
       promptGuidelines: piGuidance,
