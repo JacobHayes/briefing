@@ -1,0 +1,11 @@
+{
+  "name": "briefing-browser-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 page.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "*"
+  }
+}

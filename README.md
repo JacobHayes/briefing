@@ -275,8 +275,8 @@ Vega, Vega-Lite, vega-embed). `build.rs` installs the versions pinned in
 be available; offline builds can point `BRIEFING_VENDOR_DIR` at a directory holding the
 seven files.
 
-CI (`.rwx/ci.yml`) runs the non-mutating `mise run check` and cross-builds every
-push; releases (`.rwx/release.yml`) are immutable calver tags `vYYYY.MM.DD.N`, published
+CI (`.rwx/ci.yml`) runs the non-mutating `mise run check` (which includes the page's browser
+regression tests in `tests/browser`, Playwright + Chromium) and cross-builds every push; releases (`.rwx/release.yml`) are immutable calver tags `vYYYY.MM.DD.N`, published
 by every push to `main` once its CI passes. The release build sets `BRIEFING_VERSION` to the tag, which
 `build.rs` bakes into `briefing --version`; other
 builds report the Cargo version with a `-dev` suffix. The workflow files

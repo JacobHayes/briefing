@@ -25,8 +25,21 @@ fi
 npm run check
 """
 
+[tasks."browser:check"]
+description = "run the page's browser regression tests (Playwright + Chromium) against the debug build"
+dir = "tests/browser"
+run = """
+set -eu
+if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+  npm ci --no-audit --no-fund
+fi
+npx playwright install chromium
+cargo build --locked --quiet
+npm test
+"""
+
 [tasks.check]
-description = "verify the full project: format, generated skill, clippy, tests, and Pi extension"
+description = "verify the full project: format, generated skill, clippy, tests, Pi extension, and browser tests"
 run = """
 set -eu
 cargo fmt --all -- --check
@@ -37,6 +50,7 @@ diff -u skills/briefing/SKILL.md "$generated_skill"
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 mise run pi:check
+mise run browser:check
 """
 
 [tasks.fix]

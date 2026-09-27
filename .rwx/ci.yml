@@ -32,8 +32,21 @@ tasks:
     use: code
     call: ${{ run.dir }}/packages/toolchain.yml
 
+  # Chromium and its system libraries for the page's browser tests (run by `mise run check`).
+  - key: browser-deps
+    use: toolchain.tools
+    run: |
+      cd tests/browser
+      npm ci --no-audit --no-fund
+      npx playwright install --with-deps chromium
+    filter:
+      - mise.toml
+      - mise.lock
+      - tests/browser/package.json
+      - tests/browser/package-lock.json
+
   - key: check
-    use: toolchain
+    use: [toolchain, browser-deps]
     run: mise run check
     filter:
       - Cargo.toml
