@@ -168,8 +168,12 @@
     .flag { display: flex; align-items: center; gap: 9px; margin-top: 12px; color: var(--muted); cursor: pointer; }
     .flag input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
 
-    /* Decisions */
-    .inline-decision { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); }
+    /* Questions */
+    .question { margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); scroll-margin: 96px 0 120px; transition: background-color .4s ease; border-radius: 0 0 12px 12px; }
+    .question.attention { background: color-mix(in srgb, var(--accent-soft) 70%, transparent); box-shadow: 0 0 0 8px color-mix(in srgb, var(--accent-soft) 70%, transparent); }
+    .question-answer { margin-top: 14px; }
+    .question-hint { margin: 8px 0 0; color: var(--muted); font-size: .82rem; }
+    .answer-status { display: inline-block; margin-left: 8px; color: var(--muted); font-size: .72rem; letter-spacing: .05em; text-transform: uppercase; font-weight: 650; }
     .options { margin: 22px 0 0; display: grid; gap: 10px; }
     .option { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 15px 16px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); cursor: pointer; }
     .option:hover { border-color: var(--accent); }
@@ -319,7 +323,7 @@
     let composer = null;
     let composerRect = null;
     let composerReturnFocus = null;
-    let state = { chunks: {}, decisions: {}, annotations: [], notes: [], overallNote: "" };
+    let state = { chunks: {}, questions: {}, annotations: [], notes: [], overallNote: "" };
     let disclosureState = {};
     const NOTES_OPEN_KEY = "briefing:notesOpen";
     let notesOpen = (() => { try { return localStorage.getItem(NOTES_OPEN_KEY) === "1"; } catch { return false; } })();
@@ -865,7 +869,11 @@
       }
       if (!state || typeof state !== "object") state = {};
       if (!state.chunks || typeof state.chunks !== "object") state.chunks = {};
-      if (!state.decisions || typeof state.decisions !== "object") state.decisions = {};
+      if (!state.questions || typeof state.questions !== "object") state.questions = {};
+      for (const answer of Object.values(state.questions)) {
+        if (!Array.isArray(answer.selected)) answer.selected = [];
+        if (typeof answer.answer !== "string") answer.answer = "";
+      }
       if (!Array.isArray(state.annotations)) state.annotations = [];
       if (!Array.isArray(state.notes)) state.notes = [];
       state.notes = state.notes.filter(n => n && typeof n.text === "string").map(n => ({ id: n.id || uid(), text: n.text, at: n.at || 0 }));
@@ -899,7 +907,7 @@
       }
       return [...byId.values()];
     }
-    // Everything else is a stamped field (a section response, a decision, the Notes box, an
+    // Everything else is a stamped field (a section response, a question's answer, the Notes box, an
     // open comment box...): the side that changed it last wins.
     function mergeDrafts(ours, theirs) {
       const mine = ours.state || {};
@@ -996,20 +1004,16 @@
     document.addEventListener("visibilitychange", () => { if (document.hidden) void syncDraft(true); else void refreshFromServer(); });
     window.addEventListener("focus", () => { void refreshFromServer(); });
     window.addEventListener("pagehide", () => { if (syncTimer) void syncDraft(true); });
-    const chunkState = index => state.chunks[index] ||= { note: "", checkpoint: "", status: "" };
-    // Decision drafts are keyed by "<index>" for top-level decisions and "chunk:<index>" for inline ones.
-    const decisionState = key => state.decisions[key] ||= { selected: "", note: "" };
-    // Every decision in reading order: inline ones with their chunk, then the top-level ones.
-    function allDecisions() {
-      const inline = presentation.chunks.flatMap((chunk, index) => chunk.decision ? [{ decision: chunk.decision, key: "chunk:" + index, section: chunk.title }] : []);
-      const standalone = presentation.decisions.map((decision, index) => ({ decision, key: index, section: null }));
-      return [...inline, ...standalone];
-    }
-    function screenDecision(screen) {
-      if (!screen) return null;
-      if (screen.type === "decision") return { decision: screen.data, key: screen.index };
-      if (screen.data.decision) return { decision: screen.data.decision, key: "chunk:" + screen.index };
-      return null;
+    const chunkState = index => state.chunks[index] ||= { note: "", status: "" };
+    // Answers are keyed "c<chunk>-<n>" for a chunk's questions and "b<n>" for the briefing-wide
+    // ones (no dots: the key is also a merge path).
+    const questionState = key => state.questions[key] ||= { selected: [], answer: "" };
+    const isAnswered = key => { const answer = state.questions[key]; return Boolean(answer && (answer.selected.length || answer.answer.trim())); };
+    // Every question in reading order: each chunk's, then the briefing-wide ones.
+    function allQuestions() {
+      const inChunks = presentation.chunks.flatMap((chunk, index) => (chunk.questions || []).map((question, n) => ({ question, key: "c" + index + "-" + n, section: chunk.title })));
+      const briefingWide = presentation.questions.map((question, n) => ({ question, key: "b" + n, section: null }));
+      return [...inChunks, ...briefingWide];
     }
     const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
     const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -1804,14 +1808,12 @@
     function chunkScreen(chunk, index) {
       const draft = chunkState(index);
       const frag = el("div", {}, el("div", { class: "reading", "data-section": "Section: " + chunk.title }, chunkBody(chunk)));
-      if (chunk.decision) frag.append(el("div", { class: "inline-decision" }, [decisionIntro(chunk.decision, "h2"), decisionBlock(chunk.decision, "chunk:" + index)]));
+      (chunk.questions || []).forEach((question, n) => frag.append(questionBlock(question, "c" + index + "-" + n)));
 
       const respondBody = el("div", { class: "disclose-body" });
-      const usesCheckpoint = Boolean(chunk.checkpoint);
-      if (usesCheckpoint) respondBody.append(markdownBlock("prompt", chunk.checkpoint));
-      const field = el("textarea", { "aria-label": usesCheckpoint ? "Response to checkpoint" : "Note", placeholder: usesCheckpoint ? "Optional — a short answer or reflection" : "Optional note or question" });
-      field.value = usesCheckpoint ? (draft.checkpoint || "") : (draft.note || "");
-      field.addEventListener("input", () => { if (usesCheckpoint) draft.checkpoint = field.value; else draft.note = field.value; stamp("chunks." + index); save(); });
+      const field = el("textarea", { "aria-label": "Note", placeholder: "Optional note or question" });
+      field.value = draft.note || "";
+      field.addEventListener("input", () => { draft.note = field.value; stamp("chunks." + index); save(); });
       respondBody.append(field);
 
       const flag = el("input", { type: "checkbox" });
@@ -1819,13 +1821,13 @@
       flag.addEventListener("change", () => { draft.status = flag.checked ? "revisit" : ""; stamp("chunks." + index); save(); });
       respondBody.append(el("label", { class: "flag" }, [flag, el("span", { text: "Flag this section for follow-up" })]));
 
-      frag.append(disclosure("Respond", respondBody, "respond", "chunk:" + index + ":respond", usesCheckpoint));
+      frag.append(disclosure("Respond", respondBody, "respond", "chunk:" + index + ":respond"));
       return frag;
     }
 
-    function decisionIntro(decision, heading = "h1") {
-      const intro = el("div", { class: "reading", "data-section": "Decision: " + decision.question }, [el("span", { class: "tag", text: "Decision" }), mdInline(heading, { class: "title", tabindex: "-1" }, decision.question)]);
-      if (decision.context) intro.append(markdownBlock("purpose", decision.context));
+    function questionIntro(question) {
+      const intro = el("div", { class: "reading", "data-section": "Question: " + question.question }, [el("span", { class: "tag", text: "Question" }), mdInline("h2", { class: "title", tabindex: "-1" }, question.question)]);
+      if (question.context) intro.append(markdownBlock("purpose", question.context));
       return intro;
     }
 
@@ -1838,31 +1840,66 @@
       return body;
     }
 
-    // Options, guidance, and the validation error for one decision (at most one per screen).
-    function decisionBlock(decision, key) {
-      const draft = decisionState(key);
-      const frag = el("div", {});
-      const slug = String(key).replace(/[^a-z0-9]+/gi, "-");
-      const options = el("div", { class: "options" });
-      decision.options.forEach((option, optionIndex) => {
-        const id = "decision-" + slug + "-" + optionIndex;
-        const radio = el("input", { id, type: "radio", name: "decision-" + slug, value: option.label });
-        radio.checked = draft.selected === option.label;
-        radio.addEventListener("change", () => { draft.selected = option.label; stamp("decisions." + key); save(); document.getElementById("decision-error")?.classList.remove("visible"); });
-        options.append(el("label", { class: "option", for: id }, [radio, optionBody(option)]));
+    // One question: optional options (clearable; several at once when multiSelect) and an
+    // always-visible box for the user's own answer. Nothing here is required.
+    function questionBlock(question, key) {
+      const answer = questionState(key);
+      const options = question.options || [];
+      const multi = question.multiSelect === true;
+      const block = el("section", { class: "question", "data-question": key }, questionIntro(question));
+      const changed = () => { stamp("questions." + key); save(); };
+      if (options.length) {
+        const list = el("div", { class: "options", role: "group", "aria-label": question.question });
+        const boxes = options.map((option, n) => {
+          const id = "question-" + key + "-" + n;
+          const box = el("input", { id, type: "checkbox", value: option.label });
+          box.checked = answer.selected.includes(option.label);
+          box.addEventListener("change", () => {
+            if (multi) answer.selected = boxes.filter(b => b.checked).map(b => b.value);
+            else {
+              // One choice at a time, and a second click on the chosen one clears it.
+              boxes.forEach(b => { if (b !== box) b.checked = false; });
+              answer.selected = box.checked ? [option.label] : [];
+            }
+            changed();
+          });
+          list.append(el("label", { class: "option", for: id }, [box, optionBody(option)]));
+          return box;
+        });
+        block.append(list);
+      }
+      const field = el("textarea", {
+        class: "question-answer", "aria-label": "Your answer",
+        placeholder: options.length ? "Or in your own words: another choice, a correction, or a question first" : "Your answer",
       });
-      frag.append(options);
-
-      const note = el("textarea", { "aria-label": "Guidance for this decision", placeholder: "Constraints, concerns, or an alternative" });
-      note.value = draft.note || "";
-      note.addEventListener("input", () => { draft.note = note.value; stamp("decisions." + key); save(); });
-      frag.append(disclosure("Add guidance", note, "", "decision:" + key + ":guidance"));
-      frag.append(el("div", { class: "error", id: "decision-error", role: "alert", text: "Choose an option before continuing, or add guidance instead." }));
-      return frag;
+      field.value = answer.answer;
+      field.addEventListener("input", () => { answer.answer = field.value; changed(); });
+      block.append(field);
+      block.append(el("p", { class: "question-hint", text: (options.length ? (multi ? "Pick any that apply, click again to clear. " : "Pick one, click again to clear. ") : "") + "Optional: a question you skip goes back as unresolved." }));
+      return block;
     }
 
-    function decisionScreen(decision, index) {
-      return el("div", {}, [decisionIntro(decision), decisionBlock(decision, index)]);
+    // --- Make sure every question was seen before moving on ---
+    // A question counts as seen once its heading has been fully on screen. Next (or Submit)
+    // first scrolls to an unanswered question that has not been seen, and only then moves on.
+    const seenQuestions = new Set();
+    let questionObserver = null;
+    function watchQuestions() {
+      questionObserver?.disconnect();
+      if (!("IntersectionObserver" in window)) return;
+      questionObserver = new IntersectionObserver(entries => {
+        for (const entry of entries) if (entry.isIntersecting) seenQuestions.add(entry.target.closest("[data-question]").dataset.question);
+      }, { threshold: 1 });
+      document.querySelectorAll("#app [data-question] h2").forEach(heading => questionObserver.observe(heading));
+    }
+    function revealUnseenQuestion() {
+      const pending = [...document.querySelectorAll("#app main [data-question]")].find(node => !isAnswered(node.dataset.question) && !seenQuestions.has(node.dataset.question));
+      if (!pending) return false;
+      seenQuestions.add(pending.dataset.question);
+      pending.scrollIntoView({ block: "start", behavior: "smooth" });
+      pending.classList.add("attention");
+      setTimeout(() => pending.classList.remove("attention"), 1600);
+      return true;
     }
 
     // --- Notes panel: free-standing notes, not tied to any section ---
@@ -2054,22 +2091,23 @@
       const frag = el("div", {}, [
         el("span", { class: "tag", text: "Review" }),
         mdInline("h1", { class: "title", tabindex: "-1" }, presentation.completionPrompt || "Submit"),
-        el("p", { class: "purpose", text: "Only what is listed here is returned — your answers, decisions, comments, notes, and anything flagged for follow-up." }),
+        el("p", { class: "purpose", text: "Only what is listed here is returned — your answers, comments, notes, and anything flagged for follow-up. Questions you skipped go back as unresolved." }),
       ]);
       const grid = el("div", { class: "review" });
       presentation.chunks.forEach((chunk, index) => {
         const draft = chunkState(index);
-        if (!draft.note && !draft.checkpoint && draft.status !== "revisit") return;
+        if (!draft.note && draft.status !== "revisit") return;
         const pieces = [];
         if (draft.status === "revisit") pieces.push("Flagged for follow-up");
-        if (draft.checkpoint) pieces.push(draft.checkpoint);
         if (draft.note) pieces.push(draft.note);
         grid.append(el("div", { class: "review-item" }, [mdInline("strong", {}, chunk.title), markdownBlock("", pieces.join("\n\n"))]));
       });
-      allDecisions().forEach(({ decision, key }) => {
-        const draft = decisionState(key);
-        if (!draft.selected && !draft.note) return;
-        grid.append(el("div", { class: "review-item" }, [mdInline("strong", {}, decision.question), markdownBlock("", (draft.selected || "No option selected") + (draft.note ? "\n\n" + draft.note : ""))]));
+      // The chunks' questions, answered or not; the briefing-wide ones are asked below.
+      allQuestions().filter(({ section }) => section !== null).forEach(({ question, key }) => {
+        const answer = questionState(key);
+        const text = [answer.selected.join(", "), answer.answer.trim()].filter(Boolean).join("\n\n");
+        const heading = el("strong", {}, [...inlineMarkdown(question.question), isAnswered(key) ? null : el("span", { class: "answer-status", text: "Unresolved" })]);
+        grid.append(el("div", { class: "review-item" }, [heading, text ? markdownBlock("", text) : null]));
       });
       state.annotations.forEach(a => {
         const children = [
@@ -2097,6 +2135,7 @@
       });
       if (!grid.children.length) frag.append(el("p", { class: "review-empty", text: "Nothing recorded yet. You can still add an overall response below." }));
       else frag.append(grid);
+      presentation.questions.forEach((question, n) => frag.append(questionBlock(question, "b" + n)));
 
       const overall = el("textarea", { "aria-label": "Overall response", placeholder: "Optional overall response, question, or correction" });
       overall.value = state.overallNote || "";
@@ -2115,27 +2154,17 @@
       presentation.chunks.forEach((chunk, i) => {
         const item = el("div", { class: "overview-item", "data-section": "Section: " + chunk.title }, chunkBody(chunk));
         item.querySelectorAll("details.disclose").forEach(d => d.open = true);
-        if (chunk.decision) item.append(el("div", { class: "inline-decision" }, [decisionIntro(chunk.decision, "h2"), overviewOptions(chunk.decision)]));
+        (chunk.questions || []).forEach(question => item.append(overviewQuestion(question)));
         main.append(item);
       });
-      presentation.decisions.forEach((decision, i) => {
-        main.append(el("div", { class: "overview-item" }, [decisionIntro(decision), overviewOptions(decision)]));
-      });
+      presentation.questions.forEach(question => main.append(el("div", { class: "overview-item" }, overviewQuestion(question))));
       return main;
     }
-    const overviewOptions = decision => el("div", { class: "options" }, decision.options.map(option => el("div", { class: "option" }, optionBody(option))));
-
-    function currentScreenValid() {
-      const pending = screenDecision(screens[current]);
-      if (!pending) return true;
-      const draft = decisionState(pending.key);
-      if (pending.decision.required === false || draft.selected || draft.note.trim()) return true;
-      const error = document.getElementById("decision-error");
-      error?.classList.add("visible");
-      // "end" plus the scroll margin keeps it clear of the sticky nav.
-      error?.scrollIntoView({ block: "end" });
-      return false;
-    }
+    // Read-only: questions are answered in the paced view.
+    const overviewQuestion = question => el("div", { class: "question" }, [
+      questionIntro(question),
+      (question.options || []).length ? el("div", { class: "options" }, question.options.map(option => el("div", { class: "option" }, optionBody(option)))) : null,
+    ]);
 
     const submitErrorText = detail => "Could not submit this briefing" + detail + ". Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to reopen this briefing.";
 
@@ -2144,14 +2173,15 @@
         chunks: presentation.chunks.map((chunk, index) => ({
           title: chunk.title,
           status: chunkState(index).status || "unmarked",
-          checkpoint: chunkState(index).checkpoint.trim(),
-          note: chunkState(index).note.trim(),
-        })).filter(item => item.status !== "unmarked" || item.checkpoint || item.note),
-        decisions: allDecisions().map(({ decision, key }) => ({
-          question: decision.question,
-          selected: decisionState(key).selected,
-          note: decisionState(key).note.trim(),
-        })).filter(item => item.selected || item.note),
+          note: (chunkState(index).note || "").trim(),
+        })).filter(item => item.status !== "unmarked" || item.note),
+        // Every question, answered or not: an unanswered one goes back as unresolved.
+        questions: allQuestions().map(({ question, key, section }) => ({
+          question: question.question,
+          ...(section ? { section } : {}),
+          selected: questionState(key).selected,
+          answer: questionState(key).answer.trim(),
+        })),
         annotations: (state.annotations || []).map(a => ({ location: a.location, quote: a.quote, comment: a.comment, ...(a.target ? { target: a.target } : {}) })).filter(a => a.quote && a.comment),
         notes: state.notes.map(n => n.text.trim()).filter(Boolean),
         overallNote: (state.overallNote || "").trim(),
@@ -2228,6 +2258,7 @@
       app.replaceChildren(frag);
       layoutNotes();
       decorateHighlights();
+      watchQuestions();
       if (top) window.scrollTo(0, 0);
       else window.scrollTo(scrollX, scrollY);
       applyFocus();
@@ -2239,13 +2270,13 @@
       if (isReview) main.append(reviewScreen());
       else {
         const screen = screens[current];
-        main.append(screen.type === "chunk" ? chunkScreen(screen.data, screen.index) : decisionScreen(screen.data, screen.index));
+        main.append(chunkScreen(screen.data, screen.index));
       }
 
       const back = el("button", { class: "btn", text: "Back", disabled: current === 0, onclick: () => { current = Math.max(0, current - 1); save(); render({ top: true }); } });
       const next = el("button", { class: "btn primary", text: isReview ? "Submit" : current === screens.length - 1 ? "Review" : "Next", onclick: () => {
+        if (revealUnseenQuestion()) return;
         if (isReview) { finish(); return; }
-        if (!currentScreenValid()) return;
         current = Math.min(screens.length, current + 1); save(); render({ top: true });
       }});
       main.append(el("nav", { class: "nav", "aria-label": "Briefing navigation" }, [
@@ -2260,7 +2291,7 @@
     document.addEventListener("keydown", event => {
       if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement || overview || submitted || event.shiftKey || document.querySelector("dialog[open]")) return;
       if (event.key === "ArrowLeft" && current > 0) { current--; save(); render({ top: true }); }
-      if (event.key === "ArrowRight" && current < screens.length && currentScreenValid()) { current++; save(); render({ top: true }); }
+      if (event.key === "ArrowRight" && current < screens.length && !revealUnseenQuestion()) { current++; save(); render({ top: true }); }
     });
 
     (async () => {
@@ -2270,7 +2301,7 @@
         if (!response.ok) throw new Error("Presentation unavailable");
         presentation = await response.json();
         presentation.token = token;
-        presentation.decisions ||= [];
+        presentation.questions ||= [];
         document.title = presentation.title + " - Briefing";
         if (presentation.status !== "active") {
           submitted = true;
@@ -2279,7 +2310,6 @@
         }
         screens = [
           ...presentation.chunks.map((data, index) => ({ type: "chunk", data, index })),
-          ...presentation.decisions.map((data, index) => ({ type: "decision", data, index })),
         ];
         restore();
         if (state.noteEditDraft && state.notes.some(n => n.id === state.noteEditDraft.id)) noteEditing = state.noteEditDraft.id;

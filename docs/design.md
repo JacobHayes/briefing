@@ -13,7 +13,7 @@ away, and gathers useful feedback before the agent continues. It is for:
 - substantial research with multiple dependent findings;
 - explanations where later concepts depend on earlier context;
 - material that benefits from an explicit Context panel as a stable memory aid;
-- decisions that need context before the user can choose;
+- questions and decisions that need context before the user can answer;
 - complex agent output where annotation and structured feedback beat a chat reply.
 
 It is not the default renderer for every response. Short or simple answers stay in chat, and
@@ -46,9 +46,8 @@ call validates the content, registers it, and hands back a link. What the user s
 - **Context on demand.** The goal, key context, running summary, and open questions live in a
   `Context` panel opened from the header, not permanently on screen.
 - **Quiet by default.** Model-authored content that should be read is shown inline. Per-section
-  response controls stay collapsed behind `Respond`, except when the chunk carries a
-  checkpoint question, in which case the response field opens by default. Each section has at
-  most one free-text response plus a `Flag this section for follow-up` marker.
+  response controls stay collapsed behind `Respond`: one free-text response plus a `Flag this
+  section for follow-up` marker.
 - **Always-on inline commenting.** Selecting any passage in the reading column or the Context
   panel, by mouse, touch, or keyboard, reveals a `Comment` action; there is no mode to enable.
   Saved comments highlight their passage in place; hovering or focusing a highlight shows a
@@ -64,10 +63,13 @@ call validates the content, registers it, and hands back a link. What the user s
   belong to no section (inline comments and per-section responses cover those). It docks in
   the left margin on wide viewports and is a bottom sheet on narrow ones. Notes return to the
   agent next to the other feedback and carry the same weight.
-- **Decisions** are cards with a recommended option first, tradeoffs, and a collapsed
-  guidance field, either inline at the bottom of the chunk they depend on or standalone after
-  the chunks for choices that span the whole briefing. Required decisions block `Next` until
-  answered.
+- **Questions** sit at the bottom of the chunk they depend on (a chunk may carry several;
+  questions about the whole briefing are asked on the review screen). One with options is a
+  choice, recommended option first with its tradeoffs; a selection can be cleared, and
+  `multiSelect` allows several. Every question has a visible box for the user's own answer.
+  Nothing is required: an unanswered question goes back to the agent as `unresolved`. The first
+  `Next` (or `Submit`) instead scrolls to an unanswered question whose heading has not yet been
+  on screen, so none is skipped unseen.
 - **Navigation** is Back, Next, and an always-available `View all` escape hatch; a final review
   screen lists everything the user wrote before `Submit`. No timers, no automatic advancement.
 - **Drafts persist.** Everything typed, including a half-written note or comment, is saved
@@ -132,10 +134,11 @@ The model should:
   read in `details`;
 - use the `tray` (the Context panel) for stable context so it is not repeated on every chunk,
   and `remember` only for anchors needed later;
-- ask an explicit `checkpoint` question when it needs an answer;
-- offer 2-4 meaningfully distinct decision options, the recommended one first and marked,
-  with concrete tradeoffs and neutral wording; put a decision on the chunk it depends on and
-  keep top-level `decisions` for choices that span the whole briefing;
+- ask questions where it needs the user's input, in the `questions` of the chunk they depend
+  on, keeping top-level `questions` for ones that span the whole briefing; a choice offers 2-4
+  meaningfully distinct options, the recommended one first and marked, with concrete
+  tradeoffs and neutral wording (`multiSelect` when they are independent), and an open question
+  has none; treat an `unresolved` answer as still open, never as approval;
 - use rich Markdown only when it clarifies: GFM tables for comparisons and tradeoff matrices,
   fenced code with a language tag for technical examples, Mermaid for flows, architecture,
   state, and sequences, Vega-Lite for magnitude, trend, or segmentation. Prose is the default;
@@ -145,7 +148,7 @@ The model should:
 
 Input: whole presentation at most 1 MiB, fenced blocks at most 128 KB each; 1-10 chunks; per
 chunk up to 8 `keyPoints`, 4 `remember`; tray up to 6 `keyContext` and 5
-`openQuestions`; 0-6 top-level decisions plus at most one per chunk, each with 2-4 options and
+`openQuestions`; 0-6 top-level questions plus up to 4 per chunk, each with no options or 2-4 and
 up to 4 `tradeoffs`; required text fields non-empty
 after trimming.
 

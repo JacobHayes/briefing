@@ -97,15 +97,16 @@ pub struct CreatedBriefing {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftSummary {
-    /// 1-based screen the user is on (chunks, then decisions), counted as the page counts its
-    /// steps: the review screen is not one of them, and reading it reports `review` instead.
+    /// 1-based chunk screen the user is on, counted as the page counts its steps: the review
+    /// screen is not one of them, and reading it reports `review` instead.
     pub screen: u64,
     pub screens: u64,
     #[serde(default)]
     pub review: bool,
     pub annotations: u64,
     pub section_notes: u64,
-    pub decisions: u64,
+    /// Questions with a selected option or a written answer.
+    pub answered: u64,
     /// Unix milliseconds, as reported by the browser.
     pub updated_at: u64,
 }
@@ -165,7 +166,7 @@ pub fn draft_summary(presentation: &Briefing, draft: &Value) -> DraftSummary {
         value.as_object().map(|m| m.values().filter(|v| keep(v)).count()).unwrap_or(0) as u64
     };
     let non_empty = |v: &Value, key: &str| v[key].as_str().is_some_and(|s| !s.trim().is_empty());
-    let screens = (presentation.chunks.len() + presentation.decisions.len()) as u64;
+    let screens = presentation.chunks.len() as u64;
     let current = draft["current"].as_u64().unwrap_or(0);
     DraftSummary {
         screen: current.min(screens.saturating_sub(1)) + 1,
@@ -173,9 +174,11 @@ pub fn draft_summary(presentation: &Briefing, draft: &Value) -> DraftSummary {
         review: current >= screens,
         annotations: state["annotations"].as_array().map(|a| a.len()).unwrap_or(0) as u64,
         section_notes: count_map(&state["chunks"], &|c| {
-            non_empty(c, "note") || non_empty(c, "checkpoint") || c["status"].as_str() == Some("revisit")
+            non_empty(c, "note") || c["status"].as_str() == Some("revisit")
         }),
-        decisions: count_map(&state["decisions"], &|d| non_empty(d, "selected") || non_empty(d, "note")),
+        answered: count_map(&state["questions"], &|q| {
+            q["selected"].as_array().is_some_and(|s| !s.is_empty()) || non_empty(q, "answer")
+        }),
         updated_at: draft["updatedAt"].as_u64().unwrap_or(0),
     }
 }
@@ -565,7 +568,7 @@ mod tests {
     fn drafts_are_revisioned() {
         let hub = Hub::new(HubConfig::default());
         let created = hub.create(demo(), None);
-        let draft = json!({"current": 2, "state": {"chunks": {"0": {"note": "hi", "checkpoint": "", "status": ""}}, "decisions": {}, "annotations": [{}], "overallNote": ""}, "updatedAt": 5});
+        let draft = json!({"current": 1, "state": {"chunks": {"0": {"note": "hi", "status": ""}}, "questions": {"c0-0": {"selected": ["A"], "answer": ""}, "c1-0": {"selected": [], "answer": ""}}, "annotations": [{}], "overallNote": ""}, "updatedAt": 5});
         assert_eq!(hub.save_draft(&created.token, Some(0), draft.clone()), Ok(DraftSave::Saved { revision: 1 }));
         assert_eq!(hub.save_draft(&created.token, None, draft.clone()), Ok(DraftSave::Saved { revision: 2 }));
         match hub.save_draft(&created.token, Some(1), json!({})).unwrap() {
@@ -574,12 +577,13 @@ mod tests {
         }
         let page = hub.page_payload(&created.token).unwrap();
         assert_eq!(page["draftRevision"], 2);
-        assert_eq!(page["draft"]["current"], 2);
+        assert_eq!(page["draft"]["current"], 1);
         let summary = hub.info(&created.id).unwrap().draft.unwrap();
-        assert_eq!(summary.screen, 3);
+        assert_eq!(summary.screen, 2);
         assert_eq!(summary.annotations, 1);
         assert_eq!(summary.section_notes, 1);
-        assert_eq!(summary.screens, (demo().chunks.len() + demo().decisions.len()) as u64);
+        assert_eq!(summary.answered, 1);
+        assert_eq!(summary.screens, demo().chunks.len() as u64);
         assert!(!summary.review);
         let review = draft_summary(&demo(), &json!({"current": summary.screens}));
         assert!(review.review);

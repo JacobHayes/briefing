@@ -164,7 +164,7 @@ fn progress_hold_roundtrip() {
         assert!(message["params"]["message"].as_str().unwrap().contains(&url));
         if !submitted {
             submitted = true;
-            submit(&url, json!({"overallNote": "looks right", "decisions": [{"question": "Q", "selected": "A"}]}));
+            submit(&url, json!({"overallNote": "looks right", "questions": [{"question": "Q", "selected": ["A"]}]}));
         }
     });
     let result = &response["result"];
@@ -172,8 +172,9 @@ fn progress_hold_roundtrip() {
     assert_eq!(result["structuredContent"]["status"], "completed");
     let feedback = &result["structuredContent"]["feedback"];
     assert_eq!(feedback["overallNote"], "looks right");
-    assert_eq!(feedback["decisions"][0]["selected"], "A");
-    assert!(result["content"][0]["text"].as_str().unwrap().contains("1 decisions"));
+    assert_eq!(feedback["questions"][0]["selected"][0], "A");
+    assert_eq!(feedback["questions"][0]["status"], "answered");
+    assert!(result["content"][0]["text"].as_str().unwrap().contains("1 answered questions"));
 
     // Unknown briefing id for await_briefing.
     let unknown =

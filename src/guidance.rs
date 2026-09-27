@@ -30,16 +30,18 @@ fn content_guidance(surface: Surface) -> String {
     format!(
         "Finish the research and reasoning first, then {} with 3-8 semantic chunks (at most {MAX_CHUNKS}) in dependency \
          order: one main idea per chunk, 3-5 keyPoints each (at most {MAX_KEY_POINTS}), focused details, stable context \
-         in tray, and {MIN_OPTIONS}-{MAX_OPTIONS} distinct decision options with the recommended one first and marked. \
-         Put a decision on the chunk it depends on (the chunk's `decision` field) so its options sit right under their \
-         context; use top-level decisions only for choices that span the whole briefing.",
+         in tray, and questions where you need the user's input. Put each question in the `questions` of the chunk it \
+         depends on (several per chunk are fine) so it sits right under its context; use top-level `questions` only for \
+         ones that span the whole briefing. Give a choice {MIN_OPTIONS}-{MAX_OPTIONS} distinct options with the \
+         recommended one first and marked (set `multiSelect` when the options are independent), or no options for an \
+         open question. Answers are optional, and the user can always answer in their own words instead.",
         surface.create_action
     )
 }
 
 fn authoring_guidance() -> String {
     "Put durable context in the tray instead of repeating it in chunks; use remember only for anchors needed later; keep \
-     decision tradeoffs concrete and neutral; do not open a briefing merely because rich rendering could be used. When a \
+     option tradeoffs concrete and neutral; do not open a briefing merely because rich rendering could be used. When a \
      briefing builds on an earlier one, give a short refresher of each specific it relies on (what was proposed, decided \
      or rejected, and why) instead of referring back to it: the reader may remember the gist but not the details."
         .into()
@@ -55,8 +57,10 @@ fn rich_text_guidance() -> String {
 
 fn result_guidance() -> String {
     "After the feedback arrives, respond only to it; do not repeat the presentation as a chat message. Treat \
-     free-standing notes as first-class feedback, answer checkpoint responses, address inline comments using their \
-     location and quote, and follow up on chunks marked status `revisit`."
+     free-standing notes as first-class feedback, act on question answers, and treat an `unresolved` question as \
+     still open, never as approval: settle any prerequisite it depends on before asking again, and don't re-ask what \
+     the user's comments already answered. Address inline comments using their location and quote, and follow up on \
+     chunks marked status `revisit`."
         .into()
 }
 
@@ -95,7 +99,7 @@ pub fn mcp_guidance() -> String {
     let common = full_guidance(TOOL_SURFACE).join(" ");
     format!(
         "Briefing presents complex information in a paced browser interface and returns the user's notes, inline \
-         comments, decisions, and follow-up markers; free-standing notes from the Notes panel count as much as any \
+         comments, question answers, and follow-up markers; free-standing notes from the Notes panel count as much as any \
          other feedback.\n\n{common}\n\nResults are returned as structuredContent. brief_user returns immediately with \
          the briefing link and a briefingId; put that exact link in your reply so the user can open it (they may be on \
          a different machine from the agent), then call await_briefing with the briefingId; it blocks until they submit \
@@ -132,7 +136,7 @@ description: {SKILL_DESCRIPTION}
 # Briefing
 
 `briefing` opens a paced browser briefing for complex agent output. The user reads one idea
-at a time, can comment on exact passages, choose decision options, and submit feedback for
+at a time, can comment on exact passages, answer your questions, and submit feedback for
 you to act on.
 
 Use this skill when you need to create a briefing through the `briefing` CLI. It fits
@@ -162,8 +166,9 @@ briefing await --help
 - Finish your research first.
 - Build a presentation JSON file that matches `briefing schema`.
 - Run `briefing present <file> --json` or pipe JSON to `briefing present --json`.
-- When feedback returns, respond only to that feedback: answer checkpoints, address inline
-  comments, follow up on revisit flags, and act on notes and decisions.
+- When feedback returns, respond only to that feedback: act on question answers (an
+  `unresolved` one is still open, not approval), address inline comments, follow up on revisit
+  flags, and act on notes.
 "#
     )
 }

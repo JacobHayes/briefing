@@ -81,7 +81,7 @@
         const parts = [b.draft.review ? "on review" : `screen ${b.draft.screen}/${b.draft.screens}`];
         if (b.draft.annotations) parts.push(`${b.draft.annotations} comment${b.draft.annotations === 1 ? "" : "s"}`);
         if (b.draft.sectionNotes) parts.push(`${b.draft.sectionNotes} section note${b.draft.sectionNotes === 1 ? "" : "s"}`);
-        if (b.draft.decisions) parts.push(`${b.draft.decisions} decision${b.draft.decisions === 1 ? "" : "s"}`);
+        if (b.draft.answered) parts.push(`${b.draft.answered} answer${b.draft.answered === 1 ? "" : "s"}`);
         meta.push(parts.join(", "));
       }
       if (b.provenance === "diskOnly" && b.status === "active") meta.push("served by another process; the link may be stale");

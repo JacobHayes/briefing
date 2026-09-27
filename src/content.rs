@@ -12,7 +12,8 @@ pub const MAX_KEY_POINTS: usize = 8;
 pub const MAX_REMEMBER: usize = 4;
 pub const MAX_KEY_CONTEXT: usize = 6;
 pub const MAX_OPEN_QUESTIONS: usize = 5;
-pub const MAX_DECISIONS: usize = 6;
+pub const MAX_QUESTIONS: usize = 6;
+pub const MAX_CHUNK_QUESTIONS: usize = 4;
 pub const MIN_OPTIONS: usize = 2;
 pub const MAX_OPTIONS: usize = 4;
 pub const MAX_TRADEOFFS: usize = 4;
@@ -40,17 +41,15 @@ pub struct Chunk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 4))]
     pub remember: Option<Vec<String>>,
-    /// Optional question or response prompt for the user; when present, the response area opens by default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<String>,
-    /// A decision that depends on this section: its options render at the bottom of this card, right under their context. Prefer this over a top-level decision whenever the choice refers to one section.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision: Option<Decision>,
+    /// 0-4 questions that depend on this section, shown at the bottom of this card right under their context. Prefer these over top-level questions whenever a question refers to one section.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 4))]
+    pub questions: Vec<Question>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DecisionOption {
+pub struct QuestionOption {
     /// Short option label.
     pub label: String,
     /// What this option means and when it fits.
@@ -65,20 +64,24 @@ pub struct DecisionOption {
     pub recommended: Option<bool>,
 }
 
+/// A question for the user. With options it is a choice (the user can still answer in their
+/// own words instead); without options it is an open question. Answers are never required: a
+/// question left unanswered comes back as `unresolved`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct Decision {
-    /// The concrete decision the user needs to make.
+pub struct Question {
+    /// The concrete question for the user.
     pub question: String,
-    /// Only the context needed to make this decision.
+    /// Only the context needed to answer it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
-    /// Require a selection or written guidance before continuing. Default true.
+    /// None for an open question, or 2-4 meaningfully distinct options with the recommended one first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 4))]
+    pub options: Vec<QuestionOption>,
+    /// Allow several options at once, for options that are independent rather than mutually exclusive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub required: Option<bool>,
-    /// 2-4 meaningfully distinct options.
-    #[schemars(length(min = 2, max = 4))]
-    pub options: Vec<DecisionOption>,
+    pub multi_select: Option<bool>,
 }
 
 /// Optional Context panel content: stable context, running summary, and open questions.
@@ -98,7 +101,7 @@ pub struct Tray {
     pub open_questions: Option<Vec<String>>,
 }
 
-/// A paced browser briefing: semantic chunks in dependency order, optional context panel, and decisions. Every prose field accepts Markdown (GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, ```vega-lite fences for charts); use them only when they clarify.
+/// A paced browser briefing: semantic chunks in dependency order, optional context panel, and questions. Every prose field accepts Markdown (GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, ```vega-lite fences for charts); use them only when they clarify.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Briefing {
@@ -111,10 +114,10 @@ pub struct Briefing {
     pub chunks: Vec<Chunk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tray: Option<Tray>,
-    /// 0-6 decisions that span the whole briefing, shown after the chunks. A decision about one section belongs on that chunk's `decision` instead.
-    #[serde(default)]
+    /// 0-6 questions that span the whole briefing, shown on the final review screen. A question about one section belongs in that chunk's `questions` instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 6))]
-    pub decisions: Vec<Decision>,
+    pub questions: Vec<Question>,
     /// Short heading for the final briefing screen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_prompt: Option<String>,
@@ -143,17 +146,14 @@ fn text_fields(input: &Briefing) -> Vec<(String, &str)> {
         if let Some(details) = &chunk.details {
             fields.push((format!("{prefix} details"), details));
         }
-        if let Some(checkpoint) = &chunk.checkpoint {
-            fields.push((format!("{prefix} checkpoint"), checkpoint));
-        }
         for (i, point) in chunk.key_points.iter().flatten().enumerate() {
             fields.push((format!("{prefix} keyPoint {}", i + 1), point));
         }
         for (i, item) in chunk.remember.iter().flatten().enumerate() {
             fields.push((format!("{prefix} remember {}", i + 1), item));
         }
-        if let Some(decision) = &chunk.decision {
-            decision_fields(&mut fields, &format!("{prefix} decision"), decision);
+        for (i, question) in chunk.questions.iter().enumerate() {
+            question_fields(&mut fields, &format!("{prefix} question {}", i + 1), question);
         }
     }
     if let Some(tray) = &input.tray {
@@ -167,8 +167,8 @@ fn text_fields(input: &Briefing) -> Vec<(String, &str)> {
             fields.push((format!("context openQuestion {}", i + 1), item));
         }
     }
-    for (index, decision) in input.decisions.iter().enumerate() {
-        decision_fields(&mut fields, &format!("decision {}", index + 1), decision);
+    for (index, question) in input.questions.iter().enumerate() {
+        question_fields(&mut fields, &format!("question {}", index + 1), question);
     }
     if let Some(prompt) = &input.completion_prompt {
         fields.push(("completionPrompt".into(), prompt));
@@ -176,11 +176,11 @@ fn text_fields(input: &Briefing) -> Vec<(String, &str)> {
     fields
 }
 
-fn decision_fields<'a>(fields: &mut Vec<(String, &'a str)>, prefix: &str, decision: &'a Decision) {
-    if let Some(context) = &decision.context {
+fn question_fields<'a>(fields: &mut Vec<(String, &'a str)>, prefix: &str, question: &'a Question) {
+    if let Some(context) = &question.context {
         fields.push((format!("{prefix} context"), context));
     }
-    for (oi, option) in decision.options.iter().enumerate() {
+    for (oi, option) in question.options.iter().enumerate() {
         if let Some(description) = &option.description {
             fields.push((format!("{prefix} option {} description", oi + 1), description));
         }
@@ -242,13 +242,14 @@ fn validate_rich_content(input: &Briefing) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn validate_decision(decision: &Decision, label: &str) -> Result<(), ValidationError> {
-    require_text(&decision.question, &format!("{label} question"))?;
-    if decision.options.len() < MIN_OPTIONS || decision.options.len() > MAX_OPTIONS {
-        return Err(ValidationError(format!("{label} requires {MIN_OPTIONS}-{MAX_OPTIONS} options")));
+fn validate_question(question: &Question, label: &str) -> Result<(), ValidationError> {
+    require_text(&question.question, &format!("{label} text"))?;
+    let count = question.options.len();
+    if count != 0 && !(MIN_OPTIONS..=MAX_OPTIONS).contains(&count) {
+        return Err(ValidationError(format!("{label} needs no options or {MIN_OPTIONS}-{MAX_OPTIONS} options")));
     }
     let mut labels = std::collections::HashSet::new();
-    for option in &decision.options {
+    for option in &question.options {
         require_text(&option.label, &format!("{label} option label"))?;
         if !labels.insert(option.label.trim().to_lowercase()) {
             return Err(ValidationError(format!("{label} has duplicate option: {}", option.label)));
@@ -260,7 +261,8 @@ fn validate_decision(decision: &Decision, label: &str) -> Result<(), ValidationE
             )));
         }
     }
-    if decision.options.iter().filter(|o| o.recommended == Some(true)).count() > 1 {
+    let multi = question.multi_select == Some(true);
+    if !multi && question.options.iter().filter(|o| o.recommended == Some(true)).count() > 1 {
         return Err(ValidationError(format!("{label} has more than one recommended option")));
     }
     Ok(())
@@ -287,8 +289,9 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
         };
         too_many(chunk.key_points.as_ref().map_or(0, Vec::len), MAX_KEY_POINTS, "keyPoints")?;
         too_many(chunk.remember.as_ref().map_or(0, Vec::len), MAX_REMEMBER, "remember anchors")?;
-        if let Some(decision) = &chunk.decision {
-            validate_decision(decision, &format!("chunk {n} decision"))?;
+        too_many(chunk.questions.len(), MAX_CHUNK_QUESTIONS, "questions")?;
+        for (i, question) in chunk.questions.iter().enumerate() {
+            validate_question(question, &format!("chunk {n} question {}", i + 1))?;
         }
     }
 
@@ -301,11 +304,11 @@ pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
         }
     }
 
-    if input.decisions.len() > MAX_DECISIONS {
-        return Err(ValidationError(format!("brief_user supports at most {MAX_DECISIONS} decisions")));
+    if input.questions.len() > MAX_QUESTIONS {
+        return Err(ValidationError(format!("brief_user supports at most {MAX_QUESTIONS} top-level questions")));
     }
-    for (index, decision) in input.decisions.iter().enumerate() {
-        validate_decision(decision, &format!("decision {}", index + 1))?;
+    for (index, question) in input.questions.iter().enumerate() {
+        validate_question(question, &format!("question {}", index + 1))?;
     }
 
     validate_rich_content(input)?;
@@ -346,11 +349,10 @@ mod tests {
                 key_points: None,
                 details: None,
                 remember: None,
-                checkpoint: None,
-                decision: None,
+                questions: vec![],
             }],
             tray: None,
-            decisions: vec![],
+            questions: vec![],
             completion_prompt: None,
         }
     }
@@ -369,39 +371,42 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_or_double_recommended_options() {
-        let opt = |label: &str, rec: bool| DecisionOption {
+    fn validates_question_options() {
+        let opt = |label: &str, rec: bool| QuestionOption {
             label: label.into(),
             description: None,
             tradeoffs: None,
             recommended: Some(rec),
         };
+        let question = |options: Vec<QuestionOption>| Question {
+            question: "Q".into(),
+            context: None,
+            options,
+            multi_select: None,
+        };
         let mut p = minimal();
-        p.decisions = vec![Decision {
-            question: "Q".into(),
-            context: None,
-            required: None,
-            options: vec![opt("A", false), opt("a", false)],
-        }];
-        assert!(validate(&p).unwrap_err().0.contains("duplicate"));
-        p.decisions = vec![Decision {
-            question: "Q".into(),
-            context: None,
-            required: None,
-            options: vec![opt("A", true), opt("B", true)],
-        }];
-        assert!(validate(&p).unwrap_err().0.contains("recommended"));
 
-        // Inline decisions get the same checks, labelled by their chunk.
-        let mut p = minimal();
-        p.chunks[0].decision =
-            Some(Decision { question: " ".into(), context: None, required: None, options: vec![opt("A", true)] });
-        assert!(validate(&p).unwrap_err().0.starts_with("chunk 1 decision question"));
-        p.chunks[0].decision =
-            Some(Decision { question: "Q".into(), context: None, required: None, options: vec![opt("A", true)] });
-        assert!(validate(&p).unwrap_err().0.contains("chunk 1 decision requires"));
-        p.chunks[0].decision.as_mut().unwrap().options.push(opt("B", false));
+        // Open questions (no options) and 2-4 options are both fine; one option is not.
+        p.questions = vec![question(vec![]), question(vec![opt("A", true), opt("B", false)])];
         validate(&p).unwrap();
+        p.questions = vec![question(vec![opt("A", true)])];
+        assert!(validate(&p).unwrap_err().0.contains("question 1 needs no options or 2-4 options"));
+
+        p.questions = vec![question(vec![opt("A", false), opt("a", false)])];
+        assert!(validate(&p).unwrap_err().0.contains("duplicate"));
+
+        // Several recommendations only make sense when several options can be chosen.
+        p.questions = vec![question(vec![opt("A", true), opt("B", true)])];
+        assert!(validate(&p).unwrap_err().0.contains("recommended"));
+        p.questions[0].multi_select = Some(true);
+        validate(&p).unwrap();
+
+        // Chunk questions get the same checks, labelled by their chunk, and a chunk holds several.
+        let mut p = minimal();
+        p.chunks[0].questions = vec![question(vec![]), Question { question: " ".into(), ..question(vec![]) }];
+        assert!(validate(&p).unwrap_err().0.starts_with("chunk 1 question 2 text"));
+        p.chunks[0].questions = vec![question(vec![]); 5];
+        assert!(validate(&p).unwrap_err().0.contains("more than 4 questions"));
     }
 
     #[test]

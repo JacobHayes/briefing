@@ -6,7 +6,7 @@ description: Present complex research, multi-part explanations, or contextual de
 # Briefing
 
 `briefing` opens a paced browser briefing for complex agent output. The user reads one idea
-at a time, can comment on exact passages, choose decision options, and submit feedback for
+at a time, can comment on exact passages, answer your questions, and submit feedback for
 you to act on.
 
 Use this skill when you need to create a briefing through the `briefing` CLI. It fits
@@ -36,5 +36,6 @@ briefing await --help
 - Finish your research first.
 - Build a presentation JSON file that matches `briefing schema`.
 - Run `briefing present <file> --json` or pipe JSON to `briefing present --json`.
-- When feedback returns, respond only to that feedback: answer checkpoints, address inline
-  comments, follow up on revisit flags, and act on notes and decisions.
+- When feedback returns, respond only to that feedback: act on question answers (an
+  `unresolved` one is still open, not approval), address inline comments, follow up on revisit
+  flags, and act on notes.

@@ -71,7 +71,7 @@ async fn embedded_server_roundtrip() {
     assert_eq!(client.get(format!("{origin}/")).send().await.unwrap().status(), 404);
 
     // Drafts: saved with a revision, stale saves return the newer draft, page payload carries it.
-    let draft = |current: u64, note: &str| json!({"current": current, "state": {"chunks": {"0": {"note": note, "checkpoint": "", "status": ""}}, "decisions": {}, "annotations": [], "overallNote": ""}, "disclosures": {}, "updatedAt": 1});
+    let draft = |current: u64, note: &str| json!({"current": current, "state": {"chunks": {"0": {"note": note, "status": ""}}, "questions": {}, "annotations": [], "overallNote": ""}, "disclosures": {}, "updatedAt": 1});
     let put = |body: Value| client.put(format!("{origin}/api/{token}/draft")).header("origin", &origin).json(&body);
     assert_eq!(
         client.put(format!("{origin}/api/{token}/draft")).json(&json!({"draft": {}})).send().await.unwrap().status(),
@@ -92,7 +92,8 @@ async fn embedded_server_roundtrip() {
     assert_eq!(presentation["draftRevision"], 2);
     assert_eq!(presentation["draft"]["current"], 2);
     let info = backend.info(&created.id).await.unwrap().unwrap();
-    assert_eq!(info.draft.unwrap().screen, 3);
+    // The demo has two chunks, so current = 2 is the review screen.
+    assert!(info.draft.unwrap().review);
     assert_eq!(info.source.as_deref(), Some("test"));
 
     // Wait in the background, then submit from the "browser".
@@ -103,8 +104,11 @@ async fn embedded_server_roundtrip() {
         .post(format!("{origin}/api/{token}/complete"))
         .header("origin", &origin)
         .json(&json!({
-            "chunks": [{"title": "One idea at a time", "status": "revisit", "note": "more please", "checkpoint": ""}],
-            "decisions": [{"question": "How should briefing be triggered by default?", "selected": "Always proactive", "note": ""}],
+            "chunks": [{"title": "One idea at a time", "status": "revisit", "note": "more please"}],
+            "questions": [
+                {"question": "Which reading mode should a briefing open in?", "section": "One idea at a time", "selected": ["Paced, one chunk per screen"], "answer": ""},
+                {"question": "How should briefing be triggered by default?", "selected": [], "answer": ""}
+            ],
             "annotations": [{"location": "One idea at a time", "quote": "Use Next and Back", "comment": "nice"}],
             "overallNote": "ship it"
         }))
@@ -120,9 +124,11 @@ async fn embedded_server_roundtrip() {
         }
         other => panic!("unexpected {other:?}"),
     }
-    assert!(
-        outcome.format_text().contains("Decision - How should briefing be triggered by default?: Always proactive")
-    );
+    let text = outcome.format_text();
+    assert!(text.contains(
+        "Question (One idea at a time): Which reading mode should a briefing open in?\nSelected: Paced, one chunk per screen"
+    ));
+    assert!(text.contains("Question (whole briefing): How should briefing be triggered by default?\nUnresolved"));
     // Second submission conflicts; the page now reports completed.
     let again = client
         .post(format!("{origin}/api/{token}/complete"))
@@ -152,7 +158,7 @@ async fn briefing_recovered_by_another_process() {
     let first = local(config());
     let created = first.create(demo(), Some("first".into())).await.unwrap();
     let (origin1, token) = created.url.rsplit_once("/briefing/").unwrap();
-    let draft = json!({"current": 1, "state": {"chunks": {}, "decisions": {}, "annotations": [], "overallNote": ""}, "updatedAt": 7});
+    let draft = json!({"current": 1, "state": {"chunks": {}, "questions": {}, "annotations": [], "overallNote": ""}, "updatedAt": 7});
     let saved = client
         .put(format!("{origin1}/api/{token}/draft"))
         .header("origin", origin1)

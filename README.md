@@ -3,8 +3,9 @@
 **Paced browser briefings for coding agents.** When Claude Code, Codex, Pi, or any agent
 that speaks MCP has something too long or too layered for a chat reply, it opens a briefing
 in your browser instead: one idea per screen, context one click away, inline comments on
-anything you select, decision cards with a recommendation (on the chunk they depend on, or
-after all of them), a free-standing Notes panel, and a review screen before you send it back.
+anything you select, optional questions right under the context they depend on (pick an
+option or answer in your own words), a free-standing Notes panel, and a review screen before
+you send it back.
 Only what you wrote returns to the agent.
 
 ![Walkthrough: read a chunk, select a sentence and comment on it, open the Context panel, pick a decision, review, submit](docs/screenshots/tour.gif)
@@ -12,8 +13,8 @@ Only what you wrote returns to the agent.
 ```mermaid
 flowchart LR
     A[Agent finishes<br/>its research] --> B[Opens a briefing<br/>in your browser]
-    B --> C[You read it one idea at a time,<br/>comment, and decide]
-    C --> D[Your notes and decisions<br/>go back to the agent]
+    B --> C[You read it one idea at a time,<br/>comment, and answer]
+    C --> D[Your notes and answers<br/>go back to the agent]
 ```
 
 ## Why
@@ -23,9 +24,10 @@ flowchart LR
   next one.
 - **Feedback should be precise.** Select any sentence, table cell, diagram node, or chart and
   comment on exactly that. The agent gets the quoted passage with your note, not a paraphrase.
-- **Decisions need context first.** Decision cards sit at the bottom of the chunk that
-  justifies them, or after all the chunks when a choice spans the whole briefing, with the
-  recommended option first and its tradeoffs spelled out.
+- **Questions need context first.** A chunk's questions sit at the bottom of the chunk that
+  justifies them (questions about the whole briefing go on the review screen), with the
+  recommended option first and its tradeoffs spelled out. Answers are optional: skip one and
+  it goes back as unresolved, never as a silent yes.
 - **It survives everything.** Drafts save as you type. If the agent's process dies, or you
   switch from laptop to phone, the briefing picks up where you left off, and the agent can
   fetch your answers later.
@@ -80,8 +82,8 @@ be on a different machine from the agent). `await_briefing` then blocks until yo
   "status": "completed",
   "briefingId": "7rJ-tS8jIOb8SPX5",
   "feedback": {
-    "chunks":      [{ "title": "...", "status": "revisit", "checkpoint": "...", "note": "..." }],
-    "decisions":   [{ "question": "...", "selected": "...", "note": "..." }],
+    "chunks":      [{ "title": "...", "status": "revisit", "note": "..." }],
+    "questions":   [{ "question": "...", "section": "...", "selected": ["..."], "answer": "...", "status": "answered" }],
     "annotations": [{ "location": "...", "quote": "...", "comment": "...", "target": { "..." : "..." } }],
     "notes":       ["..."],
     "overallNote": "..."
@@ -167,7 +169,7 @@ the result on stdout. With `--json` the result is one line, the same `status` sh
 tool and the hub API return:
 
 ```jsonc
-{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "completed", "feedback": { "chunks": [], "decisions": [], "annotations": [], "notes": ["..."], "overallNote": "..." } }
+{ "briefingId": "7rJ-tS8jIOb8SPX5", "status": "completed", "feedback": { "chunks": [], "questions": [], "annotations": [], "notes": ["..."], "overallNote": "..." } }
 { "briefingId": "7rJ-tS8jIOb8SPX5", "status": "cancelled", "feedback": { "..." : "..." } }
 { "briefingId": "7rJ-tS8jIOb8SPX5", "status": "pending" }
 ```

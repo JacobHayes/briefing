@@ -1,13 +1,50 @@
 {
   "title": "Browser test fixture",
   "goal": "Exercise comment anchoring, tables and drafts",
-  "tray": { "keyContext": ["Context panel text that is its own annotatable region."] },
+  "tray": {
+    "keyContext": [
+      "Context panel text that is its own annotatable region."
+    ]
+  },
   "chunks": [
     {
       "title": "Tables",
       "mainPoint": "Intro paragraph before the tables.",
       "details": "First paragraph of the details, long enough to select on its own.\n\nSecond paragraph follows the first one.\n\n| A | B | C |\n|---|---|---|\n| alpha one | beta one | gamma one |\n| alpha two | beta two | gamma two |\n| alpha three | beta three | gamma three |\n\nFiller 1. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\nFiller 2. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\nFiller 3. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\nFiller 4. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\nFiller 5. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\nFiller 6. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.\n\nFiller 7 closes the section."
     },
-    { "title": "Second", "mainPoint": "Second chunk." }
+    {
+      "title": "Second",
+      "mainPoint": "Second chunk.",
+      "questions": [
+        {
+          "question": "Pick a direction?",
+          "options": [
+            {
+              "label": "Left",
+              "recommended": true
+            },
+            {
+              "label": "Right"
+            }
+          ]
+        },
+        {
+          "question": "Anything to add?"
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "question": "Ship it?",
+      "options": [
+        {
+          "label": "Yes"
+        },
+        {
+          "label": "No"
+        }
+      ]
+    }
   ]
 }

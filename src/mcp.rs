@@ -401,7 +401,7 @@ impl BriefingMcp {
             Outcome::Completed { feedback } => (
                 format!("Briefing {id} completed: {}", feedback.counts()),
                 None,
-                "Respond only to this feedback: answer checkpoint answers, act on decisions, address each comment (location + quoted passage + comment), follow up on sections flagged revisit. Do not repeat the presentation.".to_string(),
+                "Respond only to this feedback: act on question answers, treat unresolved questions as still open (not approval), address each comment (location + quoted passage + comment), follow up on sections flagged revisit. Do not repeat the presentation.".to_string(),
                 false,
             ),
             Outcome::Cancelled { feedback } => (
@@ -435,7 +435,7 @@ impl BriefingMcp {
 
 #[tool_router]
 impl BriefingMcp {
-    /// Open a paced browser briefing for the user. Returns the link and a briefingId immediately; put the link in your reply, then call await_briefing to collect their notes, comments, decisions, and follow-up markers.
+    /// Open a paced browser briefing for the user. Returns the link and a briefingId immediately; put the link in your reply, then call await_briefing to collect their notes, comments, question answers, and follow-up markers.
     #[tool(name = "brief_user", output_schema = output_schema::<OpenOutput>())]
     async fn brief_user(
         &self,

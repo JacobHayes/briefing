@@ -197,3 +197,58 @@ test("notes added on two devices at once both survive", async () => {
   assert.deepEqual(notes, ["from A", "from B"]);
   for (const page of [a, b, c]) await done(page);
 });
+
+/** Move to the given screen index with the Back/Next buttons' own state (no reveal detours). */
+async function goToScreen(page, index) {
+  for (let step = 0; step < 10; step++) {
+    const label = await page.textContent(".progress-step");
+    if (label === `Step ${index + 1} of 2` || (index === 2 && label === "Review")) return;
+    await page.click(".nav .btn.primary");
+    await page.waitForTimeout(250);
+  }
+  throw new Error("could not reach screen " + index);
+}
+
+test("Next first shows an unanswered question that was never on screen", async () => {
+  const page = await open(await serve(), { viewport: { width: 1100, height: 500 } });
+  await goToScreen(page, 1);
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.waitForTimeout(200);
+  const hidden = await page.evaluate(() => document.querySelector('[data-question="c1-1"] h2').getBoundingClientRect().top > innerHeight);
+  assert.ok(hidden, "the fixture's second question should start below the fold");
+  await page.click(".nav .btn.primary");
+  await page.waitForTimeout(800);
+  assert.equal(await page.textContent(".progress-step"), "Step 2 of 2", "Next moved on without showing the question");
+  const revealed = await page.evaluate(() => {
+    const question = document.querySelector("[data-question].attention");
+    const r = question?.querySelector("h2").getBoundingClientRect();
+    return question && { key: question.dataset.question, onScreen: r.top >= 0 && r.bottom <= innerHeight };
+  });
+  assert.deepEqual(revealed, { key: "c1-1", onScreen: true });
+  await done(page);
+});
+
+test("a chosen option can be cleared, and skipped questions go back as unresolved", async () => {
+  const page = await open(await serve());
+  await goToScreen(page, 1);
+  const left = page.locator('[data-question="c1-0"] .option').first();
+  await left.click();
+  await left.click();
+  assert.deepEqual(await page.$$eval('[data-question="c1-0"] input', boxes => boxes.map(box => box.checked)), [false, false]);
+  await page.fill('[data-question="c1-1"] .question-answer', "my own words");
+  await goToScreen(page, 2);
+  const submitted = page.waitForRequest(request => request.url().endsWith("/complete"));
+  for (let i = 0; i < 4 && !(await page.$(".done")); i++) {
+    await page.click(".nav .btn.primary");
+    await page.waitForTimeout(400);
+  }
+  const questions = JSON.parse((await submitted).postData()).questions;
+  assert.deepEqual(questions.map(q => [q.question, q.selected, q.answer]), [
+    ["Pick a direction?", [], ""],
+    ["Anything to add?", [], "my own words"],
+    ["Ship it?", [], ""],
+  ]);
+  assert.equal(questions[0].section, "Second");
+  assert.equal(questions[2].section, undefined);
+  await done(page);
+});
