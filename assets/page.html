@@ -44,12 +44,15 @@
     :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
 
     /* Header */
-    .header { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+    /* Sticky only where there is vertical room to spare; on phones it scrolls away with the page. */
+    .header { position: relative; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
     .header-inner { max-width: var(--content); margin: 0 auto; padding: 12px clamp(16px, 5vw, 28px); }
     .header-row { display: flex; align-items: center; gap: 12px; }
-    .wordmark { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -.01em; font-size: .95rem; }
-    .wordmark .mark { width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; background: var(--accent); color: var(--bg); font-size: .85rem; }
-    .header-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+    @media (min-width: 700px) { .header { position: sticky; top: 0; } }
+    .wordmark { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: -.01em; font-size: .95rem; }
+    .wordmark .briefing-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wordmark .mark { flex: none; width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; background: var(--accent); color: var(--bg); font-size: .85rem; }
+    .header-actions { flex: none; margin-left: auto; display: flex; align-items: center; gap: 4px; }
     .ghost { border: 0; background: transparent; color: var(--muted); padding: 6px 10px; border-radius: 8px; font-size: .85rem; font-weight: 550; }
     .ghost:hover { color: var(--text); background: var(--line); }
     .sync-status { color: var(--danger); font-size: .78rem; font-weight: 550; margin-right: 6px; }
@@ -290,7 +293,6 @@
     }
 
     @media (max-width: 560px) {
-      .wordmark span:not(.mark) { display: none; }
       .nav { flex-wrap: wrap; }
       .composer { left: 12px !important; right: 12px; width: auto; }
     }
@@ -1753,7 +1755,7 @@
 
       const inner = el("div", { class: "header-inner" }, [
         el("div", { class: "header-row" }, [
-          el("div", { class: "wordmark" }, [el("span", { class: "mark", text: "◆" }), el("span", { text: "Briefing" })]),
+          el("div", { class: "wordmark" }, [el("span", { class: "mark", "aria-hidden": "true", text: "◆" }), el("span", { class: "briefing-title", title: presentation.title, text: presentation.title })]),
           actions,
         ]),
         overview ? null : el("div", { class: "progress-line" }, [
@@ -1763,9 +1765,12 @@
         ]),
       ]);
 
-      const wrap = el("div", {}, el("div", { class: "header" }, inner));
-      if (contextOpen && hasContext()) wrap.append(contextPanel());
-      return wrap;
+      // A fragment, not a wrapper element: the header's containing block has to be the whole
+      // page for position: sticky to have anywhere to stick.
+      const parts = document.createDocumentFragment();
+      parts.append(el("header", { class: "header" }, inner));
+      if (contextOpen && hasContext()) parts.append(contextPanel());
+      return parts;
     }
 
     function contextPanel() {
