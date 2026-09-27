@@ -70,9 +70,12 @@ call validates the content, registers it, and hands back a link. What the user s
   answered.
 - **Navigation** is Back, Next, and an always-available `View all` escape hatch; a final review
   screen lists everything the user wrote before `Submit`. No timers, no automatic advancement.
-- **Drafts persist.** Everything typed is saved server-side (debounced, revisioned) and cached
-  in the browser, so a refresh, a crash of the agent's process, or opening the link on another
-  device continues where the user left off. Annotations re-anchor from semantic section
+- **Drafts persist.** Everything typed, including a half-written note or comment, is saved
+  server-side (debounced, revisioned) and cached in the browser, so a refresh, a crash of the
+  agent's process, or opening the link on another device continues where the user left off.
+  Edits made on two devices merge (comments and notes by id, other fields by latest edit)
+  rather than one copy replacing the other. The header says when the draft has not reached
+  the server, and Cancel reports failure instead of claiming success. Annotations re-anchor from semantic section
   identity, text offsets, and quote context rather than DOM ranges, so highlights survive
   navigation and refresh. Selection boundaries come from the selected text rather than the raw
   DOM range, so a selection that spills past the end of a paragraph still anchors, while one

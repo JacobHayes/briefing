@@ -52,6 +52,8 @@
     .header-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; }
     .ghost { border: 0; background: transparent; color: var(--muted); padding: 6px 10px; border-radius: 8px; font-size: .85rem; font-weight: 550; }
     .ghost:hover { color: var(--text); background: var(--line); }
+    .sync-status { color: var(--danger); font-size: .78rem; font-weight: 550; margin-right: 6px; }
+    .sync-status[hidden] { display: none; }
     .progress-line { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
     .progress { flex: 1; height: 4px; border-radius: 99px; background: var(--line-strong); overflow: hidden; }
     .progress-fill { height: 100%; background: var(--accent); border-radius: 99px; transition: width .25s ease; }
@@ -321,7 +323,6 @@
     let disclosureState = {};
     const NOTES_OPEN_KEY = "briefing:notesOpen";
     let notesOpen = (() => { try { return localStorage.getItem(NOTES_OPEN_KEY) === "1"; } catch { return false; } })();
-    let noteDraft = "";
     let noteEditing = null;
     const MAX_ANNOTATIONS = 500;
     const MAX_QUOTE = 2000;
@@ -827,6 +828,8 @@
     let syncTimer = null;
     let syncing = false;
     let syncQueued = false;
+    let retryTimer = null;
+    let unsynced = false;
     let toastTimer = null;
     const snapshot = () => ({ current, state, disclosures: disclosureState, updatedAt: Date.now() });
     const cacheLocally = draft => { try { localStorage.setItem(storageKey(), JSON.stringify(draft)); } catch { /* storage unavailable */ } };
@@ -835,6 +838,17 @@
       clearTimeout(syncTimer);
       syncTimer = setTimeout(() => { void syncDraft(); }, 500);
     };
+    // Record when a mergeable field last changed on this device, so a draft edited on two
+    // devices can keep the newer value of each field instead of one side's whole draft.
+    const stamp = key => { state.stamps[key] = Date.now(); };
+    // The header says so while the draft exists only in this browser; it is silent otherwise.
+    function setUnsynced(value) {
+      unsynced = value;
+      const node = document.getElementById("sync-status");
+      if (node) node.hidden = !value;
+      clearTimeout(retryTimer);
+      if (value) retryTimer = setTimeout(() => { void syncDraft(); }, 10000);
+    }
     function toast(message) {
       let node = document.getElementById("toast");
       if (!node) { node = el("div", { id: "toast", class: "toast", role: "status" }); document.body.append(node); }
@@ -849,21 +863,75 @@
         state = saved.state;
         disclosureState = saved.disclosures;
       }
-      if (!state || typeof state !== "object") state = { chunks: {}, decisions: {}, annotations: [], notes: [], overallNote: "" };
-      if (!state.chunks) state.chunks = {};
-      if (!state.decisions) state.decisions = {};
+      if (!state || typeof state !== "object") state = {};
+      if (!state.chunks || typeof state.chunks !== "object") state.chunks = {};
+      if (!state.decisions || typeof state.decisions !== "object") state.decisions = {};
       if (!Array.isArray(state.annotations)) state.annotations = [];
       if (!Array.isArray(state.notes)) state.notes = [];
-      state.notes = state.notes.filter(n => n && typeof n.text === "string").map(n => ({ id: n.id || uid(), text: n.text }));
+      state.notes = state.notes.filter(n => n && typeof n.text === "string").map(n => ({ id: n.id || uid(), text: n.text, at: n.at || 0 }));
+      if (typeof state.overallNote !== "string") state.overallNote = "";
+      // In-progress text: the Notes box, an open comment box, a note being edited.
+      if (typeof state.noteDraft !== "string") state.noteDraft = "";
+      if (!state.composerDraft || typeof state.composerDraft !== "object") state.composerDraft = null;
+      if (!state.noteEditDraft || typeof state.noteEditDraft !== "object") state.noteEditDraft = null;
+      if (!state.stamps || typeof state.stamps !== "object") state.stamps = {};
+      // Ids deleted on this or another device, so a merge cannot bring them back.
+      if (!state.removed || typeof state.removed !== "object") state.removed = {};
       if (!disclosureState || typeof disclosureState !== "object" || Array.isArray(disclosureState)) disclosureState = {};
     }
-    function adoptServerDraft(draft, revision, message) {
-      const before = current;
+
+    // --- Merging two drafts of the same briefing (another device, or the server copy) ---
+    const readPath = (object, key) => key.split(".").reduce((node, part) => node?.[part], object);
+    function writePath(object, key, value) {
+      const parts = key.split(".");
+      const last = parts.pop();
+      const parent = parts.reduce((node, part) => (node[part] ||= {}), object);
+      if (value === undefined) delete parent[last]; else parent[last] = value;
+    }
+    // Comments and notes merge by id: both sides' items survive, an item edited on both keeps
+    // the later edit, and an id deleted on either side stays deleted.
+    function mergeItems(ours = [], theirs = [], removed) {
+      const byId = new Map();
+      for (const item of [...theirs, ...ours]) {
+        if (!item || !item.id || removed[item.id]) continue;
+        const seen = byId.get(item.id);
+        if (!seen || (item.at || 0) > (seen.at || 0)) byId.set(item.id, item);
+      }
+      return [...byId.values()];
+    }
+    // Everything else is a stamped field (a section response, a decision, the Notes box, an
+    // open comment box...): the side that changed it last wins.
+    function mergeDrafts(ours, theirs) {
+      const mine = ours.state || {};
+      const other = theirs.state || {};
+      const merged = JSON.parse(JSON.stringify(other));
+      const stamps = { ...(other.stamps || {}) };
+      for (const [key, at] of Object.entries(mine.stamps || {})) {
+        if (at > (stamps[key] || 0)) {
+          writePath(merged, key, JSON.parse(JSON.stringify(readPath(mine, key) ?? null)) ?? undefined);
+          stamps[key] = at;
+        }
+      }
+      const removed = { ...(other.removed || {}) };
+      for (const [id, at] of Object.entries(mine.removed || {})) removed[id] = Math.max(at, removed[id] || 0);
+      merged.stamps = stamps;
+      merged.removed = removed;
+      merged.annotations = mergeItems(mine.annotations, other.annotations, removed);
+      merged.notes = mergeItems(mine.notes, other.notes, removed);
+      return { current: ours.current, state: merged, disclosures: ours.disclosures, updatedAt: Date.now() };
+    }
+    const sameState = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    // Fold another copy into ours. Re-renders only when that changed something, so a merge
+    // that adds nothing never disturbs the reader.
+    function mergeInto(other, revision, message) {
+      const merged = mergeDrafts(snapshot(), other);
       draftRevision = revision;
-      applyDraft(draft);
+      const changed = !sameState(merged.state, state);
+      applyDraft(merged);
       cacheLocally(snapshot());
+      if (!changed || submitted) return;
       if (message) toast(message);
-      if (!submitted) render({ top: current !== before });
+      render();
     }
     async function syncDraft(flush = false) {
       if (submitted) return;
@@ -878,12 +946,16 @@
           body: JSON.stringify({ baseRevision: draftRevision, draft: snapshot() }),
         });
         if (response.status === 409) {
+          // Someone else saved first: merge their copy in, then save the result on top of it.
           const body = await response.json();
-          if (body.draft) adoptServerDraft(body.draft, body.revision, "Loaded a newer draft from another device");
+          if (body.draft) mergeInto(body.draft, body.revision, "Merged changes from another device");
+          else draftRevision = body.revision;
+          syncQueued = true;
         } else if (response.ok) {
           draftRevision = (await response.json()).revision;
-        }
-      } catch { /* Offline: the local copy stands and is retried on the next change or focus. */ }
+          setUnsynced(false);
+        } else setUnsynced(true);
+      } catch { setUnsynced(true); }
       finally {
         syncing = false;
         if (syncQueued) { syncQueued = false; save(); }
@@ -898,8 +970,10 @@
         if (!response.ok) return;
         const latest = await response.json();
         if (latest.status !== "active") { submitted = true; renderDone(latest.status === "cancelled"); return; }
-        if ((latest.draftRevision || 0) > draftRevision && latest.draft) adoptServerDraft(latest.draft, latest.draftRevision, "Loaded a newer draft from another device");
-        else if (syncQueued || syncTimer) void syncDraft();
+        // A save in flight or pending resolves any conflict itself (a 409 merges), and it may
+        // be the very revision seen here.
+        if (syncing || syncTimer) return;
+        if ((latest.draftRevision || 0) > draftRevision && latest.draft) mergeInto(latest.draft, latest.draftRevision, "Merged changes from another device");
       } catch { /* Server unreachable; keep the local draft. */ }
       finally { refreshing = false; }
     }
@@ -908,9 +982,16 @@
       try { local = JSON.parse(localStorage.getItem(storageKey()) || "null"); } catch { /* Ignore corrupt browser-local draft state. */ }
       const server = presentation.draft && typeof presentation.draft === "object" ? presentation.draft : null;
       draftRevision = presentation.draftRevision || 0;
-      const useServer = server && (!local || (server.updatedAt || 0) >= (local.updatedAt || 0));
-      applyDraft(useServer ? server : local);
-      if (!useServer && local) save();
+      if (server && local) {
+        // The local copy may hold edits that never reached the server; merge rather than pick.
+        applyDraft(server);
+        const merged = mergeDrafts(local, server);
+        applyDraft(merged);
+        if (!sameState(merged.state, server.state)) save();
+      } else {
+        applyDraft(server || local);
+        if (!server && local) save();
+      }
     };
     document.addEventListener("visibilitychange", () => { if (document.hidden) void syncDraft(true); else void refreshFromServer(); });
     window.addEventListener("focus", () => { void refreshFromServer(); });
@@ -1361,6 +1442,7 @@
         start: sel.start,
         prefix: sel.prefix,
         suffix: sel.suffix,
+        at: Date.now(),
         ...(target && Object.keys(target).length ? { target } : {}),
       };
       state.annotations.push(ann);
@@ -1368,7 +1450,7 @@
       return ann;
     }
 
-    function openRichComment(anchor, target) {
+    function openRichComment(anchor, target, initial = "") {
       if (composer || submitted) return;
       hidePopover();
       hideCommentButton();
@@ -1380,7 +1462,8 @@
         title: "Add a comment",
         location,
         excerpt: quote,
-        initial: "",
+        initial,
+        draft: { kind: "rich", target: normalized },
         saveLabel: "Save comment",
         rect,
         onSave: comment => {
@@ -1401,6 +1484,7 @@
 
     function deleteAnnotation(id) {
       state.annotations = state.annotations.filter(a => a.id !== id);
+      state.removed[id] = Date.now();
       save();
       render();
     }
@@ -1435,6 +1519,7 @@
 
     function closeComposer(rerender, restoreFocus = false) {
       if (composer) { composer.remove(); composer = null; }
+      if (state.composerDraft) { state.composerDraft = null; stamp("composerDraft"); save(); }
       const returnTo = restoreFocus ? composerReturnFocus : null;
       composerReturnFocus = null;
       pendingSelection = null;
@@ -1455,6 +1540,9 @@
       composerReturnFocus = opts.returnFocus || null;
       const field = el("textarea", { class: "composer-input", "aria-label": opts.title, placeholder: "Add a comment about this passage" });
       field.value = opts.initial || "";
+      // The open comment's text is part of the draft, so a reload or closed tab reopens it.
+      const keepDraft = () => { state.composerDraft = { ...opts.draft, text: field.value }; stamp("composerDraft"); save(); };
+      field.addEventListener("input", keepDraft);
       const err = el("div", { class: "composer-err", role: "alert" });
       const setErr = message => { err.textContent = message; err.classList.add("visible"); };
       const saveBtn = el("button", { class: "btn primary", type: "button", text: opts.saveLabel });
@@ -1490,14 +1578,16 @@
       revealNode(composer);
     }
 
-    function openComposer() {
+    function openComposer(initial = "") {
       if (composer || !pendingSelection) return;
       const sel = pendingSelection;
+      const { rect: _rect, ...anchor } = sel;
       buildComposer({
         title: "Add a comment",
         location: sel.location,
         excerpt: sel.quote,
-        initial: "",
+        initial,
+        draft: { kind: "new", sel: anchor },
         saveLabel: "Save comment",
         rect: sel.rect,
         onSave: comment => {
@@ -1543,7 +1633,7 @@
 
     // Edit a saved comment in place. Persists immediately; re-render rebuilds all
     // overlapping highlight segments and their tooltips from the updated comment.
-    function openEditComposer(id, viewportRect) {
+    function openEditComposer(id, viewportRect, initial) {
       const ann = state.annotations.find(a => a.id === id);
       const rect = docRect(viewportRect);
       if (!ann) return;
@@ -1552,17 +1642,48 @@
         title: "Edit comment",
         location: ann.location,
         excerpt: ann.quote,
-        initial: ann.comment,
+        initial: initial ?? ann.comment,
+        draft: { kind: "edit", id },
         saveLabel: "Save changes",
         rect,
         returnFocus: '[data-anno-ids~="' + id + '"]',
         onSave: comment => {
           ann.comment = String(comment).slice(0, MAX_COMMENT);
+          ann.at = Date.now();
           save();
           pendingFocus = '[data-anno-ids~="' + id + '"]';
           closeComposer(true);
         },
       });
+    }
+
+    // Reopen a comment box that was open (with its text) when the page last closed, if what
+    // it was anchored to is on this screen.
+    function restoreComposer() {
+      const draft = state.composerDraft;
+      if (!draft || composer || submitted) return;
+      if (draft.kind === "edit") {
+        const mark = document.querySelector('[data-anno-ids~="' + draft.id + '"]');
+        if (mark) openEditComposer(draft.id, mark.getBoundingClientRect(), draft.text);
+        return;
+      }
+      const location = draft.kind === "rich" ? draft.target?.section : draft.sel?.location;
+      const region = [...document.querySelectorAll("#app [data-section]")].find(node => node.getAttribute("data-section") === location);
+      if (!region) return;
+      if (draft.kind === "rich") { openRichComment(region, draft.target, draft.text); return; }
+      const { text, nodes } = linearize(region);
+      const found = resolveInterval(text, draft.sel);
+      const at = offset => nodes.find(entry => offset >= entry.start && offset <= entry.start + entry.length);
+      const first = found && at(found.start);
+      const last = found && at(found.end);
+      if (!first || !last) return;
+      const range = document.createRange();
+      range.setStart(first.node, found.start - first.start);
+      range.setEnd(last.node, found.end - last.start);
+      const rect = selectionAnchorRect(range);
+      if (!rect) return;
+      pendingSelection = { ...draft.sel, rect: docRect(rect) };
+      openComposer(draft.text);
     }
 
     let selectionEvaluateTimer = 0;
@@ -1623,6 +1744,7 @@
           onclick: () => { contextOpen = !contextOpen; render(); },
         }));
       }
+      actions.append(el("span", { id: "sync-status", class: "sync-status", role: "status", hidden: !unsynced, text: "Not synced · kept in this browser" }));
       actions.append(el("button", {
         id: "notes-toggle", class: "ghost", "aria-expanded": String(notesOpen), "aria-controls": "notes-panel",
         text: notesButtonText(), onclick: () => toggleNotes(),
@@ -1690,12 +1812,12 @@
       if (usesCheckpoint) respondBody.append(markdownBlock("prompt", chunk.checkpoint));
       const field = el("textarea", { "aria-label": usesCheckpoint ? "Response to checkpoint" : "Note", placeholder: usesCheckpoint ? "Optional — a short answer or reflection" : "Optional note or question" });
       field.value = usesCheckpoint ? (draft.checkpoint || "") : (draft.note || "");
-      field.addEventListener("input", () => { if (usesCheckpoint) draft.checkpoint = field.value; else draft.note = field.value; save(); });
+      field.addEventListener("input", () => { if (usesCheckpoint) draft.checkpoint = field.value; else draft.note = field.value; stamp("chunks." + index); save(); });
       respondBody.append(field);
 
       const flag = el("input", { type: "checkbox" });
       flag.checked = draft.status === "revisit";
-      flag.addEventListener("change", () => { draft.status = flag.checked ? "revisit" : ""; save(); });
+      flag.addEventListener("change", () => { draft.status = flag.checked ? "revisit" : ""; stamp("chunks." + index); save(); });
       respondBody.append(el("label", { class: "flag" }, [flag, el("span", { text: "Flag this section for follow-up" })]));
 
       frag.append(disclosure("Respond", respondBody, "respond", "chunk:" + index + ":respond", usesCheckpoint));
@@ -1727,14 +1849,14 @@
         const id = "decision-" + slug + "-" + optionIndex;
         const radio = el("input", { id, type: "radio", name: "decision-" + slug, value: option.label });
         radio.checked = draft.selected === option.label;
-        radio.addEventListener("change", () => { draft.selected = option.label; save(); document.getElementById("decision-error")?.classList.remove("visible"); });
+        radio.addEventListener("change", () => { draft.selected = option.label; stamp("decisions." + key); save(); document.getElementById("decision-error")?.classList.remove("visible"); });
         options.append(el("label", { class: "option", for: id }, [radio, optionBody(option)]));
       });
       frag.append(options);
 
       const note = el("textarea", { "aria-label": "Guidance for this decision", placeholder: "Constraints, concerns, or an alternative" });
       note.value = draft.note || "";
-      note.addEventListener("input", () => { draft.note = note.value; save(); });
+      note.addEventListener("input", () => { draft.note = note.value; stamp("decisions." + key); save(); });
       frag.append(disclosure("Add guidance", note, "", "decision:" + key + ":guidance"));
       frag.append(el("div", { class: "error", id: "decision-error", role: "alert", text: "Choose an option before continuing, or add guidance instead." }));
       return frag;
@@ -1762,7 +1884,7 @@
         // which on iOS Safari hides and re-shows the keyboard and can leave the
         // fixed sheet pushed under the keyboard bar.
         existing.querySelector(".notes-list").replaceWith(fresh.querySelector(".notes-list"));
-        field.value = noteDraft;
+        field.value = state.noteDraft;
       }
       else if (existing && fresh) existing.replaceWith(fresh);
       else if (existing) existing.remove();
@@ -1831,14 +1953,22 @@
       else refreshNotes(focusSelector);
     }
     function addNote() {
-      const text = noteDraft.trim();
+      const text = state.noteDraft.trim();
       if (!text) return;
-      state.notes.push({ id: uid(), text });
-      noteDraft = "";
+      state.notes.push({ id: uid(), text, at: Date.now() });
+      state.noteDraft = "";
+      stamp("noteDraft");
       notesChanged("#note-composer");
     }
-    function editNote(id) {
+    // The note being edited, and its unsaved text, are part of the draft so a reload keeps them.
+    function setNoteEditing(id, text) {
       noteEditing = id;
+      state.noteEditDraft = id ? { id, text } : null;
+      stamp("noteEditDraft");
+      save();
+    }
+    function editNote(id) {
+      setNoteEditing(id, state.notes.find(n => n.id === id)?.text ?? "");
       setNotesOpen(true);
       refreshNotes('[data-note-editor="' + id + '"]');
       revealNoteEditor();
@@ -1858,7 +1988,8 @@
     }
     function deleteNote(id) {
       state.notes = state.notes.filter(n => n.id !== id);
-      if (noteEditing === id) noteEditing = null;
+      state.removed[id] = Date.now();
+      if (noteEditing === id) setNoteEditing(null);
       notesChanged("#note-composer");
     }
     function noteItem(note) {
@@ -1872,15 +2003,17 @@
     }
     function noteEditor(note) {
       const field = el("textarea", { "aria-label": "Edit note", "data-note-editor": note.id });
-      field.value = note.text;
+      field.value = state.noteEditDraft?.id === note.id ? state.noteEditDraft.text : note.text;
+      field.addEventListener("input", () => { state.noteEditDraft = { id: note.id, text: field.value }; stamp("noteEditDraft"); save(); });
       const commit = () => {
         const text = field.value.trim();
-        noteEditing = null;
-        if (text) note.text = text; else state.notes = state.notes.filter(n => n !== note);
+        setNoteEditing(null);
+        if (text) { note.text = text; note.at = Date.now(); }
+        else { state.notes = state.notes.filter(n => n !== note); state.removed[note.id] = Date.now(); }
         notesChanged("#note-composer");
       };
       // Focus returns to the composer (not the Edit button) so a touch keyboard stays up.
-      const cancel = () => { noteEditing = null; refreshNotes("#note-composer"); };
+      const cancel = () => { setNoteEditing(null); refreshNotes("#note-composer"); };
       field.addEventListener("keydown", event => {
         if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); commit(); }
         else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancel(); }
@@ -1904,8 +2037,8 @@
       // room a short (keyboard-up) sheet needs to show the editor and its actions.
       if (noteEditing && state.notes.some(n => n.id === noteEditing)) return panel;
       const field = el("textarea", { id: "note-composer", "aria-label": "New note", placeholder: "A thought, question, or tangent — not tied to any section" });
-      field.value = noteDraft;
-      field.addEventListener("input", () => { noteDraft = field.value; });
+      field.value = state.noteDraft;
+      field.addEventListener("input", () => { state.noteDraft = field.value; stamp("noteDraft"); save(); });
       field.addEventListener("keydown", event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); addNote(); } });
       const isMac = /Mac|iPhone|iPad/.test(navigator.platform || "");
       panel.append(el("div", { class: "notes-composer" }, [
@@ -1968,7 +2101,7 @@
 
       const overall = el("textarea", { "aria-label": "Overall response", placeholder: "Optional overall response, question, or correction" });
       overall.value = state.overallNote || "";
-      overall.addEventListener("input", () => { state.overallNote = overall.value; save(); });
+      overall.addEventListener("input", () => { state.overallNote = overall.value; stamp("overallNote"); save(); });
       frag.append(disclosure("Overall response", overall, "", "review:overall"));
       frag.append(el("div", { class: "error", id: "submit-error", role: "alert", text: submitErrorText("") }));
       return frag;
@@ -2044,12 +2177,16 @@
     async function cancel() {
       if (!confirm("Cancel this briefing?")) return;
       try {
-        await fetch("/api/" + presentation.token + "/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-      } finally {
-        localStorage.removeItem(storageKey());
-        submitted = true;
-        renderDone(true);
+        const response = await fetch("/api/" + presentation.token + "/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+      } catch (error) {
+        // Only say "cancelled" once the server has agreed; otherwise the briefing is still open.
+        toast("Could not cancel (" + errorMessage(error) + "). The briefing is still open.");
+        return;
       }
+      try { localStorage.removeItem(storageKey()); } catch { /* storage unavailable */ }
+      submitted = true;
+      renderDone(true);
     }
 
     function renderDone(cancelled = false) {
@@ -2146,7 +2283,9 @@
           ...presentation.decisions.map((data, index) => ({ type: "decision", data, index })),
         ];
         restore();
+        if (state.noteEditDraft && state.notes.some(n => n.id === state.noteEditDraft.id)) noteEditing = state.noteEditDraft.id;
         render();
+        requestAnimationFrame(restoreComposer);
       } catch (error) {
         app.replaceChildren(el("div", { class: "done" }, el("div", { class: "done-card" }, [el("h1", { text: "Briefing unavailable" }), el("p", { text: String(error.message || error) })])));
       }
