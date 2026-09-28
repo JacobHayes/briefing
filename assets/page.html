@@ -109,6 +109,8 @@
     .markdown ul, .markdown ol { margin: .75em 0 0; padding-left: 1.2rem; }
     .markdown li { white-space: normal; }
     .markdown li + li { margin-top: .35em; }
+    .markdown.list-item > :is(ul, ol) { margin-top: .3em; }
+    .markdown.list-item li { margin-top: .2em; }
     .markdown blockquote { margin: .85em 0 0; padding-left: 14px; border-left: 3px solid var(--line-strong); color: var(--muted); }
     .markdown hr { margin: 1.1em 0; border: 0; border-top: 1px solid var(--line); }
     .markdown strong { font-weight: 700; }
@@ -838,7 +840,13 @@
       return root;
     }
 
-    const list = (items, className) => el("ul", { class: className }, items.map(item => mdInline("li", {}, item)));
+    // Each item is full Markdown, so a key point can carry a bold lead-in over its own sub-list
+    // (or line breaks, code, a table) instead of collapsing onto one line.
+    const list = (items, className) => el("ul", { class: className }, items.map(item => {
+      const li = el("li", { class: "markdown list-item" });
+      renderMarkdownInto(li, item, false);
+      return li;
+    }));
     // --- Draft persistence: the server holds the draft (so another device or a restarted
     // agent process can pick it up); localStorage is a write-through cache for flaky links.
     const storageKey = () => "briefing:" + presentation.id;

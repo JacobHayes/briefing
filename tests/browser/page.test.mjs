@@ -275,3 +275,16 @@ test("a link to an earlier section jumps to it", async () => {
   assert.equal(await page.textContent(".progress-step"), "Step 1 of 2");
   await done(page);
 });
+
+test("a key point with its own sub-list renders it as nested bullets", async () => {
+  const page = await open(await serve());
+  const points = await page.$$eval(".points > li", items => items.map(li => ({
+    lead: li.querySelector("strong")?.textContent ?? li.textContent.trim(),
+    nested: [...li.querySelectorAll(":scope > ul > li")].map(n => n.textContent.trim()),
+  })));
+  assert.deepEqual(points, [
+    { lead: "A plain key point.", nested: [] },
+    { lead: "Grouped findings:", nested: ["first nested finding", "second nested finding"] },
+  ]);
+  await done(page);
+});
