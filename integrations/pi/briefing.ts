@@ -25,6 +25,7 @@ import { matchesKey, Text } from "@earendil-works/pi-tui";
 const BINARY = process.env.BRIEFING_BIN || "briefing";
 const DEMO_TOOL_NAME = "briefing_demo";
 const RESULT_TOOL_NAME = "briefing_result";
+const COMMAND_PROMPT_SECTION = "briefing_command";
 const PENDING_ENTRY = "briefing-pending";
 const SETTLED_ENTRY = "briefing-settled";
 
@@ -102,7 +103,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
   let active: Active | undefined;
 
   // `/brief`, `/brief-demo` and `/brief-result` all queue one instruction for the next turn: the
-  // command records it, `before_agent_start` appends `prompt` to the system prompt, and
+  // command records it, `before_agent_start` sets the named command prompt section, and
   // `agent_settled` tears it back down. Naming a `tool` additionally enables that command-only
   // tool for the turn and carries everything it needs (the recovery id), so the tool itself takes
   // no model-supplied parameters.
@@ -245,6 +246,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
 
     pi.registerTool({
       name: DEMO_TOOL_NAME,
+      exposure: "model-only",
       label: "Briefing Demo",
       description: "Open the bundled briefing demo and return the user's feedback. Used only by /brief-demo.",
       promptSnippet: "Open the bundled briefing demo when /brief-demo is requested",
@@ -292,6 +294,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
 
     pi.registerTool({
       name: RESULT_TOOL_NAME,
+      exposure: "model-only",
       label: "Briefing Result",
       description: "Recover a briefing by id and return stored feedback or reopen it. Used only by /brief-result.",
       promptSnippet: "Recover a briefing result when /brief-result is requested",
@@ -342,6 +345,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
 
     pi.registerTool({
       name: "brief_user",
+      exposure: "model-only",
       label: "Brief the user",
       description:
         "Present complex information in a paced browser briefing and return the user's notes, inline comments, and question answers. Blocks until the user submits.",
@@ -395,8 +399,8 @@ export default function briefingExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event) => {
-    if (!forced) return;
-    return { systemPrompt: `${event.systemPrompt}\n\n${forced.prompt}` };
+    if (forced) event.systemPromptOptions.sections[COMMAND_PROMPT_SECTION] = forced.prompt;
+    else delete event.systemPromptOptions.sections[COMMAND_PROMPT_SECTION];
   });
 
   pi.registerCommand("brief", {

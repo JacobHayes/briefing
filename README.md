@@ -60,7 +60,7 @@ mise use -g github:JacobHayes/briefing@latest
 |---|---|---|
 | Claude Code | `claude mcp add --scope user briefing -- briefing mcp` | [integrations/claude-code.md](integrations/claude-code.md) |
 | Codex | `[mcp_servers.briefing]` with `command = "briefing"`, `args = ["mcp"]`, `tool_timeout_sec = 14400` | [integrations/codex.md](integrations/codex.md) |
-| Pi | `pi install git:github.com/JacobHayes/briefing` | extension, [integrations/pi](integrations/pi/briefing.ts) |
+| Pi | `pi install git:github.com/JacobHayes/briefing` | extension, [integrations/pi](integrations/pi/README.md) |
 | Anything else | `briefing present presentation.json` | JSON in, feedback out |
 
 Optionally link `skills/briefing` into a harness's skills directory for raw CLI use if it does
@@ -121,12 +121,14 @@ plan. The per-client table, with sources, is `PROFILES` in
 Pi's own extension has no client-side tool timeout to work around, so it exposes a single
 blocking `brief_user` that shows the link in Pi's UI and returns the feedback directly. The
 `/brief-demo` and `/brief-result` commands route through temporary command-only tools so they
-exercise the same active-tool UI mechanics. Quitting or killing Pi while a briefing is open
-leaves the briefing open (only Esc or `/brief-cancel` cancels it), and resuming that session
-reattaches to it through the `/brief-result` path: the stored feedback if the user has
-submitted, otherwise a fresh link and a new wait. When using a remote hub, individual long-poll
-HTTP requests may still time out; `briefing await` treats those as pending and repolls
-internally, so callers never see the timeout.
+exercise the same active-tool UI mechanics. All three Pi interaction tools are model-only:
+codemode scripts and other nested tool calls cannot open them. Command guidance uses a named
+structured prompt section that is removed on the following ordinary turn. Quitting or killing
+Pi while a briefing is open leaves the briefing open (only Esc or `/brief-cancel` cancels it),
+and resuming that session reattaches to it through the `/brief-result` path: the stored
+feedback if the user has submitted, otherwise a fresh link and a new wait. When using a remote
+hub, individual long-poll HTTP requests may still time out; `briefing await` treats those as
+pending and repolls internally, so callers never see the timeout.
 
 ## Recovery and hand-off
 
