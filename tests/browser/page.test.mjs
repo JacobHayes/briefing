@@ -267,6 +267,21 @@ test("the Outline jumps to a section, and switching tabs keeps unsent note text"
   await done(page);
 });
 
+test("every load starts with the sidebar closed, whatever an earlier load left open", async () => {
+  // A real hub serves every briefing from one origin; here each server has its own, so a second
+  // load of the same briefing (same origin, same browser context) stands in for a fresh one.
+  const url = await serve();
+  const page = await open(url, { viewport: { width: 1400, height: 800 } });
+  await page.click('[data-tab="outline"], #outline-toggle');
+  assert.ok(await page.$("#notes-panel"));
+  const next = await page.context().newPage();
+  await next.goto(url);
+  await next.waitForSelector(".markdown table");
+  assert.equal(await next.$("#notes-panel"), null);
+  await next.close();
+  await done(page);
+});
+
 test("a link to an earlier section jumps to it", async () => {
   const page = await open(await serve());
   await goToScreen(page, 1);

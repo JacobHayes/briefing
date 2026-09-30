@@ -331,10 +331,11 @@
     let state = { questions: {}, annotations: [], notes: [] };
     let disclosureState = {};
     // The sidebar (Outline and Notes tabs): whether it is open and which tab, per browser.
-    const NOTES_OPEN_KEY = "briefing:notesOpen";
-    const SIDEBAR_TAB_KEY = "briefing:sidebarTab";
-    let notesOpen = (() => { try { return localStorage.getItem(NOTES_OPEN_KEY) === "1"; } catch { return false; } })();
-    let sidebarTab = (() => { try { return localStorage.getItem(SIDEBAR_TAB_KEY) === "outline" ? "outline" : "notes"; } catch { return "notes"; } })();
+    // The sidebar starts closed on every load: whether it was open in another briefing (or before
+    // a reload) says nothing about this one. Drop the keys older pages persisted it under.
+    let notesOpen = false;
+    let sidebarTab = "notes";
+    try { localStorage.removeItem("briefing:notesOpen"); localStorage.removeItem("briefing:sidebarTab"); } catch { /* storage unavailable */ }
     let noteEditing = null;
     const MAX_ANNOTATIONS = 500;
     const MAX_QUOTE = 2000;
@@ -1932,10 +1933,6 @@
     function setNotesOpen(open, tab = sidebarTab) {
       notesOpen = open;
       sidebarTab = tab;
-      try {
-        localStorage.setItem(NOTES_OPEN_KEY, open ? "1" : "0");
-        localStorage.setItem(SIDEBAR_TAB_KEY, tab);
-      } catch { /* storage unavailable */ }
     }
     const notesButtonText = () => state.notes.length ? "Notes · " + state.notes.length : "Notes";
     function syncSidebarButtons() {
