@@ -11,7 +11,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     BooleanSchema, CallToolResult, ClientResult, ElicitRequest, ElicitRequestParams, ElicitationAction,
     ElicitationSchema, ErrorData, Implementation, PrimitiveSchemaDefinition, ProgressNotificationParam,
-    ServerCapabilities, ServerInfo, ServerRequest,
+    ServerCapabilities, ServerConfig, ServerRequest,
 };
 use rmcp::service::{PeerRequestOptions, RequestContext};
 use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -517,8 +517,8 @@ impl BriefingMcp {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for BriefingMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(crate::guidance::mcp_guidance())
             .with_server_info(Implementation::new("briefing", env!("BRIEFING_VERSION")).with_title("Briefing"))
     }
