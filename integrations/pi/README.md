@@ -1,7 +1,7 @@
 # Pi integration intent
 
 This is a thin, interactive-TUI adapter over the `briefing` CLI, using Pi's
-structured prompt and tool-exposure APIs (developed and checked against Pi 0.99.1).
+structured prompt and tool-exposure APIs (introduced in Pi 0.99.1; checked against Pi 1.0.4).
 Install with `pi install git:github.com/JacobHayes/briefing`; the `briefing` binary
 must be on `PATH`, or selected by `BRIEFING_BIN`.
 
