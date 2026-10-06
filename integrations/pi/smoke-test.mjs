@@ -13,11 +13,12 @@ const baseTools = ["read", "bash", "brief_user"];
 
 let extension;
 let pendingBriefingId;
+let supportsPi;
 before(async () => {
   const jiti = createJiti(import.meta.url, { moduleCache: false, interopDefault: true });
   const path = fileURLToPath(new URL("./briefing.ts", import.meta.url));
   extension = await jiti.import(path, { default: true });
-  ({ pendingBriefingId } = await jiti.import(path));
+  ({ pendingBriefingId, supportsPi } = await jiti.import(path));
 });
 afterEach(() => { delete process.env.BRIEFING_TEST_STATUS; });
 
@@ -80,6 +81,11 @@ function createHarness({ branch = [] } = {}) {
     },
   };
 }
+
+test("refuses Pi releases older than tool exposure", () => {
+  for (const version of ["0.99.1", "0.99.2", "0.100.0", "1.0.4", "1.0.0-beta.1"]) assert.ok(supportsPi(version), version);
+  for (const version of ["0.99.0", "0.86.0", "0.9.9", "unknown"]) assert.ok(!supportsPi(version), version);
+});
 
 test("every interaction tool is model-only, and only brief_user starts active", async () => {
   const pi = createHarness();

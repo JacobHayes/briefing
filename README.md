@@ -60,7 +60,7 @@ mise use -g github:JacobHayes/briefing@latest
 |---|---|---|
 | Claude Code | `claude mcp add --scope user briefing -- briefing mcp` | [integrations/claude-code.md](integrations/claude-code.md) |
 | Codex | `[mcp_servers.briefing]` with `command = "briefing"`, `args = ["mcp"]`, `tool_timeout_sec = 14400` | [integrations/codex.md](integrations/codex.md) |
-| Pi | `pi install git:github.com/JacobHayes/briefing` | extension, [integrations/pi](integrations/pi/README.md) |
+| Pi | `pi install git:github.com/JacobHayes/briefing` | extension, requires Pi >=0.99.1, [integrations/pi](integrations/pi/README.md) |
 | Anything else | `briefing present presentation.json` | JSON in, feedback out |
 
 Optionally link `skills/briefing` into a harness's skills directory for raw CLI use if it does

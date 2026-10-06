@@ -19,13 +19,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { VERSION as PI_VERSION, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text } from "@earendil-works/pi-tui";
 
 const BINARY = process.env.BRIEFING_BIN || "briefing";
 const DEMO_TOOL_NAME = "briefing_demo";
 const RESULT_TOOL_NAME = "briefing_result";
 const COMMAND_PROMPT_SECTION = "briefing_command";
+// Tool `exposure` arrived in Pi 0.99.1. Pi installs packages without resolving peer ranges, and an
+// older Pi would silently ignore `exposure: "model-only"`, so refuse to load there instead.
+const MIN_PI_VERSION = "0.99.1";
 const PENDING_ENTRY = "briefing-pending";
 const SETTLED_ENTRY = "briefing-settled";
 
@@ -79,6 +82,15 @@ function parseStringArray(text: string, label: string): string[] {
   return value;
 }
 
+/** Whether `version` is at least `MIN_PI_VERSION`, comparing major.minor.patch numerically. */
+export function supportsPi(version: string): boolean {
+  const parse = (v: string) => (v.match(/^(\d+)\.(\d+)\.(\d+)/) ?? []).slice(1).map(Number);
+  const [have, need] = [parse(version), parse(MIN_PI_VERSION)];
+  if (have.length !== 3) return false;
+  const at = have.findIndex((part, i) => part !== need[i]);
+  return at < 0 || have[at] > need[at];
+}
+
 /** The most recent briefing this session opened and never saw settle, if any. */
 export function pendingBriefingId(entries: SessionEntry[]): string | undefined {
   const open: string[] = [];
@@ -100,6 +112,9 @@ function summary(feedback: Feedback): string {
 }
 
 export default function briefingExtension(pi: ExtensionAPI) {
+  if (!supportsPi(PI_VERSION)) {
+    throw new Error(`briefing needs Pi >=${MIN_PI_VERSION} for model-only tools; this is Pi ${PI_VERSION}`);
+  }
   let active: Active | undefined;
 
   // `/brief`, `/brief-demo` and `/brief-result` all queue one instruction for the next turn: the
