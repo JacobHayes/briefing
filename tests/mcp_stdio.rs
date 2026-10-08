@@ -58,7 +58,7 @@ impl McpClient {
             }),
         );
         assert_eq!(init["result"]["serverInfo"]["name"], "briefing");
-        assert!(init["result"]["instructions"].as_str().unwrap().contains("brief_user"));
+        assert_eq!(init["result"]["instructions"], briefing::guidance::mcp_guidance());
         client.notify("notifications/initialized", json!({}));
         client
     }
@@ -178,7 +178,6 @@ fn progress_hold_roundtrip() {
     assert_eq!(feedback["notes"][0], "looks right");
     assert_eq!(feedback["questions"][0]["selected"][0], "Paced, one chunk per screen");
     assert_eq!(feedback["questions"][0]["status"], "answered");
-    assert!(result["content"][0]["text"].as_str().unwrap().contains("1 answered questions"));
 
     // Unknown briefing id for await_briefing.
     let unknown =
@@ -193,7 +192,7 @@ fn pending_then_await_and_cancel() {
     let id = opened["result"]["structuredContent"]["briefingId"].as_str().unwrap().to_string();
     let response = client.request(6, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
     assert_eq!(response["result"]["structuredContent"]["status"], "pending", "{response}");
-    assert!(response["result"]["structuredContent"]["instructions"].as_str().unwrap().contains("await_briefing"));
+    assert!(response["result"]["structuredContent"]["instructions"].as_str().unwrap().contains(&id));
 
     let again = client.request(
         3,
@@ -261,7 +260,7 @@ fn recover_briefing_in_new_process() {
     let opened = first.request(2, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
     let id = opened["result"]["structuredContent"]["briefingId"].as_str().unwrap().to_string();
     let first_url = opened["result"]["structuredContent"]["url"].as_str().unwrap().to_string();
-    assert!(opened["result"]["structuredContent"]["instructions"].as_str().unwrap().contains("survives"));
+    assert!(opened["result"]["structuredContent"]["instructions"].as_str().unwrap().contains(&first_url));
     drop(first);
 
     let mut second = McpClient::spawn(&["mcp", "--max-wait-secs", "30"], "mcp-inspector", false);

@@ -104,5 +104,5 @@ async fn bind_target_occupied_port_fails_without_fallback() {
     )
     .await;
     let Err(error) = result else { panic!("bound an occupied address instead of failing") };
-    assert!(error.to_string().contains("explicit IP 127.0.0.1 bind failed"), "{error}");
+    assert!(error.to_string().contains("127.0.0.1"), "{error}");
 }

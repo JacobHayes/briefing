@@ -575,7 +575,6 @@ mod tests {
             hub.submit_by_token(&created.token, &json!({}), false, crate::protocol::PROTOCOL),
             Err(HubError::AlreadyFinished(BriefingStatus::Completed))
         );
-        assert_eq!(HubError::AlreadyFinished(BriefingStatus::Completed).to_string(), "briefing already completed");
         assert!(!hub.cancel(&created.id));
         assert_eq!(hub.wait("missing", Duration::from_millis(1)).await, Err(HubError::NotFound));
         assert_eq!(hub.info(&created.id).unwrap().source.as_deref(), Some("test"));

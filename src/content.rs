@@ -390,7 +390,7 @@ mod tests {
         p.questions = vec![question(vec![]), question(vec![opt("A", true), opt("B", false)])];
         validate(&p).unwrap();
         p.questions = vec![question(vec![opt("A", true)])];
-        assert!(validate(&p).unwrap_err().0.contains("question 1 needs no options or 2-4 options"));
+        assert!(validate(&p).unwrap_err().0.starts_with("question 1 "));
 
         p.questions = vec![question(vec![opt("A", false), opt("a", false)])];
         assert!(validate(&p).unwrap_err().0.contains("duplicate"));

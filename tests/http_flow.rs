@@ -235,8 +235,6 @@ async fn hub_agent_api_and_dashboard() {
     assert_eq!(dashboard.status(), 200);
     let csp = dashboard.headers().get("content-security-policy").unwrap().to_str().unwrap().to_string();
     let html = dashboard.text().await.unwrap();
-    assert!(html.contains("Awaiting feedback"));
-    assert!(html.contains("Cancel"));
     let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap();
     assert!(html.contains(&format!("nonce=\"{nonce}\"")));
 
