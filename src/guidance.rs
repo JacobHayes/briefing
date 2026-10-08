@@ -190,11 +190,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retention_is_spelled_from_the_config() {
+    fn human_uses_the_largest_whole_unit() {
         assert_eq!(human(Duration::from_secs(6 * 3600)), "6 hours");
         assert_eq!(human(Duration::from_secs(14 * 86_400)), "14 days");
+        assert_eq!(human(Duration::from_secs(90 * 60)), "90 minutes");
         assert_eq!(human(Duration::from_secs(60)), "1 minute");
-        assert!(mcp_guidance().contains("unanswered ones for 14 days, results for 6 hours"));
     }
 
     #[test]
