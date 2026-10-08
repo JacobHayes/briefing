@@ -173,7 +173,7 @@ briefing await --help
 }
 
 /// `6 hours`, `14 days`, `90 minutes`.
-fn human(duration: Duration) -> String {
+pub(crate) fn human(duration: Duration) -> String {
     let secs = duration.as_secs();
     let (n, unit) = if secs.is_multiple_of(86_400) {
         (secs / 86_400, "day")

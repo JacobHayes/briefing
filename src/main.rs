@@ -425,8 +425,11 @@ fn print_status_table(infos: &[BriefingInfo]) {
     for info in infos {
         let status = if info.status == BriefingStatus::Active { "waiting" } else { info.status.as_str() };
         let age = now.saturating_sub(info.created_at);
-        let age =
-            if age < 3600 { format!("{}m", age / 60) } else { format!("{}h{:02}m", age / 3600, (age % 3600) / 60) };
+        let age = match age {
+            ..3600 => format!("{}m", age / 60),
+            3600..86_400 => format!("{}h{:02}m", age / 3600, (age % 3600) / 60),
+            _ => format!("{}d{:02}h", age / 86_400, (age % 86_400) / 3600),
+        };
         let mut extras = Vec::new();
         if let Some(source) = &info.source {
             extras.push(source.clone());
@@ -499,7 +502,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<i32> {
         Command::Await { briefing_id, wait } => {
             let backend = backend(&cli.common)?;
             let Some(info) = backend.info(&briefing_id).await? else {
-                anyhow::bail!("briefing {briefing_id} not found (records expire a few hours after they finish)");
+                anyhow::bail!("briefing {briefing_id} not found (it may have expired)");
             };
             if info.status == BriefingStatus::Active {
                 let url = info.url.clone().unwrap_or_default();

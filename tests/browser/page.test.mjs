@@ -237,6 +237,8 @@ test("a chosen option can be cleared, and skipped questions go back as unresolve
   assert.deepEqual(await page.$$eval('[data-question="c1-0"] input', boxes => boxes.map(box => box.checked)), [false, false]);
   await page.fill('[data-question="c1-1"] .question-answer', "my own words");
   await goToScreen(page, 2);
+  // Read now: `present` exits once the briefing is submitted.
+  const { keptFor } = await page.evaluate(async () => (await fetch(location.pathname.replace("/briefing/", "/api/") + "/presentation")).json());
   const submitted = page.waitForRequest(request => request.url().endsWith("/complete"));
   for (let i = 0; i < 4 && !(await page.$(".done")); i++) {
     await page.click(".nav .btn.primary");
@@ -250,6 +252,9 @@ test("a chosen option can be cleared, and skipped questions go back as unresolve
   ]);
   assert.equal(questions[0].section, "Second");
   assert.equal(questions[2].section, undefined);
+  // The Submitted screen says how long the hub keeps the result, from the hub's own TTL.
+  assert.ok(keptFor, "the page payload carries the retention");
+  assert.ok((await page.textContent(".done")).includes(keptFor), "the Submitted screen shows the hub's retention");
   await done(page);
 });
 

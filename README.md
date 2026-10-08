@@ -137,7 +137,7 @@ Every briefing is mirrored to `$XDG_STATE_HOME/briefing/briefings/<id>.json` (de
 Nothing depends on the process that created it staying alive:
 
 - **Agent disconnected after you submitted:** `await_briefing` (or `briefing await <id>`)
-  from any later process returns the stored result. Results are kept for 6 hours.
+  from any later process returns the stored result. Results are kept for 7 days.
 - **Agent died before you submitted:** `await_briefing` with the id returns
   `status: "reopened"` and a fresh link; your draft is intact. The old link is dead because
   each process serves on its own port. The id is shown on the page's Submitted screen and
@@ -146,7 +146,7 @@ Nothing depends on the process that created it staying alive:
   the page adopts a newer draft on focus) and cached in localStorage, so opening the same
   link elsewhere continues where you left off.
 
-Unanswered briefings expire after 14 days. One result per briefing, no history.
+Unanswered briefings expire after 28 days. One result per briefing, no history.
 
 ## CLI
 
@@ -222,7 +222,7 @@ briefing serve --mcp
 - Serves briefing pages, a dashboard at `/` listing briefings awaiting feedback (with links,
   progress, and a cancel action) and recent results, the agent API (`/agent/briefings`), and
   with `--mcp` a streamable-HTTP MCP endpoint at `/mcp`.
-- `--finished-ttl 6h` / `--active-ttl 14d` tune retention; the embedded server uses the same
+- `--finished-ttl 7d` / `--active-ttl 28d` tune retention; the embedded server uses the same
   defaults. Long-lived hubs sweep expired records in the background once a minute.
 - `--public-origin https://briefings.example` when fronted by a reverse proxy (TLS lives there).
 - The hub never tries to open a browser itself; clients using the hub can still open the
@@ -259,7 +259,7 @@ Explicit IPs never fall back. Wildcards (`0.0.0.0`, `::`) listen on all interfac
 - `Host` and browser-write `Origin` checks prevent DNS rebinding and cross-site requests.
 - Strict CSP with a per-page nonce; renderer libraries are served from the binary.
 - Presentation and feedback sizes are capped. Records are written to the user's state
-  directory with owner-only permissions and deleted 6 h after finishing (14 days if never
+  directory with owner-only permissions and deleted 7 days after finishing (28 days if never
   answered).
 - No built-in authentication. Restrict all routes through network controls or an authenticating
   proxy; block untrusted direct access. Proxy identity headers are not authentication.

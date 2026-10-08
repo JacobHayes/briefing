@@ -2275,7 +2275,7 @@
       closeComposer(false);
       hidePopover();
       cleanupExternalRenderArtifacts();
-      const idLine = el("p", {}, [document.createTextNode("Briefing id "), el("code", { text: presentation.id }), document.createTextNode(cancelled ? "." : ". If the agent lost track, ask it to run await_briefing with this id; the response is kept for a few hours.")]);
+      const idLine = el("p", {}, [document.createTextNode("Briefing id "), el("code", { text: presentation.id }), document.createTextNode(cancelled ? "." : ". If the agent lost track, ask it to run await_briefing with this id; the response is kept for " + presentation.keptFor + ".")]);
       app.replaceChildren(el("div", { class: "done" }, el("div", { class: "done-card" }, [
         el("div", { class: "done-icon", text: cancelled ? "×" : "✓" }),
         el("h1", { text: cancelled ? "Briefing cancelled" : "Submitted" }),

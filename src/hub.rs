@@ -208,11 +208,11 @@ pub struct HubConfig {
 }
 
 impl HubConfig {
-    pub const FINISHED_TTL: Duration = Duration::from_secs(6 * 60 * 60);
-    pub const ACTIVE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+    pub const FINISHED_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    pub const ACTIVE_TTL: Duration = Duration::from_secs(28 * 24 * 60 * 60);
     /// The same defaults as CLI flag text (a test in main.rs keeps them in step).
-    pub const FINISHED_TTL_TEXT: &str = "6h";
-    pub const ACTIVE_TTL_TEXT: &str = "14d";
+    pub const FINISHED_TTL_TEXT: &str = "7d";
+    pub const ACTIVE_TTL_TEXT: &str = "28d";
 
     /// Default TTLs plus the default on-disk store.
     pub fn with_default_store() -> Self {
@@ -383,6 +383,7 @@ impl Hub {
         object.insert("status".into(), Value::String(stored.status.to_string()));
         object.insert("draftRevision".into(), Value::from(stored.draft_revision));
         object.insert("draft".into(), stored.draft.clone().unwrap_or(Value::Null));
+        object.insert("keptFor".into(), Value::String(crate::guidance::human(self.config.finished_ttl)));
         Some(payload)
     }
 
@@ -553,13 +554,15 @@ mod tests {
 
     #[tokio::test]
     async fn create_submit_wait_roundtrip() {
-        let hub = Hub::new(HubConfig::default());
+        let finished_ttl = Duration::from_secs(2 * 86_400);
+        let hub = Hub::new(HubConfig { finished_ttl, ..HubConfig::default() });
         let created = hub.create(demo(), Some("test".into()));
         assert_eq!(hub.status(&created.id), Some(BriefingStatus::Active));
 
         let page = hub.page_payload(&created.token).unwrap();
         assert_eq!(page["status"], "active");
         assert_eq!(page["draft"], Value::Null);
+        assert_eq!(page["keptFor"], crate::guidance::human(finished_ttl));
         assert!(hub.page_payload("nope").is_none());
 
         assert_eq!(hub.wait(&created.id, Duration::from_millis(20)).await, Ok(Outcome::Pending));

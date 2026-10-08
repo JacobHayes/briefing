@@ -192,7 +192,7 @@ draft, which only the page reads.
 - A wait ends in exactly one of `pending`, `completed`, or `cancelled`, carried as a tagged
   `status` with the feedback alongside; the CLI's `--json` output, the hub API, and the MCP
   `await_briefing` result all use that shape (MCP adds `reopened` for a recovered briefing). Records are written to the user's state directory with
-  owner-only permissions and swept 6 hours after finishing (14 days if never answered).
+  owner-only permissions and swept 7 days after finishing (28 days if never answered).
 - Restrict all hub routes through network controls or an authenticating proxy; block untrusted
   direct access. Briefing does not authenticate proxy identity headers.
 - `--public-origin` sets generated URLs and the allowed proxy Host/Origin, not binding or TLS.
