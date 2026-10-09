@@ -158,17 +158,18 @@ impl IntoResponse for HubError {
 struct Protocol(u32);
 
 /// Negotiate the protocol: requests outside what this hub translates get a 426 naming both
-/// versions, and every response names the hub's.
+/// versions. Every response names the protocol it is written in: the request's, which the
+/// handlers translate to, or the hub's own on a 426.
 async fn protocol_layer(mut request: Request<Body>, next: Next) -> Response {
     let header = request.headers().get(protocol::HEADER).and_then(|v| v.to_str().ok());
-    let mut response = match protocol::requested(header) {
+    let (version, mut response) = match protocol::requested(header) {
         Ok(version) => {
             request.extensions_mut().insert(Protocol(version));
-            next.run(request).await
+            (version, next.run(request).await)
         }
-        Err(error) => json_response(StatusCode::UPGRADE_REQUIRED, json!({"error": error})),
+        Err(error) => (protocol::PROTOCOL, json_response(StatusCode::UPGRADE_REQUIRED, json!({"error": error}))),
     };
-    response.headers_mut().insert(protocol::HEADER, HeaderValue::from(protocol::PROTOCOL));
+    response.headers_mut().insert(protocol::HEADER, HeaderValue::from(version));
     response
 }
 

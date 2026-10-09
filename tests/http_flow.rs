@@ -344,7 +344,8 @@ async fn protocol_one_clients_and_version_negotiation() {
         .await
         .unwrap();
     assert_eq!(created.status(), 201);
-    assert_eq!(created.headers()[briefing::protocol::HEADER], briefing::protocol::PROTOCOL.to_string());
+    // Answered in the protocol it speaks, not the hub's.
+    assert_eq!(created.headers()[briefing::protocol::HEADER], briefing::protocol::UNVERSIONED.to_string());
     let created: Value = created.json().await.unwrap();
     let id = created["id"].as_str().unwrap().to_string();
     let token = created["url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
@@ -397,6 +398,7 @@ async fn protocol_one_clients_and_version_negotiation() {
         .await
         .unwrap();
     assert_eq!(newer.status(), 426);
+    assert_eq!(newer.headers()[briefing::protocol::HEADER], briefing::protocol::PROTOCOL.to_string());
     assert!(newer.text().await.unwrap().contains("upgrade the hub"));
 
     // Current clients get strict parsing: an unknown field is an error, not silently dropped.

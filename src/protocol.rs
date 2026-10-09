@@ -1,11 +1,12 @@
 //! The version of the wire protocol between briefing clients and a hub, and compatibility
 //! with the previous version.
 //!
-//! Every agent-API and page-API request carries a `Briefing-Protocol` header and every
-//! response from a hub carries the hub's. A request without one comes from a client released
-//! before versioning, which speaks protocol 1. A hub serves its own protocol and the one
-//! before it, translating requests and responses for the older one; anything else gets a 426
-//! naming both versions. A client refuses a hub whose protocol differs from its own.
+//! Every agent-API and page-API request carries a `Briefing-Protocol` header, and every
+//! response names the protocol it is written in. A request without one comes from a client
+//! released before versioning, which speaks protocol 1. A hub serves its own protocol and the
+//! one before it, translating requests and responses for the older one and answering in it;
+//! anything else gets a 426 naming both versions, labelled with the hub's protocol. A client
+//! refuses a response in any protocol but its own.
 //!
 //! Protocol 2 replaced checkpoints and decisions with questions and reduced feedback to
 //! questions, comments, and notes (see [`crate::migrate`] for the same change to stored files).
@@ -41,7 +42,7 @@ pub fn requested(header: Option<&str>) -> Result<u32, String> {
     Ok(version)
 }
 
-/// What a client does with the hub's protocol header: anything but its own is an error.
+/// What a client does with a response's protocol header: anything but its own is an error.
 pub fn check_hub(header: Option<&str>, hub: &str) -> Result<(), String> {
     match header.map(str::trim) {
         Some(value) if value == PROTOCOL.to_string() => Ok(()),

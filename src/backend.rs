@@ -313,7 +313,7 @@ impl RemoteBackend {
         let response =
             tokio::time::timeout(timeout, self.client.request(request)).await.map_err(|_| HubRequestTimeout)??;
         let status = response.status();
-        // A hub on another protocol answers in shapes this client would misread, so stop here
+        // A response in another protocol has shapes this client would misread, so stop here
         // with both versions named. A 426 carries the hub's own explanation instead.
         let hub_protocol = response.headers().get(crate::protocol::HEADER).and_then(|v| v.to_str().ok());
         if status != ::http::StatusCode::UPGRADE_REQUIRED
