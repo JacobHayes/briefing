@@ -9,7 +9,7 @@
 // Recovery/demo commands temporarily enable command-only tools so they exercise the same
 // active-tool UI. Esc or /brief-cancel cancels the briefing (`briefing cancel`). Briefings live
 // in a hub, not in Pi, so `/brief-result <id>` recovers one after a crash (stored feedback, or
-// the same link with the draft intact) and `/brief-status` lists them.
+// the same link with the draft intact) and `/brief-status` lists this session's.
 //
 // Every briefing the extension opens is recorded in the Pi session (`briefing-pending`, then
 // `briefing-settled` once it completes, is cancelled or fails). Ending or killing Pi while one is
@@ -60,9 +60,10 @@ type Active = { child: ChildProcess; id: string; ready?: ReadyEvent; detached?: 
 type Creating = { cancelled: boolean; shutdown: boolean };
 
 /** Run the CLI and return its stdout; rejects with stderr on a non-zero exit. */
-function runCapture(args: string[], stdin?: string): Promise<string> {
+function runCapture(args: string[], options: { stdin?: string; env?: NodeJS.ProcessEnv } = {}): Promise<string> {
+  const { stdin, env } = options;
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(BINARY, args, { stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    const child = spawn(BINARY, args, { stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"], env });
     if (stdin !== undefined) child.stdin!.end(stdin);
     let out = "";
     let err = "";
@@ -74,6 +75,13 @@ function runCapture(args: string[], stdin?: string): Promise<string> {
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** The CLI's environment in this Pi session, so its briefings are tagged with Pi and the
+ * session, unless the user set `BRIEFING_SESSION` themselves. */
+function sessionEnv(ctx: ExtensionContext): NodeJS.ProcessEnv {
+  if (process.env.BRIEFING_SESSION) return process.env;
+  return { ...process.env, BRIEFING_SESSION: ctx.sessionManager.getSessionId(), BRIEFING_HARNESS: "pi" };
+}
 
 /** Cancel the briefing itself; an `await` on it then returns `cancelled`. */
 function cancelBriefing(id: string): Promise<void> {
@@ -165,7 +173,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
     const disposeInterrupt = onInterrupt(ctx, signal, () => (state.cancelled = true));
     let created: Created;
     try {
-      created = JSON.parse(await runCapture(args, stdin)) as Created;
+      created = JSON.parse(await runCapture(args, { stdin, env: sessionEnv(ctx) })) as Created;
     } catch (error) {
       ctx.ui.setWorkingMessage();
       throw error;
@@ -204,7 +212,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
    * cancel the briefing, so `await` returns `cancelled` rather than being killed. */
   function awaitBriefing(id: string, ctx: ExtensionContext, signal?: AbortSignal, onReady?: (ready: ReadyEvent) => void): Promise<CliResult> {
     if (active) return Promise.reject(new Error("A briefing is already open; wait for it or /brief-cancel"));
-    const child = spawn(BINARY, ["await", id, "--json"], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(BINARY, ["await", id, "--json"], { stdio: ["ignore", "pipe", "pipe"], env: sessionEnv(ctx) });
     const record: Active = { child, id };
     active = record;
     pi.appendEntry(PENDING_ENTRY, { id });
@@ -501,10 +509,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("brief-status", {
-    description: "List known briefings (waiting, completed, cancelled)",
+    description: "List this session's briefings (waiting, completed, cancelled)",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
-      const text = await runCapture(["status"]).catch((error) => `error: ${describe(error)}`);
+      const text = await runCapture(["status"], { env: sessionEnv(ctx) }).catch((error) => `error: ${describe(error)}`);
       ctx.ui.notify(text.trim() || "no briefings", "info");
     },
   });

@@ -59,6 +59,7 @@ async fn client_and_browser_roundtrip() {
         client.get(format!("{origin}/api/{token}/presentation")).send().await.unwrap().json().await.unwrap();
     assert_eq!(presentation["status"], "active");
     assert_eq!(presentation["chunks"].as_array().unwrap().len(), 2);
+    assert_eq!(presentation["source"], "test", "the page header shows who asked");
     assert_eq!(client.get(format!("{origin}/api/bogus/presentation")).send().await.unwrap().status(), 404);
     assert_eq!(client.get(format!("{origin}/briefing/bogus")).send().await.unwrap().status(), 404);
 
@@ -100,7 +101,7 @@ async fn client_and_browser_roundtrip() {
     let info = backend.info(&created.id).await.unwrap().unwrap();
     // The demo has two chunks, so current = 2 is the review screen.
     assert!(info.draft.unwrap().review);
-    assert_eq!(info.source.as_deref(), Some("test"));
+    assert_eq!(info.origin.source.as_deref(), Some("test"));
 
     // Wait in the background, then submit from the "browser".
     let id = created.id.clone();
@@ -182,7 +183,7 @@ async fn a_restarted_hub_keeps_briefings_and_links() {
     let (site, running) = start_hub(config(), port).await;
     let info = client_of(&origin).info(&created.id).await.unwrap().unwrap();
     assert_eq!(info.url.as_deref(), Some(created.url.as_str()), "same link after the restart");
-    assert_eq!(info.source.as_deref(), Some("first"));
+    assert_eq!(info.origin.source.as_deref(), Some("first"));
     let page: Value =
         client.get(format!("{origin}/api/{}/presentation", created.id)).send().await.unwrap().json().await.unwrap();
     assert_eq!(page["draft"]["current"], 1);

@@ -41,7 +41,9 @@ Briefings live in a hub, not in the CLI process. Esc, `/brief-cancel`, and the
 operation abort signal run `briefing cancel <id>`, so the running `await` reports
 `cancelled` and the agent is aborted. While `present` is still creating the
 briefing there is no id yet; the cancel is remembered and applied once there is.
-`/brief-reopen` redisplays the current link; `/brief-status` lists known briefings.
+`/brief-reopen` redisplays the current link; `/brief-status` lists this session's
+briefings. Every CLI run gets `BRIEFING_SESSION` (the Pi session id) and
+`BRIEFING_HARNESS=pi` unless the user set a session, so briefings are tagged with it.
 
 Session shutdown only stops the wait (`SIGHUP` to `await`), leaving the briefing
 open. Starting a wait records a `briefing-pending` entry (as does a shutdown during

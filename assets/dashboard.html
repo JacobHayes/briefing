@@ -77,6 +77,7 @@
     function card(b) {
       const meta = [];
       if (b.source) meta.push(b.source);
+      if (b.session) meta.push(`${b.harness || "agent"} session ${b.session.slice(0, 8)}`);
       meta.push(`created ${ago(Math.max(0, now() - b.createdAt))}`);
       if (b.finishedAt) meta.push(`${b.status} ${ago(Math.max(0, now() - b.finishedAt))}`);
       if (b.draft) {
@@ -95,7 +96,7 @@
       const children = [
         el("div", { class: "title", text: b.title }),
         el("div", { class: "actions" }, actions),
-        el("div", { class: "meta" }, [document.createTextNode(meta.join(" · ") + " · id "), el("code", { text: b.briefingId })]),
+        el("div", { class: "meta", ...(b.session ? { title: `session ${b.session}` } : {}) }, [document.createTextNode(meta.join(" · ") + " · id "), el("code", { text: b.briefingId })]),
       ];
       if (b.url && b.status === "active") children.push(el("div", { class: "url" }, el("a", { href: b.url, target: "_blank", rel: "noopener", text: b.url })));
       return el("div", { class: "card" }, children);

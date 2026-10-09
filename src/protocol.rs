@@ -15,7 +15,8 @@
 //! Protocol 2 replaced checkpoints and decisions with questions and reduced feedback to
 //! questions, comments, and notes (see [`crate::migrate`] for the same change to stored files).
 //! Protocol 3 gave each briefing one id, used by agents and in its link, and named it
-//! `briefingId` in every response; a create answers with the link's reach as well.
+//! `briefingId` in every response; a create answers with the link's reach as well, and
+//! briefings carry the agent harness and session that created them.
 
 use serde_json::{Value, json};
 
@@ -68,13 +69,15 @@ pub fn created_to_v2(created: &mut Value) {
     *created = json!({ "id": created["briefingId"], "url": created["url"] });
 }
 
-/// A briefing summary for a protocol 2 client, which calls the id `id`.
+/// A briefing summary for a protocol 2 client, which calls the id `id` and knows nothing of
+/// the session that created it.
 pub fn info_to_v2(info: &mut Value) {
-    if let Some(object) = info.as_object_mut()
-        && let Some(id) = object.remove("briefingId")
-    {
+    let Some(object) = info.as_object_mut() else { return };
+    if let Some(id) = object.remove("briefingId") {
         object.insert("id".into(), id);
     }
+    object.remove("harness");
+    object.remove("session");
 }
 
 #[cfg(test)]
@@ -101,7 +104,7 @@ mod tests {
         created_to_v2(&mut created);
         assert_eq!(created, json!({ "id": "x", "url": "http://h/briefing/x" }));
 
-        let mut info = json!({ "briefingId": "x", "title": "T", "status": "active", "createdAt": 1 });
+        let mut info = json!({ "briefingId": "x", "title": "T", "status": "active", "createdAt": 1, "harness": "codex", "session": "s" });
         info_to_v2(&mut info);
         assert_eq!(info, json!({ "id": "x", "title": "T", "status": "active", "createdAt": 1 }));
     }

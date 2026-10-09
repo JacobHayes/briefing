@@ -203,10 +203,17 @@ fn pending_then_await_and_cancel() {
 fn elicitation_hold_for_codex() {
     let machine = Machine::new();
     let mut client = McpClient::spawn(&machine, &["mcp"], "codex-mcp-client", true);
-    let opened = client.request(10, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
+    // Codex sends its session on every call; the briefing is tagged with it.
+    let opened = client.request(
+        10,
+        "tools/call",
+        json!({"name": "brief_user", "arguments": demo_presentation(), "_meta": {"threadId": "codex-thread-1"}}),
+    );
     let id = opened["result"]["structuredContent"]["briefingId"].as_str().unwrap().to_string();
     let status = machine.command().args(["status", &id, "--json"]).output().unwrap();
     let info: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(info["session"], "codex-thread-1", "{info}");
+    assert_eq!(info["harness"], "codex");
     assert_eq!(info["source"], format!("codex-mcp-client@{}", briefing::backend::hostname()));
     client.send_request(2, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
 

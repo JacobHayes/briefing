@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::content::Briefing;
-use crate::hub::BriefingStatus;
+use crate::hub::{BriefingStatus, Origin};
 use crate::migrate::{self, Migration};
 use crate::response::BriefingResponse;
 
@@ -32,8 +32,8 @@ pub struct StoredRecord {
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
+    #[serde(flatten)]
+    pub origin: Origin,
     #[serde(default)]
     pub draft_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,7 +199,7 @@ mod tests {
             status: if finished_at.is_some() { BriefingStatus::Completed } else { BriefingStatus::Active },
             created_at: now_secs(),
             finished_at,
-            source: Some("test".into()),
+            origin: Origin::source("test"),
             draft_revision: 0,
             draft: None,
             result: None,

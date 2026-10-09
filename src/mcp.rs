@@ -22,7 +22,7 @@ use crate::backend::{Backend, Created};
 use crate::bind::Scope;
 use crate::content::{Briefing, schema_value};
 use crate::guidance::show_link;
-use crate::hub::Origin;
+use crate::hub::{HarnessSession, Origin};
 use crate::response::Outcome;
 
 /// How to keep a long `await_briefing` call alive while the human reads.
@@ -121,7 +121,23 @@ pub struct BriefingMcp {
     hold: HoldMode,
     /// Explicit budget; `None` means pick per client.
     max_wait: Option<Duration>,
+    /// The harness session this server runs under; `Some` only when the harness started it
+    /// (stdio), so it is on the client's machine.
+    harness_session: Option<HarnessSession>,
     tool_router: ToolRouter<Self>,
+}
+
+/// The harness behind an MCP client: the name its CLI side uses for the harnesses we know,
+/// else the client's own name. Not the timeout profile, which groups unrelated clients.
+fn harness_name(client: &str) -> Option<String> {
+    let known = match client.to_ascii_lowercase().as_str() {
+        "claude-code" => Some("claude-code"),
+        "codex" | "codex-mcp-client" => Some("codex"),
+        "pi" => Some("pi"),
+        _ => None,
+    };
+    let name = known.map(str::to_string).unwrap_or_else(|| client.trim().to_string());
+    (!name.is_empty()).then_some(name)
 }
 
 /// What a known MCP client can tolerate, derived from `clientInfo.name` and the advertised
@@ -225,14 +241,34 @@ fn cancelled_by_client(id: &str) -> ErrorData {
 
 impl BriefingMcp {
     pub fn new(backend: Arc<Backend>, hold: HoldMode, max_wait: Option<Duration>) -> Self {
-        Self { backend, hold, max_wait, tool_router: Self::tool_router() }
+        Self { backend, hold, max_wait, harness_session: None, tool_router: Self::tool_router() }
     }
 
-    /// `<client>@<host>`, shown on the dashboard and in `briefing status`.
-    fn source(ctx: &RequestContext<RoleServer>) -> String {
+    /// Mark this server as one its harness started (stdio), so it runs on the client's machine:
+    /// briefings get this machine's hostname in their source, and `session` when a call does not
+    /// carry one (Claude Code gives it `CLAUDE_CODE_SESSION_ID` but sends nothing per call).
+    pub fn started_by_harness(mut self, session: HarnessSession) -> Self {
+        self.harness_session = Some(session);
+        self
+    }
+
+    /// Who is creating a briefing. The session is the user's explicit `BRIEFING_SESSION`, else
+    /// the call's `_meta` (Codex sends `threadId`), else this server's harness session; the
+    /// harness is the MCP client unless the user named one.
+    fn origin(&self, ctx: &RequestContext<RoleServer>) -> Origin {
         let client = Self::client_name(ctx);
+        let env = self.harness_session.clone().unwrap_or_default();
+        let thread = ctx.meta.get("threadId").and_then(|value| value.as_str()).map(str::to_string);
+        let (session, named) = if env.explicit { (env.id, env.harness) } else { (thread.or(env.id), None) };
+        let harness = named.or_else(|| harness_name(&client));
+        Origin { source: Some(self.source(client)), harness, session }
+    }
+
+    /// `<client>@<host>` from a server on the client's machine; just `<client>` from a hub's
+    /// `/mcp`, which cannot know where the client runs. Shown on the dashboard and in `status`.
+    fn source(&self, client: String) -> String {
         let client = if client.trim().is_empty() { "mcp".to_string() } else { client };
-        format!("{client}@{}", crate::backend::hostname())
+        if self.harness_session.is_some() { format!("{client}@{}", crate::backend::hostname()) } else { client }
     }
 
     fn client_name(ctx: &RequestContext<RoleServer>) -> String {
@@ -429,7 +465,7 @@ impl BriefingMcp {
         Self::require_structured_content(&ctx)?;
         let created: Created = self
             .backend
-            .create(input, Origin::source(Self::source(&ctx)))
+            .create(input, self.origin(&ctx))
             .await
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         let opened = if created.opened_browser {

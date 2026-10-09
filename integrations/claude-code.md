@@ -36,11 +36,15 @@ Run a hub on a box you can reach from both the agent and your browser, then poin
 # on the hub box (Tailscale address is picked automatically)
 briefing serve --mcp
 
-# on the agent side, either stdio pointed at the hub...
+# on the agent side, either stdio pointed at the hub (preferred)...
 claude mcp add --scope user briefing -e BRIEFING_HUB=http://100.x.y.z:7789 -- briefing mcp
 # ...or the hub's MCP endpoint directly
 claude mcp add --scope user --transport http briefing http://100.x.y.z:7789/mcp
 ```
+
+Prefer the stdio form: Claude Code gives a stdio server its session id
+(`CLAUDE_CODE_SESSION_ID`) but sends none over HTTP, so only stdio-created briefings are tagged
+with the session, which is what `briefing status` filters on.
 
 The hub's `/` page lists briefings awaiting feedback with their links.
 

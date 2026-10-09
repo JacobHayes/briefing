@@ -53,6 +53,9 @@
     .wordmark .briefing-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wordmark .mark { flex: none; width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center; background: var(--accent); color: var(--bg); font-size: .85rem; }
     .header-actions { flex: none; margin-left: auto; display: flex; align-items: center; gap: 4px; }
+    /* Which agent asked; the title keeps the room on narrow screens. */
+    .origin { flex: 0 1 auto; min-width: 0; color: var(--muted); font-size: .78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    @media (max-width: 600px) { .origin { display: none; } }
     .ghost { border: 0; background: transparent; color: var(--muted); padding: 6px 10px; border-radius: 8px; font-size: .85rem; font-weight: 550; }
     .ghost:hover { color: var(--text); background: var(--line); }
     .sync-status { color: var(--danger); font-size: .78rem; font-weight: 550; margin-right: 6px; }
@@ -1771,6 +1774,16 @@
       return Boolean((t.keyContext && t.keyContext.length) || t.runningSummary || (t.openQuestions && t.openQuestions.length));
     };
 
+    /** Which agent asked: harness and a short session id (full id and source on hover). */
+    function originLine() {
+      const who = presentation.harness || presentation.source;
+      if (!who && !presentation.session) return null;
+      const parts = [who || "agent"];
+      if (presentation.session) parts.push("session " + presentation.session.slice(0, 8));
+      const title = [presentation.session && "session " + presentation.session, presentation.source].filter(Boolean).join(" · ");
+      return el("span", { class: "origin", title, text: parts.join(" · ") });
+    }
+
     function header() {
       const total = screens.length;
       const isReview = current >= total;
@@ -1798,6 +1811,7 @@
       const inner = el("div", { class: "header-inner" }, [
         el("div", { class: "header-row" }, [
           el("div", { class: "wordmark" }, [el("span", { class: "mark", "aria-hidden": "true", text: "◆" }), el("span", { class: "briefing-title", title: presentation.title, text: presentation.title })]),
+          originLine(),
           actions,
         ]),
         el("div", { class: "progress-line" }, [

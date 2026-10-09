@@ -7,7 +7,7 @@ use briefing::backend::{Backend, BackendKind, Created, RemoteBackend, Site};
 use briefing::bind::{self, BindMode};
 use briefing::content::{self, Briefing};
 use briefing::guidance::show_link;
-use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Origin};
+use briefing::hub::{BriefingInfo, BriefingStatus, HarnessSession, Hub, HubConfig, Origin};
 use briefing::local_hub::{self, HubFile, HubLock, LocalHub};
 use briefing::mcp::{BriefingMcp, HoldMode};
 use briefing::response::{BriefingOutcome, Outcome};
@@ -144,11 +144,15 @@ enum Command {
     },
     /// Cancel an open briefing.
     Cancel { briefing_id: String },
-    /// Show one briefing's status, or list every known briefing.
+    /// Show one briefing's status, or list this agent session's briefings (this machine's when
+    /// the session is unknown).
     Status {
         briefing_id: Option<String>,
         #[arg(long)]
         json: bool,
+        /// List every known briefing, from any session or machine.
+        #[arg(long)]
+        all: bool,
     },
     /// Print the presentation JSON Schema.
     Schema,
@@ -271,6 +275,24 @@ fn cli_source() -> String {
     format!("cli@{}", briefing::backend::hostname())
 }
 
+fn cli_origin() -> Origin {
+    let session = HarnessSession::from_env();
+    Origin { source: Some(cli_source()), harness: session.harness, session: session.id }
+}
+
+/// Whether `status` lists a briefing by default: same agent session when this one is known -
+/// the same harness too when that is known, since ids are only unique per harness - otherwise
+/// created on this machine.
+fn in_scope(origin: &Origin, session: &HarnessSession, host: &str) -> bool {
+    match &session.id {
+        Some(id) => {
+            origin.session.as_deref() == Some(id.as_str())
+                && session.harness.as_ref().is_none_or(|harness| origin.harness.as_ref() == Some(harness))
+        }
+        None => origin.source.as_deref().and_then(|source| source.rsplit_once('@')).is_some_and(|(_, h)| h == host),
+    }
+}
+
 fn read_presentation(path: Option<&str>) -> anyhow::Result<Briefing> {
     let mut text = String::new();
     match path {
@@ -368,14 +390,15 @@ async fn shutdown_signal() {
 }
 
 async fn present(common: &Common, presentation: Briefing, args: &PresentArgs) -> anyhow::Result<i32> {
-    let created = backend(common)?.create(presentation, Origin::source(cli_source())).await?;
+    let created = backend(common)?.create(presentation, cli_origin()).await?;
     print_created(&created, args.json)?;
     Ok(0)
 }
 
 async fn run_mcp_stdio(common: &Common, hold: HoldArgs) -> anyhow::Result<()> {
     let backend = Arc::new(backend(common)?);
-    let handler = BriefingMcp::new(backend, hold.hold, hold.max_wait_secs.map(Duration::from_secs));
+    let handler = BriefingMcp::new(backend, hold.hold, hold.max_wait_secs.map(Duration::from_secs))
+        .started_by_harness(HarnessSession::from_env());
     let service = handler.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -492,8 +515,12 @@ fn print_status_table(infos: &[BriefingInfo]) {
             _ => format!("{}d{:02}h", age / 86_400, (age % 86_400) / 3600),
         };
         let mut extras = Vec::new();
-        if let Some(source) = &info.source {
+        let origin = &info.origin;
+        if let Some(source) = &origin.source {
             extras.push(source.clone());
+        }
+        if let Some(session) = &origin.session {
+            extras.push(format!("{} session {session}", origin.harness.as_deref().unwrap_or("agent")));
         }
         if let Some(draft) = &info.draft {
             let position = if draft.review {
@@ -574,7 +601,7 @@ async fn run(mut cli: Cli) -> anyhow::Result<i32> {
             println!("{}", json!({"briefingId": briefing_id, "cancelled": cancelled}));
             Ok(0)
         }
-        Command::Status { briefing_id, json } => {
+        Command::Status { briefing_id, json, all } => {
             let backend = backend(&cli.common)?;
             match briefing_id {
                 Some(id) => match backend.info(&id).await? {
@@ -583,9 +610,16 @@ async fn run(mut cli: Cli) -> anyhow::Result<i32> {
                     None => anyhow::bail!("briefing {id} not found"),
                 },
                 None => {
-                    let infos = backend.list().await?;
+                    let mut infos = backend.list().await?;
+                    if !all {
+                        let session = HarnessSession::from_env();
+                        let host = briefing::backend::hostname();
+                        infos.retain(|info| in_scope(&info.origin, &session, host));
+                    }
                     if json {
                         println!("{}", serde_json::to_string_pretty(&infos)?);
+                    } else if infos.is_empty() && !all {
+                        println!("no briefings from this session (`briefing status --all` lists every briefing)");
                     } else {
                         print_status_table(&infos);
                     }
@@ -639,6 +673,34 @@ mod tests {
         for value in ["123", "false", "[]", "{}"] {
             assert!(toml::from_str::<Settings>(&format!("bind = {value}")).is_err());
         }
+    }
+
+    #[test]
+    fn status_scopes_to_the_session_else_this_machine() {
+        let briefing = |source: Option<&str>, session: Option<&str>| Origin {
+            source: source.map(Into::into),
+            harness: None,
+            session: session.map(Into::into),
+        };
+        let session = |harness: Option<&str>, id: Option<&str>| HarnessSession {
+            harness: harness.map(Into::into),
+            id: id.map(Into::into),
+            explicit: false,
+        };
+        let mine = Origin { harness: Some("codex".into()), ..briefing(Some("cli@laptop"), Some("s1")) };
+        let other_session = briefing(Some("cli@laptop"), Some("s2"));
+        let other_host = briefing(Some("claude-code@workspace"), None);
+        assert!(in_scope(&mine, &session(Some("codex"), Some("s1")), "laptop"));
+        assert!(!in_scope(&other_session, &session(Some("codex"), Some("s1")), "laptop"));
+        // Ids are only unique per harness: the same id from another harness is someone else's.
+        assert!(!in_scope(&mine, &session(Some("claude-code"), Some("s1")), "laptop"));
+        // An unnamed session (a bare `BRIEFING_SESSION`) matches by id alone.
+        assert!(in_scope(&mine, &session(None, Some("s1")), "laptop"));
+        // Without a known session, anything created on this machine counts, from any client.
+        let unknown = HarnessSession::default();
+        assert!(in_scope(&other_session, &unknown, "laptop"));
+        assert!(!in_scope(&other_host, &unknown, "laptop"));
+        assert!(!in_scope(&briefing(None, None), &unknown, "laptop"));
     }
 
     /// A `Common` with everything unset, as clap leaves it before the file overlay.

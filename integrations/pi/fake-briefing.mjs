@@ -15,6 +15,8 @@ if (command === "schema") {
 } else if (command === "guidance") {
   console.log(JSON.stringify(["Fixture briefing guidance"]));
 } else if (command === "present" || command === "demo") {
+  // Record the session tag the extension passed, for the smoke test to check.
+  appendFileSync(join(process.env.BRIEFING_TEST_DIR, "sessions"), `${process.env.BRIEFING_HARNESS} ${process.env.BRIEFING_SESSION}\n`);
   process.stdin.resume();
   process.stdin.on("data", () => {});
   process.stdin.on("end", () =>

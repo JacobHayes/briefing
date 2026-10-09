@@ -220,10 +220,7 @@ impl RemoteBackend {
             .request(
                 ::http::Method::POST,
                 "/agent/briefings",
-                Some(serde_json::json!({
-                    "presentation": presentation,
-                    "source": origin.source,
-                })),
+                Some(serde_json::to_value(http::CreateRequest { presentation, origin })?),
                 HUB_REQUEST_TIMEOUT,
             )
             .await?;

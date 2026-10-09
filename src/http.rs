@@ -18,7 +18,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -342,13 +342,13 @@ async fn save_draft(
 
 // ---- Agent API (hub mode) ----
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateRequest {
     pub presentation: Briefing,
     /// Who created it, e.g. `claude-code@laptop`; shown on the dashboard.
-    #[serde(default)]
-    pub source: Option<String>,
+    #[serde(flatten)]
+    pub origin: Origin,
 }
 
 async fn agent_create(
@@ -364,7 +364,7 @@ async fn agent_create(
         Ok(body) => body,
         Err(error) => return json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()})),
     };
-    match site.create(body.presentation, Origin { source: body.source }).await {
+    match site.create(body.presentation, body.origin).await {
         Ok(created) => {
             let mut created = serde_json::to_value(created).unwrap_or_default();
             if protocol == 2 {

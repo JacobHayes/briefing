@@ -36,6 +36,7 @@ afterEach(() => {
   delete process.env.BRIEFING_TEST_STATUS;
   delete process.env.BRIEFING_TEST_CREATE_MS;
   rmSync(join(process.env.BRIEFING_TEST_DIR, "cancelled"), { force: true });
+  rmSync(join(process.env.BRIEFING_TEST_DIR, "sessions"), { force: true });
 });
 after(() => rmSync(process.env.BRIEFING_TEST_DIR, { recursive: true, force: true }));
 
@@ -64,7 +65,7 @@ function createHarness({ branch = [] } = {}) {
     mode: "tui",
     isIdle: () => true,
     abort: () => { aborts++; },
-    sessionManager: { getBranch: () => branch },
+    sessionManager: { getBranch: () => branch, getSessionId: () => "pi-session" },
     ui: {
       notify() {},
       setWorkingMessage() {},
@@ -142,6 +143,22 @@ test("a second command replaces the first instead of stacking", async () => {
   await pi.emit("session_shutdown");
   assert.deepEqual(pi.activeTools, baseTools);
   assert.equal(await pi.commandSection(), undefined);
+});
+
+test("briefings are tagged with the Pi session unless the user set one", async () => {
+  const pi = createHarness();
+  await pi.emit("session_start", { reason: "new" });
+  await pi.command("brief-demo");
+  await pi.run("briefing_demo");
+  process.env.BRIEFING_SESSION = "mine";
+  try {
+    await pi.command("brief-demo");
+    await pi.run("briefing_demo");
+  } finally {
+    delete process.env.BRIEFING_SESSION;
+  }
+  const sessions = readFileSync(join(process.env.BRIEFING_TEST_DIR, "sessions"), "utf8").trim().split("\n");
+  assert.deepEqual(sessions, ["pi pi-session", "undefined mine"]);
 });
 
 test("command tools tear down on completion, cancellation and failure", async () => {

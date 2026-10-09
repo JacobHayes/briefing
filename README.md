@@ -174,8 +174,17 @@ briefing guidance mcp              # MCP instructions text
 briefing guidance skill            # print the CLI-focused Agent Skill markdown
 briefing mcp                       # MCP over stdio
 briefing serve --mcp               # long-lived hub (see below)
-briefing status                    # list known briefings (waiting / completed / cancelled)
+briefing status                    # list this agent session's briefings (this machine's if unknown)
+briefing status --all              # list every known briefing (waiting / completed / cancelled)
 ```
+
+Briefings are tagged with the agent harness and session that created them, shown on the
+dashboard, in the briefing page header, and by `briefing status`: `BRIEFING_SESSION` (named by
+`BRIEFING_HARNESS`) if you set it, else the harness's own id - Claude Code's
+`CLAUDE_CODE_SESSION_ID`, Codex's `CODEX_THREAD_ID`, or Pi's session, which its extension
+passes along. Over MCP the harness is the client, and Codex also sends its thread id on every
+call. Claude Code sends nothing per call, so its briefings are tagged only through the
+stdio server (`briefing mcp`, optionally with `--hub`), not when it connects to a hub's `/mcp`.
 
 `present` returns as soon as the briefing exists, printing its link and the next step; with
 `--json`, one line: `{ "briefingId", "status": "active", "url", "scope", "openedBrowser",
@@ -282,7 +291,8 @@ Explicit IPs never fall back. Wildcards (`0.0.0.0`, `::`) listen on all interfac
   directory with owner-only permissions and deleted 7 days after finishing (28 days if never
   answered) by the hub while it runs.
 - A hub is one trusted audience: anyone who can reach it can list, read, create, cancel, and
-  submit every briefing on it, so share a hub only with devices you trust as much as the agent.
+  submit every briefing on it. Session tags are labels for filtering, not access control, so
+  share a hub only with devices you trust as much as the agent.
 - No built-in authentication. Restrict all routes through network controls or an authenticating
   proxy; block untrusted direct access. Proxy identity headers are not authentication. The one
   authenticated route, `/control/shutdown`, takes a secret only readable from the state dir.

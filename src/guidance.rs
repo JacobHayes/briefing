@@ -127,8 +127,8 @@ pub fn cli_guidance() -> String {
          `await` through `tail`, `head`, `jq`, or similar.\n6. The result on stdout has a `status`: `completed` (act \
          only on the returned feedback), `cancelled`, or `pending` (only after `--wait-seconds`). All three exit 0; a \
          nonzero exit is a real error. The briefing lives in a hub, not in your command: if `await` is interrupted or \
-         returns pending, run it again with the same id. `briefing status` lists recoverable \
-         briefings.\n\nBriefing \
+         returns pending, run it again with the same id. `briefing status` lists this session's briefings (`--all` for \
+         every one).\n\nBriefing \
          rules:\n{rules}\n"
     )
 }

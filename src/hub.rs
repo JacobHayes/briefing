@@ -120,8 +120,8 @@ pub struct BriefingInfo {
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
+    #[serde(flatten)]
+    pub origin: Origin,
     /// The link, filled in by the [`crate::backend::Site`] serving it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -129,15 +129,49 @@ pub struct BriefingInfo {
     pub draft: Option<DraftSummary>,
 }
 
-/// Who created a briefing: a display label (`claude-code@laptop`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Who created a briefing: a display label (`claude-code@laptop`) and, when known, the agent
+/// harness and its session id, which `briefing status` filters on and the pages show.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Origin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 impl Origin {
     pub fn source(source: impl Into<String>) -> Self {
-        Self { source: Some(source.into()) }
+        Self { source: Some(source.into()), ..Self::default() }
+    }
+}
+
+/// The agent session a process runs under, from the environment its harness gives the commands
+/// and stdio MCP servers it starts. Only meaningful in such a process; a hub's environment is
+/// its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HarnessSession {
+    pub harness: Option<String>,
+    pub id: Option<String>,
+    /// Set by the user (`BRIEFING_SESSION`), so it wins over ids a harness reports per call.
+    pub explicit: bool,
+}
+
+impl HarnessSession {
+    /// `BRIEFING_SESSION` (named by `BRIEFING_HARNESS`), else Claude Code's or Codex's own id.
+    pub fn from_env() -> Self {
+        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
+        if let Some(id) = var("BRIEFING_SESSION") {
+            return Self { harness: var("BRIEFING_HARNESS"), id: Some(id), explicit: true };
+        }
+        [("CLAUDE_CODE_SESSION_ID", "claude-code"), ("CODEX_THREAD_ID", "codex")]
+            .iter()
+            .find_map(|(name, harness)| {
+                var(name).map(|id| Self { harness: Some(harness.to_string()), id: Some(id), explicit: false })
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -148,7 +182,7 @@ fn info(stored: &StoredRecord) -> BriefingInfo {
         status: stored.status,
         created_at: stored.created_at,
         finished_at: stored.finished_at,
-        source: stored.source.clone(),
+        origin: stored.origin.clone(),
         url: None,
         draft: stored.draft.as_ref().map(|draft| draft_summary(&stored.presentation, draft)),
     }
@@ -280,7 +314,7 @@ impl Hub {
             status: BriefingStatus::Active,
             created_at: now_secs(),
             finished_at: None,
-            source: origin.source,
+            origin,
             draft_revision: 0,
             draft: None,
             result: None,
@@ -317,6 +351,10 @@ impl Hub {
         object.insert("draftRevision".into(), Value::from(stored.draft_revision));
         object.insert("draft".into(), stored.draft.clone().unwrap_or(Value::Null));
         object.insert("keptFor".into(), Value::String(crate::guidance::human(self.config.finished_ttl)));
+        // Who asked, for the page header.
+        if let Ok(Value::Object(origin)) = serde_json::to_value(&stored.origin) {
+            object.extend(origin);
+        }
         Some(payload)
     }
 
@@ -490,7 +528,7 @@ mod tests {
         assert_eq!(hub.cancel(&created), Ok(false));
         assert_eq!(hub.cancel("missing"), Ok(false));
         assert_eq!(hub.wait("missing", Duration::from_millis(1)).await, Err(HubError::NotFound));
-        assert_eq!(hub.info(&created).unwrap().source.as_deref(), Some("test"));
+        assert_eq!(hub.info(&created).unwrap().origin.source.as_deref(), Some("test"));
     }
 
     #[test]
@@ -557,7 +595,7 @@ mod tests {
 
         // The next one serves it with the draft intact and takes the submission.
         let second = Hub::new(config());
-        assert_eq!(second.info(&id).unwrap().source.as_deref(), Some("first"));
+        assert_eq!(second.info(&id).unwrap().origin.source.as_deref(), Some("first"));
         assert_eq!(second.page_payload(&id).unwrap()["draft"]["current"], 1);
         assert_eq!(second.active_count(), 1);
         second.submit(&id, &notes("done"), false).unwrap();
