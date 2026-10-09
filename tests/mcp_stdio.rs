@@ -1,6 +1,7 @@
 //! Drive the real binary over MCP stdio: initialize, list tools, call brief_user,
 //! submit from the "browser" using the URL from the progress notification, and check
-//! the tool result. Also exercises the elicitation hold path with a fake Codex client.
+//! the tool result. Also exercises the elicitation hold path with a fake Codex client, and a
+//! briefing outliving its MCP server and the hub it started.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
@@ -10,32 +11,19 @@ use serde_json::{Value, json};
 
 mod common;
 
+use common::Machine;
+
 struct McpClient {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
 }
 
-/// One temp state dir per test binary run so tests never touch the real store.
-fn state_dir() -> std::path::PathBuf {
-    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path().to_path_buf()
-}
-
-/// One empty config home per test binary run so subprocesses never read the caller's config.
-fn config_home() -> std::path::PathBuf {
-    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| tempfile::tempdir().unwrap()).path().to_path_buf()
-}
-
 impl McpClient {
-    fn spawn(args: &[&str], client_name: &str, elicitation: bool) -> Self {
-        let mut child = common::briefing_command()
+    fn spawn(machine: &Machine, args: &[&str], client_name: &str, elicitation: bool) -> Self {
+        let mut child = machine
+            .command()
             .args(args)
-            .env("BRIEFING_BIND", "local")
-            .env("BRIEFING_OPEN", "false")
-            .env("BRIEFING_STATE_DIR", state_dir())
-            .env("XDG_CONFIG_HOME", config_home())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -115,16 +103,17 @@ fn demo_presentation() -> Value {
 
 fn submit(url: &str, body: Value) {
     briefing::tls::init();
-    let (origin, token) = url.rsplit_once("/briefing/").unwrap();
+    let (origin, id) = url.rsplit_once("/briefing/").unwrap();
     let client = common::blocking_client();
     let response =
-        client.post(format!("{origin}/api/{token}/complete")).header("origin", origin).json(&body).send().unwrap();
+        client.post(format!("{origin}/api/{id}/complete")).header("origin", origin).json(&body).send().unwrap();
     assert_eq!(response.status(), 200);
 }
 
 #[test]
 fn progress_hold_roundtrip() {
-    let mut client = McpClient::spawn(&["mcp"], "claude-code", false);
+    let machine = Machine::new();
+    let mut client = McpClient::spawn(&machine, &["mcp"], "claude-code", false);
 
     let tools = client.request(2, "tools/list", json!({}));
     let mut names: Vec<&str> =
@@ -145,7 +134,7 @@ fn progress_hold_roundtrip() {
 
     let opened = client.request(4, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
     let open = &opened["result"]["structuredContent"];
-    assert_eq!(open["status"], "open", "{opened}");
+    assert_eq!(open["status"], "active", "{opened}");
     let url = open["url"].as_str().unwrap().to_string();
     let id = open["briefingId"].as_str().unwrap().to_string();
     assert!(url.starts_with("http://127.0.0.1:"));
@@ -187,7 +176,8 @@ fn progress_hold_roundtrip() {
 
 #[test]
 fn pending_then_await_and_cancel() {
-    let mut client = McpClient::spawn(&["mcp", "--max-wait-secs", "1"], "mcp-inspector", false);
+    let machine = Machine::new();
+    let mut client = McpClient::spawn(&machine, &["mcp", "--max-wait-secs", "1"], "mcp-inspector", false);
     let opened = client.request(2, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
     let id = opened["result"]["structuredContent"]["briefingId"].as_str().unwrap().to_string();
     let response = client.request(6, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
@@ -206,14 +196,18 @@ fn pending_then_await_and_cancel() {
     assert_eq!(cancelled["result"]["structuredContent"]["cancelled"], true);
     let after = client.request(5, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
     assert_eq!(after["result"]["structuredContent"]["status"], "cancelled");
-    assert_eq!(after["result"]["isError"], true);
+    assert_eq!(after["result"]["isError"], false);
 }
 
 #[test]
 fn elicitation_hold_for_codex() {
-    let mut client = McpClient::spawn(&["mcp"], "codex-mcp-client", true);
+    let machine = Machine::new();
+    let mut client = McpClient::spawn(&machine, &["mcp"], "codex-mcp-client", true);
     let opened = client.request(10, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
     let id = opened["result"]["structuredContent"]["briefingId"].as_str().unwrap().to_string();
+    let status = machine.command().args(["status", &id, "--json"]).output().unwrap();
+    let info: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(info["source"], format!("codex-mcp-client@{}", briefing::backend::hostname()));
     client.send_request(2, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
 
     // Server should ask us (the client) for an elicitation; answer it after submitting.
@@ -251,37 +245,75 @@ fn elicitation_hold_for_codex() {
     assert_eq!(response["result"]["structuredContent"]["status"], "cancelled", "{response}");
 }
 
-/// A briefing opened by one MCP server process can be recovered by a fresh one: it is
-/// re-served with a new link ("reopened"), and after the browser submits the feedback comes
-/// back through the second process.
+/// A briefing outlives the MCP server that opened it and the hub that server started: a fresh
+/// server's await_briefing starts the hub again, which serves the same link with the briefing
+/// intact, and the feedback comes back through it.
 #[test]
-fn recover_briefing_in_new_process() {
-    let mut first = McpClient::spawn(&["mcp"], "mcp-inspector", false);
+fn briefing_outlives_its_server_and_hub() {
+    let machine = Machine::with_fixed_port();
+    let mut first = McpClient::spawn(&machine, &["mcp"], "mcp-inspector", false);
     let opened = first.request(2, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
     let id = opened["result"]["structuredContent"]["briefingId"].as_str().unwrap().to_string();
-    let first_url = opened["result"]["structuredContent"]["url"].as_str().unwrap().to_string();
-    assert!(opened["result"]["structuredContent"]["instructions"].as_str().unwrap().contains(&first_url));
+    let url = opened["result"]["structuredContent"]["url"].as_str().unwrap().to_string();
+    assert!(opened["result"]["structuredContent"]["instructions"].as_str().unwrap().contains(&url));
     drop(first);
+    machine.stop_hub();
+    // Wait for the old hub to let go of the port.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::net::TcpStream::connect(("127.0.0.1", machine.port)).is_ok() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
-    let mut second = McpClient::spawn(&["mcp", "--max-wait-secs", "30"], "mcp-inspector", false);
-    let reopened = second.request(3, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
-    let content = &reopened["result"]["structuredContent"];
-    assert_eq!(content["status"], "reopened", "{reopened}");
-    let url = content["url"].as_str().unwrap().to_string();
-    assert_ne!(url, first_url);
-    assert_eq!(url.rsplit('/').next(), first_url.rsplit('/').next(), "same capability token");
-    assert!(content["instructions"].as_str().unwrap().contains(&url));
-
-    // Second await blocks; submit through the new link while it waits.
-    second.send_request(4, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
-    submit(&url, common::demo_submission(&["recovered"]));
-    let done = second.read_response(4, |_, _| {});
+    let mut second = McpClient::spawn(&machine, &["mcp", "--max-wait-secs", "30"], "mcp-inspector", false);
+    second.send_request(3, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
+    // The await restarts the hub; submit through the original link once it answers.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !reqwest::blocking::get(&url).is_ok_and(|r| r.status() == 200) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    submit(&url, common::demo_submission(&["after restart"]));
+    let done = second.read_response(3, |_, _| {});
     assert_eq!(done["result"]["structuredContent"]["status"], "completed", "{done}");
-    assert_eq!(done["result"]["structuredContent"]["feedback"]["notes"][0], "recovered");
+    assert_eq!(done["result"]["structuredContent"]["feedback"]["notes"][0], "after restart");
 
-    // A third process gets the stored result straight away.
-    let mut third = McpClient::spawn(&["mcp"], "mcp-inspector", false);
-    let stored = third.request(5, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
+    // Another server gets the stored result straight away.
+    let mut third = McpClient::spawn(&machine, &["mcp"], "mcp-inspector", false);
+    let stored = third.request(4, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
     assert_eq!(stored["result"]["structuredContent"]["status"], "completed");
-    assert_eq!(stored["result"]["structuredContent"]["feedback"]["notes"][0], "recovered");
+    assert_eq!(stored["result"]["structuredContent"]["feedback"]["notes"][0], "after restart");
+}
+
+/// A wait already in progress survives its hub going away mid-long-poll (exit, idle exit, or
+/// replacement by a newer client): the waiting server starts the hub again on the same port,
+/// and the submission made through the original link reaches it.
+#[test]
+fn a_waiting_await_survives_its_hub_restarting() {
+    let machine = Machine::with_fixed_port();
+    let mut client = McpClient::spawn(&machine, &["mcp", "--max-wait-secs", "60"], "mcp-inspector", false);
+    let opened = client.request(2, "tools/call", json!({"name": "brief_user", "arguments": demo_presentation()}));
+    let id = opened["result"]["structuredContent"]["briefingId"].as_str().unwrap().to_string();
+    let url = opened["result"]["structuredContent"]["url"].as_str().unwrap().to_string();
+    client.send_request(3, "tools/call", json!({"name": "await_briefing", "arguments": {"briefingId": id}}));
+    // Let the long-poll reach the hub before pulling it out from under the wait.
+    std::thread::sleep(Duration::from_millis(500));
+    let killed = briefing::local_hub::HubFile::read(machine.state.path()).unwrap().pid;
+    machine.stop_hub();
+
+    // Nothing else is a client of this machine: only the waiting server can bring the hub back.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let restarted = loop {
+        let pid = briefing::local_hub::HubFile::read(machine.state.path()).map(|file| file.pid);
+        if pid.is_some_and(|pid| pid != killed) && reqwest::blocking::get(&url).is_ok_and(|r| r.status() == 200) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(restarted, "the waiting server did not restart the hub");
+    submit(&url, common::demo_submission(&["survived"]));
+    let done = client.read_response(3, |_, _| {});
+    assert_eq!(done["result"]["structuredContent"]["status"], "completed", "{done}");
+    assert_eq!(done["result"]["structuredContent"]["feedback"]["notes"][0], "survived");
 }

@@ -3,10 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use briefing::backend::{Backend, BackendKind, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
+use briefing::backend::{Backend, BackendKind, Created, RemoteBackend, Site};
 use briefing::bind::{self, BindMode};
 use briefing::content::{self, Briefing};
-use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance};
+use briefing::guidance::show_link;
+use briefing::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Origin};
+use briefing::local_hub::{self, HubFile, HubLock, LocalHub};
 use briefing::mcp::{BriefingMcp, HoldMode};
 use briefing::response::{BriefingOutcome, Outcome};
 use briefing::store::Store;
@@ -18,6 +20,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 const EXIT_INTERRUPTED: i32 = 130;
+/// How often an idle-exiting hub checks whether anything is open.
+const IDLE_CHECK: Duration = Duration::from_secs(1);
 
 /// Paced browser briefings for coding agents (Pi, Claude Code, Codex, ...).
 #[derive(Parser)]
@@ -31,9 +35,12 @@ struct Cli {
 
 #[derive(Args, Clone)]
 struct Common {
-    /// Use a remote hub instead of an embedded server.
+    /// Use this hub instead of this machine's own (which starts on demand).
     #[arg(long, env = "BRIEFING_HUB", global = true)]
     hub: Option<String>,
+    /// Port this machine's hub listens on: `serve`, and the hub a client starts on demand.
+    #[arg(long, env = "BRIEFING_PORT", global = true)]
+    port: Option<u16>,
     // Help text is built from `bind::ACCEPTED` so it cannot drift from the parser.
     #[arg(
         long,
@@ -63,6 +70,14 @@ struct HoldArgs {
     max_wait_secs: Option<u64>,
 }
 
+/// How `present` reports the briefing it created.
+#[derive(Args, Clone)]
+struct PresentArgs {
+    /// Print the result as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
 /// How to wait for and report a briefing's result.
 #[derive(Args, Clone)]
 struct WaitArgs {
@@ -76,9 +91,6 @@ struct WaitArgs {
 
 #[derive(Args)]
 struct ServeArgs {
-    /// Port to listen on.
-    #[arg(long, env = "BRIEFING_PORT", default_value_t = 7789)]
-    port: u16,
     /// Origin to put in briefing URLs when behind a reverse proxy (e.g. https://briefings.example).
     #[arg(long, env = "BRIEFING_PUBLIC_ORIGIN")]
     public_origin: Option<String>,
@@ -91,23 +103,31 @@ struct ServeArgs {
     /// Also serve MCP (streamable HTTP) at /mcp.
     #[arg(long)]
     mcp: bool,
+    /// Exit once nothing has been open this long (e.g. 60s). Clients pass it to the hub they
+    /// start on demand; a hub you run yourself stays up.
+    #[arg(long, value_parser = parse_duration)]
+    idle_exit: Option<Duration>,
+    /// Started by a client for this machine: a newer client may replace it.
+    #[arg(long, hide = true)]
+    on_demand: bool,
     #[command(flatten)]
     hold: HoldArgs,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Present a JSON presentation (file or stdin), wait, and print the result.
+    /// Create a briefing from a JSON presentation (file or stdin) and print its link. Collect
+    /// the feedback with `await`.
     Present {
         /// Path to the presentation JSON ("-" or omitted = stdin).
         file: Option<String>,
         #[command(flatten)]
-        wait: WaitArgs,
+        args: PresentArgs,
     },
     /// Open the bundled demo presentation.
     Demo {
         #[command(flatten)]
-        wait: WaitArgs,
+        args: PresentArgs,
     },
     /// Run the MCP server over stdio.
     Mcp {
@@ -116,8 +136,7 @@ enum Command {
     },
     /// Run a long-lived hub: browser pages, an agent API, and optionally MCP over HTTP.
     Serve(ServeArgs),
-    /// Wait for a briefing created earlier, in this or another process, and print its result.
-    /// Prints a fresh link first when the briefing is still open.
+    /// Wait for a briefing's feedback and print it. Prints its link first while it is open.
     Await {
         briefing_id: String,
         #[command(flatten)]
@@ -215,16 +234,6 @@ impl Settings {
     }
 }
 
-/// Which server this process runs. Both create briefings through the same [`Site`], so the
-/// differences between them belong here rather than at each construction site.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Role {
-    /// Started on demand by a CLI or stdio-MCP run, on the machine the user is sitting at.
-    Embedded,
-    /// The long-running headless hub: it serves the dashboard and agent API.
-    Hub,
-}
-
 impl Common {
     fn bind_mode(&self) -> BindMode {
         self.bind.unwrap_or_default()
@@ -236,24 +245,26 @@ impl Common {
         self.open.unwrap_or(true)
     }
 
-    /// What a [`Site`] in this process does with the briefings it creates. The one place the
-    /// `Role` differences live.
-    fn site_options(&self, role: Role, public_origin: Option<String>) -> SiteOptions {
-        SiteOptions { agent_api: role == Role::Hub, public_origin }
+    fn port(&self) -> u16 {
+        self.port.unwrap_or(local_hub::DEFAULT_PORT)
     }
 }
 
-/// The client side of a CLI or stdio-MCP run: an embedded server or a hub, plus this machine's
-/// `open` preference, which applies the same to both.
+/// The client side of a CLI or stdio-MCP run: the configured hub, else this machine's own, plus
+/// this machine's `open` preference.
 fn backend(common: &Common) -> anyhow::Result<Backend> {
     let kind = match &common.hub {
         Some(hub) => BackendKind::Remote(RemoteBackend::new(hub)?),
-        None => {
-            let options = common.site_options(Role::Embedded, None);
-            BackendKind::Local(LocalBackend::new(common.bind_mode(), options, HubConfig::with_default_store()))
-        }
+        // Only settings this client was given: a hub it starts otherwise reuses the last one's.
+        None => BackendKind::Local(LocalHub::new(state_dir()?, common.bind, common.port)),
     };
     Ok(Backend::new(kind, common.open_browser()))
+}
+
+/// Where this machine's hub keeps its records and advertises itself.
+fn state_dir() -> anyhow::Result<std::path::PathBuf> {
+    Store::default_dir()
+        .ok_or_else(|| anyhow::anyhow!("no state directory for this machine's hub; set BRIEFING_STATE_DIR"))
 }
 
 fn cli_source() -> String {
@@ -287,25 +298,25 @@ impl Reporter {
             let _ = writeln!(err, "{human}");
         }
     }
+}
 
-    fn ready(&self, created: &Created) {
-        let mut lines = vec![
-            format!("Open briefing ({}): {}", created.scope, created.url),
-            format!("Briefing id {} (recover later with `briefing await {}`)", created.id, created.id),
-        ];
-        if let Some(host) = &created.bind_host {
-            lines.push(format!("Listening on {} ({host})", created.label));
-        }
-        if !created.opened_browser {
-            lines.push("Browser not opened automatically; open the URL manually".into());
-        }
-        if let Some(diag) = &created.diagnostics {
-            lines.push(diag.clone());
-        }
-        let mut value = serde_json::to_value(created).unwrap_or_default();
-        value["event"] = json!("ready");
-        self.event(value, lines.join("\n"));
+/// What `present` prints: the link to relay, and how to collect the feedback.
+fn print_created(created: &Created, json: bool) -> anyhow::Result<()> {
+    let id = &created.id;
+    if json {
+        let mut value = serde_json::to_value(created)?;
+        value["status"] = json!("active");
+        value["instructions"] = json!(format!(
+            "{}. Then run `briefing await {id} --json` (in the background if your harness supports it) to collect \
+             their feedback.",
+            show_link(&created.url)
+        ));
+        println!("{value}");
+    } else {
+        println!("{}", show_link(&created.url));
+        println!("Collect the feedback with `briefing await {id}`");
     }
+    Ok(())
 }
 
 async fn wait_and_print(backend: &Backend, id: &str, args: &WaitArgs) -> anyhow::Result<i32> {
@@ -313,9 +324,10 @@ async fn wait_and_print(backend: &Backend, id: &str, args: &WaitArgs) -> anyhow:
     let timeout = args.wait_seconds.map(Duration::from_secs).unwrap_or(Duration::from_secs(365 * 24 * 60 * 60));
     let outcome = tokio::select! {
         outcome = backend.wait(id, timeout) => outcome?,
+        // The briefing lives in the hub, not this process: stop waiting, leave it open.
         _ = shutdown_signal() => {
-            reporter.event(json!({"event": "interrupted", "id": id}), "Interrupted; cancelling the briefing".into());
-            let _ = backend.cancel(id).await;
+            let human = format!("Stopped waiting; the briefing stays open (`briefing await {id}` resumes)");
+            reporter.event(json!({"event": "interrupted", "briefingId": id}), human);
             return Ok(EXIT_INTERRUPTED);
         }
     };
@@ -328,7 +340,7 @@ async fn wait_and_print(backend: &Backend, id: &str, args: &WaitArgs) -> anyhow:
     };
     let human =
         if outcome == Outcome::Pending { format!("Briefing {id} is still open") } else { format!("Briefing {event}") };
-    reporter.event(json!({"event": event, "id": id}), human);
+    reporter.event(json!({"event": event, "briefingId": id}), human);
     let mut out = std::io::stdout().lock();
     if reporter.json {
         let result = BriefingOutcome { briefing_id: id.to_string(), outcome };
@@ -355,13 +367,10 @@ async fn shutdown_signal() {
     }
 }
 
-async fn present(common: &Common, presentation: Briefing, args: &WaitArgs) -> anyhow::Result<i32> {
-    let backend = backend(common)?;
-    let created = backend.create(presentation, Some(cli_source())).await?;
-    Reporter { json: args.json }.ready(&created);
-    let code = wait_and_print(&backend, &created.id, args).await?;
-    backend.shutdown().await;
-    Ok(code)
+async fn present(common: &Common, presentation: Briefing, args: &PresentArgs) -> anyhow::Result<i32> {
+    let created = backend(common)?.create(presentation, Origin::source(cli_source())).await?;
+    print_created(&created, args.json)?;
+    Ok(0)
 }
 
 async fn run_mcp_stdio(common: &Common, hold: HoldArgs) -> anyhow::Result<()> {
@@ -376,7 +385,7 @@ async fn run_mcp_stdio(common: &Common, hold: HoldArgs) -> anyhow::Result<()> {
 fn mcp_router(site: &Arc<Site>, hold: &HoldArgs) -> axum::Router<Arc<Site>> {
     // The hub is headless: briefings created over its `/mcp` never open a browser here; the
     // agent hands the link to the user instead.
-    let backend = Arc::new(Backend::new(BackendKind::Local(LocalBackend::attached(site.clone())), false));
+    let backend = Arc::new(Backend::new(BackendKind::Site(site.clone()), false));
     let (hold, max_wait) = (hold.hold, hold.max_wait_secs.map(Duration::from_secs));
     let config = StreamableHttpServerConfig::default().with_allowed_hosts(site.config.allowed_hosts());
     let service = StreamableHttpService::new(
@@ -388,15 +397,35 @@ fn mcp_router(site: &Arc<Site>, hold: &HoldArgs) -> axum::Router<Arc<Site>> {
 }
 
 async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
-    let target = common.bind_mode().target().await?;
+    // A hub owns its state dir: without one there is nothing to own, so no memory-only fallback.
+    let dir = state_dir()?;
+    let store = Store::open(&dir).map_err(|error| anyhow::anyhow!("state directory {}: {error}", dir.display()))?;
+    // Held until this function returns, so no other hub loads, sweeps, or writes these records.
+    let Some(_lock) = HubLock::acquire(&dir).await? else {
+        let owner = HubFile::read(&dir).map(|file| format!(" at {} (pid {})", file.origin, file.pid));
+        anyhow::bail!("another hub already owns {}{}", dir.display(), owner.unwrap_or_default());
+    };
     let hub = Arc::new(Hub::new(HubConfig {
         finished_ttl: args.finished_ttl,
         active_ttl: args.active_ttl,
-        ..HubConfig::with_default_store()
+        store: Some(store),
     }));
-    let options = common.site_options(Role::Hub, args.public_origin);
-    let (site, running) =
-        Site::start(hub, target, args.port, options, |site| args.mcp.then(|| mcp_router(site, &args.hold))).await?;
+    let bind = common.bind_mode();
+    let preferred = bind.target().await?;
+    let fallback = bind.fallback(&preferred);
+    let start = |target| {
+        Site::start(hub.clone(), target, common.port(), args.public_origin.clone(), |site| {
+            args.mcp.then(|| mcp_router(site, &args.hold))
+        })
+    };
+    let (site, running) = match (start(preferred).await, fallback) {
+        (Ok(started), _) => started,
+        (Err(error), Some(fallback)) => {
+            tracing::warn!(%error, "falling back to loopback");
+            start(fallback).await?
+        }
+        (Err(error), None) => return Err(error),
+    };
     let origin = &site.config.public_origin;
     eprintln!("briefing hub listening on {} ({})", running.local_addr, site.target.label);
     eprintln!("briefing URLs use origin {origin}");
@@ -404,16 +433,48 @@ async fn serve(common: &Common, args: ServeArgs) -> anyhow::Result<()> {
         "dashboard: {origin}/  agent API: {origin}/agent/briefings{}",
         if args.mcp { format!("  MCP: {origin}/mcp") } else { String::new() }
     );
-    if let Some(dir) = Store::default_dir() {
-        eprintln!("records: {}", dir.display());
-    }
     if let Some(diag) = &site.target.diagnostics {
         eprintln!("{diag}");
     }
-    shutdown_signal().await;
-    eprintln!("shutting down");
+    eprintln!("records: {}", dir.display());
+    // Advertised only once listening; it stays after exit so the next hub reuses these settings.
+    let identity = local_hub::identity();
+    let port = running.local_addr.port();
+    let file = HubFile {
+        origin: briefing::http::origin_for(site.target.host, port),
+        pid: std::process::id(),
+        version: env!("BRIEFING_VERSION").into(),
+        on_demand: args.on_demand,
+        bind: bind.to_string(),
+        port,
+        instance: identity.instance.clone(),
+        control: identity.control.clone(),
+    };
+    if let Err(error) = file.write(&dir) {
+        running.stop().await;
+        anyhow::bail!("could not advertise this hub in {}: {error}", dir.display());
+    }
+    tokio::select! {
+        _ = shutdown_signal() => eprintln!("shutting down"),
+        _ = idle(&site.hub, args.idle_exit) => eprintln!("nothing open; shutting down"),
+        _ = local_hub::shutdown_requested() => eprintln!("replaced by a newer hub; shutting down"),
+    }
     running.stop().await;
     Ok(())
+}
+
+/// Resolves once `hub` has had nothing open for `limit`; never without a limit.
+async fn idle(hub: &Hub, limit: Option<Duration>) {
+    let Some(limit) = limit else { return std::future::pending().await };
+    let mut idle_since = tokio::time::Instant::now();
+    loop {
+        tokio::time::sleep(IDLE_CHECK.min(limit)).await;
+        if hub.active_count() > 0 {
+            idle_since = tokio::time::Instant::now();
+        } else if idle_since.elapsed() >= limit {
+            return;
+        }
+    }
 }
 
 fn print_status_table(infos: &[BriefingInfo]) {
@@ -442,13 +503,7 @@ fn print_status_table(infos: &[BriefingInfo]) {
             };
             extras.push(format!("{position}, {} comments", draft.annotations));
         }
-        if info.provenance == Provenance::DiskOnly && info.status == BriefingStatus::Active {
-            extras.push(format!(
-                "served by another process; `briefing await {}` re-serves it if that one is gone",
-                info.id
-            ));
-        }
-        println!("{:<9} {:<18} {:>7}  {}", status, info.id, age, info.title);
+        println!("{:<9} {:<22} {:>7}  {}", status, info.id, age, info.title);
         if !extras.is_empty() {
             println!("{:<9} {}", "", extras.join(" · "));
         }
@@ -483,11 +538,11 @@ async fn run(mut cli: Cli) -> anyhow::Result<i32> {
     settings.overlay(&mut cli.common);
 
     match cli.command {
-        Command::Present { file, wait } => {
+        Command::Present { file, args } => {
             let presentation = read_presentation(file.as_deref())?;
-            present(&cli.common, presentation, &wait).await
+            present(&cli.common, presentation, &args).await
         }
-        Command::Demo { wait } => present(&cli.common, content::demo(), &wait).await,
+        Command::Demo { args } => present(&cli.common, content::demo(), &args).await,
         Command::Mcp { hold } => {
             run_mcp_stdio(&cli.common, hold).await?;
             Ok(0)
@@ -508,11 +563,10 @@ async fn run(mut cli: Cli) -> anyhow::Result<i32> {
                 let url = info.url.clone().unwrap_or_default();
                 let mut value = serde_json::to_value(&info)?;
                 value["event"] = json!("ready");
-                Reporter { json: wait.json }.event(value, format!("Open briefing: {url}"));
+                value["instruction"] = json!(show_link(&url));
+                Reporter { json: wait.json }.event(value, show_link(&url));
             }
-            let code = wait_and_print(&backend, &briefing_id, &wait).await?;
-            backend.shutdown().await;
-            Ok(code)
+            wait_and_print(&backend, &briefing_id, &wait).await
         }
         Command::Cancel { briefing_id } => {
             let backend = backend(&cli.common)?;
@@ -589,14 +643,14 @@ mod tests {
 
     /// A `Common` with everything unset, as clap leaves it before the file overlay.
     fn bare_common() -> Common {
-        Common { hub: None, bind: None, open: None }
+        Common { hub: None, port: None, bind: None, open: None }
     }
 
     #[test]
     fn overlay_fills_only_unset_fields() {
         // A file value wins only where clap left the field unset; an argument/env value stands.
         // Every field is set on both layers so a forgotten `overlay` line cannot hide here.
-        let mut common = Common { bind: Some(BindMode::Tailscale), open: Some(true), hub: None };
+        let mut common = Common { bind: Some(BindMode::Tailscale), open: Some(true), hub: None, port: None };
         Settings { bind: Some(BindMode::Local), hub: Some("https://hub.example".into()), open: Some(false) }
             .overlay(&mut common);
         assert_eq!(common.bind, Some(BindMode::Tailscale)); // set on CLI, file ignored

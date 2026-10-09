@@ -35,6 +35,8 @@ briefing await --help
 
 - Finish your research first.
 - Build a presentation JSON file that matches `briefing schema`.
-- Run `briefing present <file> --json` or pipe JSON to `briefing present --json`.
+- Run `briefing present <file> --json`. It returns right away; show the user its link.
+- Then run `briefing await <id> --json`, in the background if your harness supports it, and
+  wait for it to finish instead of polling. Never pipe it through `tail`, `head`, or similar.
 - When feedback returns, respond only to that feedback: act on question answers (an
   `unresolved` one is still open, not approval), address inline comments, and act on notes.

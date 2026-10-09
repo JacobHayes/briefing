@@ -106,7 +106,7 @@ pub fn mcp_guidance() -> String {
          and returns their feedback. If await_briefing returns status \"pending\", call it again. If your harness moves \
          the call to the background, stop and wait for its completion notification; do not poll.\n\nIf a session was \
          interrupted, or the user gives you a briefingId, call await_briefing with it: it returns the stored feedback if \
-         they already submitted, or reopens the briefing (status \"reopened\" with a fresh link to relay) if not."
+         they already submitted, or keeps waiting on the same link if not."
     )
 }
 
@@ -117,11 +117,19 @@ pub fn cli_guidance() -> String {
         "Briefing CLI guidance\n\nDiscover the installed CLI before use:\n- `briefing --help` for available \
          commands and global flags.\n- `briefing present --help` for the current presentation flow.\n- `briefing schema` \
          for the exact presentation JSON schema.\n- `briefing status --help` and `briefing await --help` for recovery.\n\n\
-         Typical flow:\n1. Finish the research first.\n2. Write a presentation JSON file that matches `briefing schema`.\n3. \
-         Run `briefing present <file> --json` (or pipe JSON on stdin). It prints a ready event with the link on stderr \
-         and blocks until the user submits, cancels, or the wait budget expires.\n4. If the result is completed, act only \
-         on the returned feedback. If it is pending or the process was interrupted, use the briefing id with `briefing \
-         await <id> --json`; `briefing status` lists recoverable briefings.\n\nBriefing rules:\n{rules}\n"
+         Typical flow:\n1. Finish the research first.\n2. Write a presentation JSON file that matches `briefing schema`. \
+         `present` reports every validation problem at once; fix them all before running it again.\n3. Run `briefing \
+         present <file> --json`. It returns right away with the link (`url`) and the next step (`instructions`). Show \
+         the user that link right away.\n4. Then run `briefing await <id> --json` to collect the feedback. It waits as \
+         long as the user needs, hours or days if necessary. If your harness can run commands in the background \
+         (Claude Code: `run_in_background`), run it that way and wait for the completion notification; do not poll or \
+         re-run it. Leave `--wait-seconds` unset unless your harness kills long-running commands.\n5. Never pipe \
+         `await` through `tail`, `head`, `jq`, or similar.\n6. The result on stdout has a `status`: `completed` (act \
+         only on the returned feedback), `cancelled`, or `pending` (only after `--wait-seconds`). All three exit 0; a \
+         nonzero exit is a real error. The briefing lives in a hub, not in your command: if `await` is interrupted or \
+         returns pending, run it again with the same id. `briefing status` lists recoverable \
+         briefings.\n\nBriefing \
+         rules:\n{rules}\n"
     )
 }
 
@@ -165,11 +173,19 @@ briefing await --help
 
 - Finish your research first.
 - Build a presentation JSON file that matches `briefing schema`.
-- Run `briefing present <file> --json` or pipe JSON to `briefing present --json`.
+- Run `briefing present <file> --json`. It returns right away; show the user its link.
+- Then run `briefing await <id> --json`, in the background if your harness supports it, and
+  wait for it to finish instead of polling. Never pipe it through `tail`, `head`, or similar.
 - When feedback returns, respond only to that feedback: act on question answers (an
   `unresolved` one is still open, not approval), address inline comments, and act on notes.
 "#
     )
+}
+
+/// The line an agent relays: the user may be on another machine and cannot see the agent's
+/// terminal or tool output, so the link only reaches them if the agent repeats it.
+pub fn show_link(url: &str) -> String {
+    format!("Show the user this link: {url}")
 }
 
 /// `6 hours`, `14 days`, `90 minutes`.

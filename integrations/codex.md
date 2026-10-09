@@ -49,5 +49,5 @@ awaiting feedback.
 ## Recovery
 
 If Codex loses the tool call (timeout, restart), ask it to call `await_briefing` with the
-briefing id shown on the page: it returns the stored feedback if you already submitted, or a
-fresh link with your draft intact if not.
+briefing id shown on the page: it returns the stored feedback if you already submitted, or
+keeps waiting on the same link, with your draft intact, if not.

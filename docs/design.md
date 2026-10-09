@@ -127,7 +127,7 @@ IPs never fall back and report scope `explicit`, without implying network trust.
 
 `open` is per-machine rather than per-command, so the layers resolve it once. Opening is a
 client concern: `Backend::create` in `src/backend.rs` opens the URL on the creating process's
-machine, whether the briefing is served in-process or by a hub. The server side (`Site`) never
+machine, whichever hub serves the briefing. The server side (`Site`) never
 opens a browser, so `serve` is headless by construction, and a `serve` run that was given an
 explicit `--open true` says so rather than ignoring it silently.
 
@@ -173,25 +173,48 @@ draft, which only the page reads.
 ## Security and lifecycle
 
 - Default to loopback/Tailscale. Explicit IPs are opt-in; wildcards expose all interfaces.
-- Every briefing URL carries a cryptographically random capability token; the agent side uses
-  a separate id. Show the URL to the user so it can be opened from another authorized device.
-  Capability tokens do not protect the hub dashboard or agent API.
+- Every briefing has one cryptographically random id (~131 bits). It is both the agent-side
+  handle and the capability in the URL (`/briefing/<id>`); a separate URL token would protect
+  nothing while the dashboard and agent API, which list both, are unauthenticated. Show the URL
+  to the user so it can be opened from another authorized device. The id does not protect the
+  hub dashboard or agent API.
 - Require an allowed bound/public `Host` header on every request and an allowed `Origin` on
   browser writes. These are DNS-rebinding/cross-site defenses, not authentication.
   Strict CSP with a per-page nonce; renderer libraries are served from the binary, no
   CDN. Remote data and images referenced by content are allowed (charts, illustrations).
 - Sanitize any HTML in content: no scripts, event handlers, dangerous URLs, or styles that
   could break the page.
-- The embedded server starts lazily on the first briefing, not at process start, and serves
-  for the life of the process. Every way of creating a briefing (CLI, MCP over stdio or HTTP,
-  the hub's agent API) goes through the one site's create path, so validation and the
-  recorded link behave the same everywhere. Opening the browser happens a layer
-  up, in the client's `Backend`, so embedded and hub-served briefings open in the creating
-  client's browser unless disabled, and the hub never opens one itself. A browser opener that
-  fails only logs a warning; the briefing stays live and the caller still shows the link.
+- Briefings always live in a hub, and every CLI and MCP process is a client of one: the
+  configured `--hub`, or this machine's own (`src/local_hub.rs`). One hub owns a state dir,
+  enforced by an OS lock on `.hub.lock` taken before it loads or sweeps a record and held
+  until it exits. The owner advertises itself in `.hub.json` (origin, bind, port, version, a
+  per-process instance id, and a control secret); the file outlives the hub, so a client
+  trusts it only when `/healthz` at that origin echoes the instance id. A client that finds no
+  live hub starts `briefing serve --on-demand --idle-exit 60s` in the background, on its
+  explicit settings or else the bind and port the last hub used; that hub exits a minute
+  after nothing is open. A client newer than an on-demand hub replaces it immediately: a
+  `POST /control/shutdown` with the secret, a wait for the lock to be released, then a fresh
+  start. Waiting clients reconnect across the switch, and a client still running the older
+  release keeps working against the newer hub, which answers it in its protocol (see the
+  README's hub section). Discovery and replacement (`/healthz`, `/control/shutdown`) sit
+  outside protocol negotiation, so they work across any two versions. A hub reloads every
+  record at startup, upgrading older ones in place (`src/migrate.rs`), so a restart keeps
+  briefings and, on the same port, their links; a browser alone cannot start one, so after a
+  reboot a link answers once any client has run.
+- Persistence is part of success: a create, draft save, or outcome is written to the store
+  before memory changes and before waiters wake, in order, and a failed write is an error
+  rather than a log line. `serve` refuses to run without a usable state dir. `present` therefore
+  returns as soon as the briefing exists, and `await` is the only command that waits; an
+  interrupted `await` stops waiting without cancelling.
+- Every way of creating a briefing (CLI, MCP over stdio or HTTP, the hub's agent API) goes
+  through the one site's create path, so validation and the link behave the same everywhere.
+  Opening the browser happens a layer up, in the client's `Backend`, so briefings open in the
+  creating client's browser unless disabled, and the hub never opens one itself. A browser
+  opener that fails only logs a warning; the briefing stays live and the caller still shows
+  the link.
 - A wait ends in exactly one of `pending`, `completed`, or `cancelled`, carried as a tagged
   `status` with the feedback alongside; the CLI's `--json` output, the hub API, and the MCP
-  `await_briefing` result all use that shape (MCP adds `reopened` for a recovered briefing). Records are written to the user's state directory with
+  `await_briefing` result all use that shape. Records are written to the user's state directory with
   owner-only permissions and swept 7 days after finishing (28 days if never answered).
 - Restrict all hub routes through network controls or an authenticating proxy; block untrusted
   direct access. Briefing does not authenticate proxy identity headers.

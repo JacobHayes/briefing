@@ -1,11 +1,23 @@
 import assert from "node:assert/strict";
-import { afterEach, before, test } from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, afterEach, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createJiti } from "jiti";
 
-// The extension reads BRIEFING_BIN when it loads, so point it at the fake CLI first.
+// The extension reads BRIEFING_BIN when it loads, so point it at the fake CLI first. The fake's
+// `cancel` records ids in BRIEFING_TEST_DIR, where its `await` looks for them.
 process.env.BRIEFING_BIN = fileURLToPath(new URL("./fake-briefing.mjs", import.meta.url));
+process.env.BRIEFING_TEST_DIR = mkdtempSync(join(tmpdir(), "briefing-pi-smoke-"));
+const cancelledIds = () => {
+  try {
+    return readFileSync(join(process.env.BRIEFING_TEST_DIR, "cancelled"), "utf8").split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+};
 
 const SECTION = "briefing_command";
 const INTERACTION_TOOLS = ["brief_user", "briefing_demo", "briefing_result"];
@@ -20,7 +32,12 @@ before(async () => {
   extension = await jiti.import(path, { default: true });
   ({ pendingBriefingId, supportsPi } = await jiti.import(path));
 });
-afterEach(() => { delete process.env.BRIEFING_TEST_STATUS; });
+afterEach(() => {
+  delete process.env.BRIEFING_TEST_STATUS;
+  delete process.env.BRIEFING_TEST_CREATE_MS;
+  rmSync(join(process.env.BRIEFING_TEST_DIR, "cancelled"), { force: true });
+});
+after(() => rmSync(process.env.BRIEFING_TEST_DIR, { recursive: true, force: true }));
 
 /** Load the extension against a minimal Pi host that records what it is asked to do. */
 function createHarness({ branch = [] } = {}) {
@@ -184,6 +201,30 @@ for (const action of ["escape", "brief-cancel", "abort", "shutdown"]) {
     assert.equal(await pi.commandSection(), undefined);
     assert.equal(pendingBriefingId(pi.entries), detaches ? "fixture-id" : undefined,
       "a detached briefing stays pending; a cancelled one is settled");
+    assert.deepEqual(cancelledIds(), detaches ? [] : ["fixture-id"], "cancelling cancels the briefing in the hub");
+  });
+}
+
+// While `present` is still creating the briefing there is no id to cancel yet: the action is
+// remembered and applied once there is.
+for (const action of ["brief-cancel", "abort", "shutdown"]) {
+  const detaches = action === "shutdown";
+  test(`${action} while the briefing is being created ${detaches ? "leaves it open" : "cancels it"}`, async () => {
+    process.env.BRIEFING_TEST_STATUS = "wait";
+    process.env.BRIEFING_TEST_CREATE_MS = "200";
+    const pi = createHarness();
+    await pi.emit("session_start", { reason: "new" });
+    await pi.command("brief-demo");
+    const controller = new AbortController();
+    const execution = pi.run("briefing_demo", controller.signal);
+    const rejected = assert.rejects(execution, detaches ? /shutting down/ : /cancelled/);
+    if (action === "brief-cancel") await pi.command("brief-cancel");
+    else if (action === "abort") controller.abort();
+    else await pi.emit("session_shutdown");
+    await rejected;
+    assert.deepEqual(cancelledIds(), detaches ? [] : ["fixture-id"]);
+    assert.equal(pendingBriefingId(pi.entries), detaches ? "fixture-id" : undefined,
+      "a briefing left open is pending, so a resumed session reattaches to it");
   });
 }
 

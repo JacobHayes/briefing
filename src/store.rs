@@ -1,9 +1,9 @@
-//! On-disk copies of briefing records, so a briefing survives the process that created it.
+//! On-disk copies of a hub's briefing records, so briefings survive a hub restart.
 //!
 //! One JSON file per briefing under `$XDG_STATE_HOME/briefing/briefings` (override with
 //! `BRIEFING_STATE_DIR`). Files are written on create, on every draft save, and on
-//! completion; any `briefing` process can adopt one (`briefing await <id>`), and the sweep
-//! deletes them on the same TTLs as the in-memory registry. Nothing here is long-term state.
+//! completion; the hub that owns the directory reloads them at startup and deletes them when
+//! its sweep expires them. Nothing here is long-term state.
 //!
 //! Each file records its `schemaVersion`. Opening the store upgrades every older file in place
 //! (see [`crate::migrate`]), and loading one migrates it too, for files an older process wrote
@@ -26,7 +26,6 @@ pub struct StoredRecord {
     /// Shape of this file; always [`migrate::SCHEMA_VERSION`] once loaded.
     pub schema_version: u64,
     pub id: String,
-    pub token: String,
     pub presentation: Briefing,
     pub status: BriefingStatus,
     /// Unix seconds.
@@ -35,9 +34,6 @@ pub struct StoredRecord {
     pub finished_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Public URL at creation time (may be dead once the serving process exits).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
     #[serde(default)]
     pub draft_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,18 +70,6 @@ impl Store {
         Some(Self::xdg_base("XDG_STATE_HOME", ".local/state")?.join("briefing/briefings"))
     }
 
-    /// Open (creating) the default store; `None` with a warning when no directory is usable.
-    pub fn open_default() -> Option<Store> {
-        let dir = Self::default_dir()?;
-        match Self::open(&dir) {
-            Ok(store) => Some(store),
-            Err(error) => {
-                tracing::warn!(%error, dir = %dir.display(), "briefing state directory unusable; records stay in memory");
-                None
-            }
-        }
-    }
-
     pub fn open(dir: &Path) -> std::io::Result<Store> {
         std::fs::create_dir_all(dir)?;
         #[cfg(unix)]
@@ -108,27 +92,8 @@ impl Store {
     }
 
     pub fn save(&self, record: &StoredRecord) -> std::io::Result<()> {
-        self.write(&record.id, &serde_json::to_vec(record).map_err(std::io::Error::other)?)
-    }
-
-    /// Atomic write (temp file + rename), owner-only permissions.
-    pub fn write(&self, id: &str, bytes: &[u8]) -> std::io::Result<()> {
-        let path = self.path(id).ok_or_else(|| std::io::Error::other("invalid briefing id"))?;
-        let tmp = self.dir.join(format!(".{id}.{}.tmp", std::process::id()));
-        {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&tmp)?;
-            use std::io::Write;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, &path)
+        let path = self.path(&record.id).ok_or_else(|| std::io::Error::other("invalid briefing id"))?;
+        write_atomic(&path, &serde_json::to_vec(record).map_err(std::io::Error::other)?)
     }
 
     pub fn load(&self, id: &str) -> Option<StoredRecord> {
@@ -175,23 +140,9 @@ impl Store {
         records
     }
 
-    pub fn find_by_token(&self, token: &str) -> Option<StoredRecord> {
-        self.list().into_iter().find(|record| record.token == token)
-    }
-
-    /// Delete records past their TTL (finished ones after `finished_ttl`, unanswered ones after
-    /// `active_ttl`) plus stray temp files.
-    pub fn sweep(&self, finished_ttl: Duration, active_ttl: Duration) {
-        let now = now_secs();
-        for record in self.list() {
-            let expired = match record.finished_at {
-                Some(finished) => now.saturating_sub(finished) >= finished_ttl.as_secs(),
-                None => now.saturating_sub(record.created_at) >= active_ttl.as_secs(),
-            };
-            if expired {
-                self.remove(&record.id);
-            }
-        }
+    /// Delete temp files left by interrupted writes. Expired records are the hub's call: it
+    /// owns the directory and removes them itself.
+    pub fn remove_stale_temp_files(&self) {
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -210,6 +161,31 @@ impl Store {
     }
 }
 
+/// Atomic write (hidden temp file beside `path` + rename), owner-only permissions, so a reader
+/// never sees half a file.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| std::io::Error::other("no file name"))?;
+    let tmp = path.with_file_name(format!(".{}.{}.tmp", name.trim_start_matches('.'), std::process::id()));
+    let written = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,13 +195,11 @@ mod tests {
         StoredRecord {
             schema_version: migrate::SCHEMA_VERSION,
             id: id.into(),
-            token: format!("tok-{id}"),
             presentation: demo(),
             status: if finished_at.is_some() { BriefingStatus::Completed } else { BriefingStatus::Active },
             created_at: now_secs(),
             finished_at,
             source: Some("test".into()),
-            url: None,
             draft_revision: 0,
             draft: None,
             result: None,
@@ -233,16 +207,15 @@ mod tests {
     }
 
     #[test]
-    fn save_load_list_sweep() {
+    fn save_load_list_remove() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         store.save(&record("abc", None)).unwrap();
         store.save(&record("old", Some(now_secs() - 10_000))).unwrap();
-        assert_eq!(store.load("abc").unwrap().token, "tok-abc");
         assert!(store.load("../etc/passwd").is_none());
         assert_eq!(store.list().len(), 2);
-        assert_eq!(store.find_by_token("tok-old").unwrap().id, "old");
-        store.sweep(Duration::from_secs(3600), Duration::from_secs(86_400));
+        store.remove("old");
+        store.remove_stale_temp_files();
         assert!(store.load("old").is_none());
         assert!(store.load("abc").is_some());
         #[cfg(unix)]

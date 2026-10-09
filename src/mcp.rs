@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::backend::{Backend, Created};
 use crate::bind::Scope;
 use crate::content::{Briefing, schema_value};
-use crate::hub::Provenance;
+use crate::guidance::show_link;
+use crate::hub::Origin;
 use crate::response::Outcome;
 
 /// How to keep a long `await_briefing` call alive while the human reads.
@@ -65,7 +66,7 @@ pub struct CancelParams {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenOutput {
-    /// Always "open".
+    /// Always "active": the same word `briefing status` and the hub API use for an open briefing.
     pub status: String,
     pub briefing_id: String,
     /// Link the user must open. Show it verbatim.
@@ -78,24 +79,13 @@ pub struct OpenOutput {
     pub instructions: String,
 }
 
-/// What `await_briefing` reports under `status`: a wait [`Outcome`], or `reopened`.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(tag = "status", rename_all = "lowercase")]
-pub enum AwaitStatus {
-    /// A briefing from an earlier process is being served again at `url`; relay the link,
-    /// then call await_briefing again.
-    Reopened,
-    #[serde(untagged)]
-    Outcome(Outcome),
-}
-
 /// `await_briefing` output.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AwaitOutput {
     pub briefing_id: String,
     #[serde(flatten)]
-    pub status: AwaitStatus,
+    pub outcome: Outcome,
     /// The link, while the briefing is still open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -388,35 +378,29 @@ impl BriefingMcp {
         }
     }
 
+    /// Every outcome is a successful call, cancelled included (as with the CLI's exit 0); the
+    /// `status` says which it was.
     fn outcome_result(id: &str, url: &str, outcome: Outcome) -> CallToolResult {
-        let (text, url, instructions, is_error) = match &outcome {
+        let (text, url, instructions) = match &outcome {
             Outcome::Pending => (
                 format!("Briefing {id} still open at {url}"),
                 Some(url.to_string()),
                 format!(
                     "The user has not submitted yet. Call await_briefing again with briefingId \"{id}\" to keep waiting (remind the user of the link {url} if they seem stuck), or cancel_briefing to stop."
                 ),
-                false,
             ),
             Outcome::Completed { feedback } => (
                 format!("Briefing {id} completed: {}", feedback.counts()),
                 None,
                 "Respond only to this feedback: act on question answers, treat unresolved questions as still open (not approval), address each comment (location + quoted passage + comment) and each note. Do not repeat the presentation.".to_string(),
-                false,
             ),
             Outcome::Cancelled { feedback } => (
                 format!("Briefing {id} cancelled: {}", feedback.counts()),
                 None,
                 "The user cancelled the briefing without submitting. Ask how they would like to proceed; do not reopen it unasked.".to_string(),
-                true,
             ),
         };
-        let mut result = structured(
-            text,
-            &AwaitOutput { briefing_id: id.into(), status: AwaitStatus::Outcome(outcome), url, instructions },
-        );
-        result.is_error = Some(is_error);
-        result
+        structured(text, &AwaitOutput { briefing_id: id.into(), outcome, url, instructions })
     }
 
     fn require_structured_content(ctx: &RequestContext<RoleServer>) -> Result<(), ErrorData> {
@@ -445,7 +429,7 @@ impl BriefingMcp {
         Self::require_structured_content(&ctx)?;
         let created: Created = self
             .backend
-            .create(input, Some(Self::source(&ctx)))
+            .create(input, Origin::source(Self::source(&ctx)))
             .await
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         let opened = if created.opened_browser {
@@ -454,9 +438,9 @@ impl BriefingMcp {
             "No browser was opened; the user must open the link themselves (they may be on another machine)."
         };
         Ok(structured(
-            format!("Briefing {} open at {}", created.id, created.url),
+            format!("{} (briefing {})", show_link(&created.url), created.id),
             &OpenOutput {
-                status: "open".into(),
+                status: "active".into(),
                 instructions: format!(
                     "Put this exact link in your reply so the user can open it: {url}. {opened} Then call await_briefing with briefingId \"{id}\"; it blocks until the user submits and returns their feedback. If the call is moved to the background, wait for its completion notification instead of polling. The briefing survives this session; await_briefing with the same briefingId recovers it later.",
                     url = created.url,
@@ -470,7 +454,7 @@ impl BriefingMcp {
         ))
     }
 
-    /// Wait for the user to submit a briefing opened by brief_user (this session or an earlier one). Blocks until they submit; may return "pending" (call again) or "reopened" (relay the fresh link, then call again). Do not poll if the harness backgrounds it.
+    /// Wait for the user to submit a briefing opened by brief_user (this session or an earlier one). Blocks until they submit; may return "pending" (call again). Do not poll if the harness backgrounds it.
     #[tool(name = "await_briefing", output_schema = output_schema::<AwaitOutput>())]
     async fn await_briefing(
         &self,
@@ -485,19 +469,6 @@ impl BriefingMcp {
             .map_err(internal)?
             .ok_or_else(|| ErrorData::invalid_params(format!("unknown briefingId {id}"), None))?;
         let url = info.url.clone().unwrap_or_else(|| format!("(briefing {})", info.title));
-        if info.provenance == Provenance::Reopened {
-            return Ok(structured(
-                format!("Briefing {id} reopened at {url}"),
-                &AwaitOutput {
-                    briefing_id: id.clone(),
-                    status: AwaitStatus::Reopened,
-                    url: Some(url.clone()),
-                    instructions: format!(
-                        "This briefing was created by an earlier process and is now served again at {url}; earlier links are dead. Put this exact link in your reply (the user's draft is preserved), then call await_briefing with briefingId \"{id}\" to wait for their feedback."
-                    ),
-                },
-            ));
-        }
         let (hold, budget) = self.plan(&ctx);
         let max_wait = input.wait_seconds.map(Duration::from_secs).unwrap_or(budget).min(budget);
         let outcome = self.wait_for(&id, &url, &ctx, hold, max_wait).await?;
@@ -557,14 +528,14 @@ mod tests {
         assert_eq!(done.is_error, Some(false));
         let cancelled = BriefingMcp::outcome_result("r1", "http://x", Outcome::cancelled());
         assert_eq!(cancelled.structured_content.as_ref().unwrap()["status"], "cancelled");
-        assert_eq!(cancelled.is_error, Some(true));
+        assert_eq!(cancelled.is_error, Some(false), "a cancellation is an outcome, not a failed call");
     }
 
     /// The output schema names every status the tool can return.
     #[test]
     fn await_output_schema_lists_statuses() {
         let schema = serde_json::to_string(&*output_schema::<AwaitOutput>()).unwrap();
-        for status in ["pending", "completed", "cancelled", "reopened"] {
+        for status in ["pending", "completed", "cancelled"] {
             assert!(schema.contains(&format!("\"{status}\"")), "{status} missing from {schema}");
         }
         assert!(schema.contains("briefingId"));

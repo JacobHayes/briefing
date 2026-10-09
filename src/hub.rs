@@ -1,12 +1,11 @@
 //! Registry of presentations awaiting briefing.
 //!
-//! Every presentation has two unguessable identifiers: the `id` used by the agent side
-//! (CLI / MCP / hub API) and the `token` embedded in the browser URL. Records live in
-//! memory and, when a [`Store`] is configured, are mirrored to disk so another process can
-//! adopt them (`briefing await <id>` after the creator died) and so results survive until
-//! the agent fetches them.
+//! Every presentation has one unguessable `id`, used by the agent side (CLI / MCP / hub API)
+//! and as the capability in the browser URL (`/briefing/<id>`). A hub is the only process that
+//! serves its records: they live in memory and, when a [`Store`] is configured, are mirrored to
+//! disk and reloaded at startup, so a restarted hub picks up where the last one left off.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,8 +71,12 @@ pub enum HubError {
     NotFound,
     #[error("briefing already {0}")]
     AlreadyFinished(BriefingStatus),
+    /// The page submitted something this briefing cannot accept.
     #[error("{0}")]
     Invalid(String),
+    /// The change could not be written to the store, so it did not happen.
+    #[error("could not save briefing: {0}")]
+    Storage(String),
 }
 
 /// Outcome of a draft save.
@@ -87,12 +90,6 @@ pub enum DraftSave {
         revision: u64,
         draft: Value,
     },
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CreatedBriefing {
-    pub id: String,
-    pub token: String,
 }
 
 /// Where the user is in a briefing, derived from the saved draft.
@@ -115,6 +112,7 @@ pub struct DraftSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BriefingInfo {
+    #[serde(rename = "briefingId")]
     pub id: String,
     pub title: String,
     pub status: BriefingStatus,
@@ -124,30 +122,26 @@ pub struct BriefingInfo {
     pub finished_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Where the briefing is (or was last) served.
+    /// The link, filled in by the [`crate::backend::Site`] serving it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<DraftSummary>,
-    #[serde(default)]
-    pub provenance: Provenance,
 }
 
-/// How the reporting process relates to a briefing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Provenance {
-    /// Served by this process at the link on record.
-    #[default]
-    Live,
-    /// This process has just started serving it at a new link (reported once): the old
-    /// link is dead and the new one must be shown again.
-    Reopened,
-    /// Known only from disk; the link on record belongs to another process and may be dead.
-    DiskOnly,
+/// Who created a briefing: a display label (`claude-code@laptop`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Origin {
+    pub source: Option<String>,
 }
 
-fn info(stored: &StoredRecord, provenance: Provenance) -> BriefingInfo {
+impl Origin {
+    pub fn source(source: impl Into<String>) -> Self {
+        Self { source: Some(source.into()) }
+    }
+}
+
+fn info(stored: &StoredRecord) -> BriefingInfo {
     BriefingInfo {
         id: stored.id.clone(),
         title: stored.presentation.title.clone(),
@@ -155,9 +149,8 @@ fn info(stored: &StoredRecord, provenance: Provenance) -> BriefingInfo {
         created_at: stored.created_at,
         finished_at: stored.finished_at,
         source: stored.source.clone(),
-        url: stored.url.clone(),
+        url: None,
         draft: stored.draft.as_ref().map(|draft| draft_summary(&stored.presentation, draft)),
-        provenance,
     }
 }
 
@@ -213,11 +206,6 @@ impl HubConfig {
     /// The same defaults as CLI flag text (a test in main.rs keeps them in step).
     pub const FINISHED_TTL_TEXT: &str = "7d";
     pub const ACTIVE_TTL_TEXT: &str = "28d";
-
-    /// Default TTLs plus the default on-disk store.
-    pub fn with_default_store() -> Self {
-        Self { store: Store::open_default(), ..Self::default() }
-    }
 }
 
 impl Default for HubConfig {
@@ -228,10 +216,28 @@ impl Default for HubConfig {
 
 pub struct Hub {
     config: HubConfig,
+    /// Every record, mirrored on disk. Each change is written to the store under this lock
+    /// before it is applied, so revisions reach disk in order and nothing unsaved is observed.
     records: Mutex<HashMap<String, Record>>,
-    /// Unix seconds of the last sweep; sweeps are rate-limited because each one reads the
-    /// whole store directory.
+    /// Unix seconds of the last sweep; sweeps are rate-limited because each one scans the
+    /// store directory for stray temp files.
     last_sweep: AtomicU64,
+}
+
+/// A new briefing id: 22 alphanumeric characters (~131 bits), unguessable because it is also the
+/// browser link's capability, and never starting with `-`, so it cannot parse as a CLI flag.
+pub fn random_id() -> String {
+    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const LEN: usize = 22;
+    let mut id = String::with_capacity(LEN);
+    let mut buf = [0u8; 32];
+    while id.len() < LEN {
+        rand::rng().fill_bytes(&mut buf);
+        // Rejection sampling: 248 = 4 * 62, so `b % 62` stays uniform.
+        let chars = buf.iter().filter(|&&b| b < 248).map(|&b| ALPHABET[usize::from(b % 62)] as char);
+        id.extend(chars.take(LEN - id.len()));
+    }
+    id
 }
 
 pub fn random_token(bytes: usize) -> String {
@@ -240,143 +246,70 @@ pub fn random_token(bytes: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 
-/// How often a waiter re-reads the on-disk record, in case another process finished it.
-const RECONCILE_EVERY: Duration = Duration::from_secs(2);
 pub const SWEEP_EVERY: Duration = Duration::from_secs(60);
 
-/// A record serialized under the lock, to be written to disk once it is released.
-struct Pending(Option<(String, Vec<u8>)>);
-
 impl Hub {
+    /// A hub serving `config`, with every record its store already holds.
     pub fn new(config: HubConfig) -> Self {
-        let hub = Self { config, records: Mutex::new(HashMap::new()), last_sweep: AtomicU64::new(0) };
+        let stored = config.store.as_ref().map(Store::list).unwrap_or_default();
+        let records = stored.into_iter().map(|s| (s.id.clone(), Record::new(s))).collect();
+        let hub = Self { config, records: Mutex::new(records), last_sweep: AtomicU64::new(0) };
         hub.sweep();
         hub
     }
 
-    /// Serialize `record` for the store (call while holding the lock; write with `flush`).
-    fn encode(&self, record: &Record) -> Pending {
-        if self.config.store.is_none() {
-            return Pending(None);
-        }
-        match serde_json::to_vec(&record.stored) {
-            Ok(bytes) => Pending(Some((record.stored.id.clone(), bytes))),
-            Err(error) => {
-                tracing::warn!(%error, id = record.stored.id, "could not serialize briefing record");
-                Pending(None)
-            }
-        }
+    /// Write `stored` to the store, if there is one. Call while holding the records lock and
+    /// before applying the change, so a failed write leaves the hub as it was.
+    fn persist(&self, stored: &StoredRecord) -> Result<(), HubError> {
+        let Some(store) = &self.config.store else {
+            return Ok(());
+        };
+        store.save(stored).map_err(|error| {
+            tracing::error!(%error, id = stored.id, "could not write briefing record");
+            HubError::Storage(error.to_string())
+        })
     }
 
-    fn flush(&self, pending: Pending) {
-        if let (Some(store), Some((id, bytes))) = (&self.config.store, pending.0)
-            && let Err(error) = store.write(&id, &bytes)
-        {
-            tracing::warn!(%error, id, "could not write briefing record");
-        }
-    }
-
-    pub fn create(&self, presentation: Briefing, source: Option<String>) -> CreatedBriefing {
+    /// Register a presentation and return its id once it is saved.
+    pub fn create(&self, presentation: Briefing, origin: Origin) -> Result<String, HubError> {
         self.sweep_if_due();
         let stored = StoredRecord {
             schema_version: crate::migrate::SCHEMA_VERSION,
-            id: random_token(12),
-            token: random_token(24),
+            id: random_id(),
             presentation,
             status: BriefingStatus::Active,
             created_at: now_secs(),
             finished_at: None,
-            source,
-            url: None,
+            source: origin.source,
             draft_revision: 0,
             draft: None,
             result: None,
         };
-        let created = CreatedBriefing { id: stored.id.clone(), token: stored.token.clone() };
-        let record = Record::new(stored);
-        let pending = self.encode(&record);
-        self.records.lock().unwrap().insert(created.id.clone(), record);
-        self.flush(pending);
-        created
-    }
-
-    /// Remember the public URL a briefing is served at (shown by `status` and the dashboard,
-    /// also after the serving process is gone). Returns true when it changed.
-    pub fn set_url(&self, id: &str, url: &str) -> bool {
-        let pending = {
-            let mut records = self.records.lock().unwrap();
-            let Some(record) = records.get_mut(id) else {
-                return false;
-            };
-            if record.stored.url.as_deref() == Some(url) {
-                return false;
-            }
-            record.stored.url = Some(url.to_string());
-            self.encode(record)
-        };
-        self.flush(pending);
-        true
-    }
-
-    fn adopt(&self, stored: StoredRecord) {
-        tracing::info!(id = stored.id, status = %stored.status, "adopted briefing record from disk");
-        self.records.lock().unwrap().entry(stored.id.clone()).or_insert_with(|| Record::new(stored));
-    }
-
-    /// Load `id` from disk if this process does not know it.
-    fn ensure_loaded(&self, id: &str) {
-        if self.records.lock().unwrap().contains_key(id) {
-            return;
-        }
-        if let Some(stored) = self.config.store.as_ref().and_then(|store| store.load(id)) {
-            self.adopt(stored);
-        }
-    }
-
-    fn id_for_token(&self, token: &str) -> Option<String> {
-        let known =
-            self.records.lock().unwrap().values().find(|r| r.stored.token == token).map(|r| r.stored.id.clone());
-        if known.is_some() {
-            return known;
-        }
-        let stored = self.config.store.as_ref()?.find_by_token(token)?;
         let id = stored.id.clone();
-        self.adopt(stored);
-        Some(id)
+        let mut records = self.records.lock().unwrap();
+        self.persist(&stored)?;
+        records.insert(id.clone(), Record::new(stored));
+        Ok(id)
     }
 
-    /// If another process finished this briefing on disk, apply that here.
-    fn reconcile(&self, id: &str) {
-        let Some(store) = &self.config.store else {
-            return;
-        };
-        if !self.records.lock().unwrap().get(id).is_some_and(Record::is_active) {
-            return;
-        }
-        if let Some(stored) = store.load(id)
-            && stored.status != BriefingStatus::Active
-        {
-            let _ = self.finish(id, stored.result.unwrap_or_default(), stored.status);
-        }
-    }
-
-    /// Load (and reconcile) `id`, then read it.
     fn with_record<R>(&self, id: &str, read: impl FnOnce(&Record) -> R) -> Option<R> {
-        self.ensure_loaded(id);
-        self.reconcile(id);
         self.records.lock().unwrap().get(id).map(read)
     }
 
-    /// Whether the browser token names a briefing this process can serve.
-    pub fn has_token(&self, token: &str) -> bool {
-        self.id_for_token(token).is_some()
+    /// Whether `id` names a briefing this hub serves.
+    pub fn has(&self, id: &str) -> bool {
+        self.records.lock().unwrap().contains_key(id)
+    }
+
+    /// How many briefings are still waiting for the user.
+    pub fn active_count(&self) -> usize {
+        self.records.lock().unwrap().values().filter(|r| r.is_active()).count()
     }
 
     /// The JSON the browser page fetches: the presentation plus id, status, and draft.
-    pub fn page_payload(&self, token: &str) -> Option<Value> {
-        let id = self.id_for_token(token)?;
+    pub fn page_payload(&self, id: &str) -> Option<Value> {
         let records = self.records.lock().unwrap();
-        let stored = &records.get(&id)?.stored;
+        let stored = &records.get(id)?.stored;
         let mut payload = serde_json::to_value(&stored.presentation).ok()?;
         let object = payload.as_object_mut()?;
         object.insert("id".into(), Value::String(stored.id.clone()));
@@ -389,73 +322,67 @@ impl Hub {
 
     /// Save the browser's draft. `base` is the revision the browser last saw; a mismatch
     /// returns the newer draft instead of overwriting it.
-    pub fn save_draft(&self, token: &str, base: Option<u64>, draft: Value) -> Result<DraftSave, HubError> {
-        let id = self.id_for_token(token).ok_or(HubError::NotFound)?;
-        let (outcome, pending) = {
-            let mut records = self.records.lock().unwrap();
-            let record = records.get_mut(&id).ok_or(HubError::NotFound)?;
-            let stored = &mut record.stored;
-            if stored.status != BriefingStatus::Active {
-                return Err(HubError::AlreadyFinished(stored.status));
-            }
-            if let Some(base) = base
-                && base != stored.draft_revision
-                && let Some(existing) = &stored.draft
-            {
-                return Ok(DraftSave::Stale { revision: stored.draft_revision, draft: existing.clone() });
-            }
-            stored.draft_revision += 1;
-            stored.draft = Some(draft);
-            (DraftSave::Saved { revision: stored.draft_revision }, self.encode(record))
-        };
-        self.flush(pending);
-        Ok(outcome)
+    pub fn save_draft(&self, id: &str, base: Option<u64>, draft: Value) -> Result<DraftSave, HubError> {
+        let mut records = self.records.lock().unwrap();
+        let record = records.get_mut(id).ok_or(HubError::NotFound)?;
+        let stored = &record.stored;
+        if stored.status != BriefingStatus::Active {
+            return Err(HubError::AlreadyFinished(stored.status));
+        }
+        if let Some(base) = base
+            && base != stored.draft_revision
+            && let Some(existing) = &stored.draft
+        {
+            return Ok(DraftSave::Stale { revision: stored.draft_revision, draft: existing.clone() });
+        }
+        let mut next = stored.clone();
+        next.draft_revision += 1;
+        next.draft = Some(draft);
+        self.persist(&next)?;
+        let revision = next.draft_revision;
+        record.stored = next;
+        Ok(DraftSave::Saved { revision })
     }
 
     fn finish(&self, id: &str, result: BriefingResponse, status: BriefingStatus) -> Result<(), HubError> {
-        let pending = {
-            let mut records = self.records.lock().unwrap();
-            let record = records.get_mut(id).ok_or(HubError::NotFound)?;
-            if !record.is_active() {
-                return Err(HubError::AlreadyFinished(record.stored.status));
-            }
-            record.stored.result = Some(result);
-            record.stored.finished_at = Some(now_secs());
-            record.stored.status = status;
-            record.status.send_replace(status);
-            self.encode(record)
-        };
-        self.flush(pending);
+        let mut records = self.records.lock().unwrap();
+        let record = records.get_mut(id).ok_or(HubError::NotFound)?;
+        if !record.is_active() {
+            return Err(HubError::AlreadyFinished(record.stored.status));
+        }
+        let mut next = record.stored.clone();
+        next.result = Some(result);
+        next.finished_at = Some(now_secs());
+        next.status = status;
+        self.persist(&next)?;
+        record.stored = next;
+        // Waiters wake only once the outcome is on disk.
+        record.status.send_replace(status);
         Ok(())
     }
 
-    /// Browser submission (`complete` or `cancel`) for the presentation behind `token`.
-    /// Finish a briefing with what its page submitted, parsed strictly against the briefing.
-    /// `protocol` is the page's (see [`crate::protocol`]): protocol 1 pages post the old shape.
-    pub fn submit_by_token(&self, token: &str, body: &Value, cancelled: bool, protocol: u32) -> Result<(), HubError> {
-        let id = self.id_for_token(token).ok_or(HubError::NotFound)?;
-        match self.status(&id) {
-            Some(BriefingStatus::Active) => {}
-            Some(status) => return Err(HubError::AlreadyFinished(status)),
-            None => return Err(HubError::NotFound),
-        }
-        let presentation = self.with_record(&id, |r| r.stored.presentation.clone()).ok_or(HubError::NotFound)?;
-        let body = if protocol == 1 {
-            let presentation = serde_json::to_value(&presentation).unwrap_or_default();
-            crate::protocol::submission_from_v1(body, &presentation)
-        } else {
-            body.clone()
-        };
+    /// Finish briefing `id` with what its page submitted (`complete` or `cancel`), parsed
+    /// strictly against the briefing.
+    pub fn submit(&self, id: &str, body: &Value, cancelled: bool) -> Result<(), HubError> {
+        let presentation = self
+            .with_record(id, |r| match r.stored.status {
+                BriefingStatus::Active => Ok(r.stored.presentation.clone()),
+                status => Err(HubError::AlreadyFinished(status)),
+            })
+            .ok_or(HubError::NotFound)??;
         let feedback =
-            parse_submission(&body, &presentation, cancelled).map_err(|e| HubError::Invalid(e.to_string()))?;
+            parse_submission(body, &presentation, cancelled).map_err(|e| HubError::Invalid(e.to_string()))?;
         let status = if cancelled { BriefingStatus::Cancelled } else { BriefingStatus::Completed };
-        self.finish(&id, feedback, status)
+        self.finish(id, feedback, status)
     }
 
-    /// Agent-side cancellation. Returns false when the briefing was not active.
-    pub fn cancel(&self, id: &str) -> bool {
-        self.ensure_loaded(id);
-        self.finish(id, BriefingResponse::default(), BriefingStatus::Cancelled).is_ok()
+    /// Agent-side cancellation. `Ok(false)` when there was no open briefing to cancel.
+    pub fn cancel(&self, id: &str) -> Result<bool, HubError> {
+        match self.finish(id, BriefingResponse::default(), BriefingStatus::Cancelled) {
+            Ok(()) => Ok(true),
+            Err(HubError::NotFound | HubError::AlreadyFinished(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn status(&self, id: &str) -> Option<BriefingStatus> {
@@ -463,30 +390,13 @@ impl Hub {
     }
 
     pub fn info(&self, id: &str) -> Option<BriefingInfo> {
-        self.with_record(id, |r| info(&r.stored, Provenance::Live))
+        self.with_record(id, |r| info(&r.stored))
     }
 
-    /// Everything this process knows plus on-disk records from other processes.
     pub fn list(&self) -> Vec<BriefingInfo> {
-        let mut infos: Vec<BriefingInfo> =
-            self.records.lock().unwrap().values().map(|r| info(&r.stored, Provenance::Live)).collect();
-        if let Some(store) = &self.config.store {
-            let known: HashSet<&str> = infos.iter().map(|i| i.id.as_str()).collect();
-            let disk: Vec<BriefingInfo> = store
-                .list()
-                .iter()
-                .filter(|s| !known.contains(s.id.as_str()))
-                .map(|s| info(s, Provenance::DiskOnly))
-                .collect();
-            infos.extend(disk);
-        }
+        let mut infos: Vec<BriefingInfo> = self.records.lock().unwrap().values().map(|r| info(&r.stored)).collect();
         infos.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
         infos
-    }
-
-    pub fn token_for(&self, id: &str) -> Option<String> {
-        self.ensure_loaded(id);
-        self.records.lock().unwrap().get(id).map(|r| r.stored.token.clone())
     }
 
     fn snapshot(&self, id: &str) -> Result<(watch::Receiver<BriefingStatus>, Outcome), HubError> {
@@ -495,27 +405,16 @@ impl Hub {
         Ok((record.status.subscribe(), Outcome::of(record.stored.status, record.stored.result.clone())))
     }
 
-    /// Wait up to `timeout` for the briefing to finish. Periodically re-reads the on-disk
-    /// record so a submission served by another process is picked up too.
+    /// Wait up to `timeout` for the briefing to finish.
     pub async fn wait(&self, id: &str, timeout: Duration) -> Result<Outcome, HubError> {
-        self.ensure_loaded(id);
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            self.reconcile(id);
-            let (mut rx, outcome) = self.snapshot(id)?;
-            if outcome != Outcome::Pending {
-                return Ok(outcome);
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Ok(Outcome::Pending);
-            }
-            let slice = if self.config.store.is_some() { remaining.min(RECONCILE_EVERY) } else { remaining };
-            match tokio::time::timeout(slice, rx.wait_for(|s| *s != BriefingStatus::Active)).await {
-                Ok(Ok(_)) => return Ok(self.snapshot(id)?.1),
-                Ok(Err(_)) => return Err(HubError::NotFound),
-                Err(_) => continue,
-            }
+        let (mut rx, outcome) = self.snapshot(id)?;
+        if outcome != Outcome::Pending {
+            return Ok(outcome);
+        }
+        match tokio::time::timeout(timeout, rx.wait_for(|s| *s != BriefingStatus::Active)).await {
+            Ok(Ok(_)) => Ok(self.snapshot(id)?.1),
+            Ok(Err(_)) => Err(HubError::NotFound),
+            Err(_) => Ok(Outcome::Pending),
         }
     }
 
@@ -525,23 +424,31 @@ impl Hub {
         }
     }
 
-    /// Drop expired records (memory and disk). Safe to call any time.
+    /// Drop expired records from memory and disk. The registry holds every record (this hub
+    /// owns the store and loaded it at startup), so it decides what expired. Safe any time.
     pub fn sweep(&self) {
         let now = now_secs();
         self.last_sweep.store(now, Ordering::Relaxed);
-        self.records.lock().unwrap().retain(|_, record| {
+        let mut records = self.records.lock().unwrap();
+        records.retain(|id, record| {
             let stored = &record.stored;
             let keep = match stored.finished_at {
                 Some(finished) => now.saturating_sub(finished) < self.config.finished_ttl.as_secs(),
                 None => now.saturating_sub(stored.created_at) < self.config.active_ttl.as_secs(),
             };
-            if !keep && stored.finished_at.is_none() {
-                record.status.send_replace(BriefingStatus::Cancelled);
+            if !keep {
+                if let Some(store) = &self.config.store {
+                    store.remove(id);
+                }
+                if stored.finished_at.is_none() {
+                    record.status.send_replace(BriefingStatus::Cancelled);
+                }
             }
             keep
         });
+        drop(records);
         if let Some(store) = &self.config.store {
-            store.sweep(self.config.finished_ttl, self.config.active_ttl);
+            store.remove_stale_temp_files();
         }
     }
 }
@@ -552,52 +459,55 @@ mod tests {
     use crate::content::demo;
     use serde_json::json;
 
+    /// A complete submission for the demo carrying one note.
+    fn notes(note: &str) -> Value {
+        let mut body = crate::response::blank_submission(&demo());
+        body["notes"] = json!([note]);
+        body
+    }
+
     #[tokio::test]
     async fn create_submit_wait_roundtrip() {
         let finished_ttl = Duration::from_secs(2 * 86_400);
         let hub = Hub::new(HubConfig { finished_ttl, ..HubConfig::default() });
-        let created = hub.create(demo(), Some("test".into()));
-        assert_eq!(hub.status(&created.id), Some(BriefingStatus::Active));
+        let created = hub.create(demo(), Origin::source("test")).unwrap();
+        assert_eq!(hub.status(&created), Some(BriefingStatus::Active));
 
-        let page = hub.page_payload(&created.token).unwrap();
+        let page = hub.page_payload(&created).unwrap();
         assert_eq!(page["status"], "active");
         assert_eq!(page["draft"], Value::Null);
         assert_eq!(page["keptFor"], crate::guidance::human(finished_ttl));
         assert!(hub.page_payload("nope").is_none());
 
-        assert_eq!(hub.wait(&created.id, Duration::from_millis(20)).await, Ok(Outcome::Pending));
+        assert_eq!(hub.wait(&created, Duration::from_millis(20)).await, Ok(Outcome::Pending));
 
-        let mut body = crate::response::blank_submission(&demo());
-        body["notes"] = json!(["great"]);
-        hub.submit_by_token(&created.token, &body, false, crate::protocol::PROTOCOL).unwrap();
-        match hub.wait(&created.id, Duration::from_secs(1)).await.unwrap() {
+        hub.submit(&created, &notes("great"), false).unwrap();
+        match hub.wait(&created, Duration::from_secs(1)).await.unwrap() {
             Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["great"]),
             other => panic!("unexpected {other:?}"),
         }
-        assert_eq!(
-            hub.submit_by_token(&created.token, &json!({}), false, crate::protocol::PROTOCOL),
-            Err(HubError::AlreadyFinished(BriefingStatus::Completed))
-        );
-        assert!(!hub.cancel(&created.id));
+        assert_eq!(hub.submit(&created, &json!({}), false), Err(HubError::AlreadyFinished(BriefingStatus::Completed)));
+        assert_eq!(hub.cancel(&created), Ok(false));
+        assert_eq!(hub.cancel("missing"), Ok(false));
         assert_eq!(hub.wait("missing", Duration::from_millis(1)).await, Err(HubError::NotFound));
-        assert_eq!(hub.info(&created.id).unwrap().source.as_deref(), Some("test"));
+        assert_eq!(hub.info(&created).unwrap().source.as_deref(), Some("test"));
     }
 
     #[test]
     fn drafts_are_revisioned() {
         let hub = Hub::new(HubConfig::default());
-        let created = hub.create(demo(), None);
+        let created = hub.create(demo(), Origin::default()).unwrap();
         let draft = json!({"current": 1, "state": {"questions": {"c0-0": {"selected": ["A"], "answer": ""}, "c1-0": {"selected": [], "answer": ""}}, "annotations": [{}]}, "updatedAt": 5});
-        assert_eq!(hub.save_draft(&created.token, Some(0), draft.clone()), Ok(DraftSave::Saved { revision: 1 }));
-        assert_eq!(hub.save_draft(&created.token, None, draft.clone()), Ok(DraftSave::Saved { revision: 2 }));
-        match hub.save_draft(&created.token, Some(1), json!({})).unwrap() {
+        assert_eq!(hub.save_draft(&created, Some(0), draft.clone()), Ok(DraftSave::Saved { revision: 1 }));
+        assert_eq!(hub.save_draft(&created, None, draft.clone()), Ok(DraftSave::Saved { revision: 2 }));
+        match hub.save_draft(&created, Some(1), json!({})).unwrap() {
             DraftSave::Stale { revision: 2, draft: existing } => assert_eq!(existing, draft),
             other => panic!("unexpected {other:?}"),
         }
-        let page = hub.page_payload(&created.token).unwrap();
+        let page = hub.page_payload(&created).unwrap();
         assert_eq!(page["draftRevision"], 2);
         assert_eq!(page["draft"]["current"], 1);
-        let summary = hub.info(&created.id).unwrap().draft.unwrap();
+        let summary = hub.info(&created).unwrap().draft.unwrap();
         assert_eq!(summary.screen, 2);
         assert_eq!(summary.annotations, 1);
         assert_eq!(summary.answered, 1);
@@ -606,75 +516,131 @@ mod tests {
         let review = draft_summary(&demo(), &json!({"current": summary.screens}));
         assert!(review.review);
         assert_eq!(review.screen, summary.screens);
-        hub.cancel(&created.id);
-        assert!(matches!(hub.save_draft(&created.token, None, json!({})), Err(HubError::AlreadyFinished(_))));
+        hub.cancel(&created).unwrap();
+        assert!(matches!(hub.save_draft(&created, None, json!({})), Err(HubError::AlreadyFinished(_))));
     }
 
     #[tokio::test]
     async fn wake_waiter_on_cancel() {
         let hub = std::sync::Arc::new(Hub::new(HubConfig::default()));
-        let created = hub.create(demo(), None);
+        let created = hub.create(demo(), Origin::default()).unwrap();
         let waiter = {
             let hub = hub.clone();
-            let id = created.id.clone();
+            let id = created.clone();
             tokio::spawn(async move { hub.wait(&id, Duration::from_secs(5)).await })
         };
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(hub.cancel(&created.id));
+        assert_eq!(hub.cancel(&created), Ok(true));
         assert_eq!(waiter.await.unwrap().unwrap(), Outcome::cancelled());
-        assert_eq!(hub.page_payload(&created.token).unwrap()["status"], "cancelled");
+        assert_eq!(hub.page_payload(&created).unwrap()["status"], "cancelled");
     }
 
     #[test]
     fn sweep_expires_records() {
         let hub = Hub::new(HubConfig { finished_ttl: Duration::ZERO, active_ttl: Duration::ZERO, store: None });
-        let created = hub.create(demo(), None);
+        let created = hub.create(demo(), Origin::default()).unwrap();
         hub.sweep();
-        assert!(hub.status(&created.id).is_none());
-        assert!(hub.page_payload(&created.token).is_none());
+        assert!(hub.status(&created).is_none());
+        assert!(hub.page_payload(&created).is_none());
     }
 
     #[tokio::test]
-    async fn records_survive_via_store() {
+    async fn a_restarted_hub_reloads_its_records() {
         let dir = tempfile::tempdir().unwrap();
         let config = || HubConfig { store: Some(Store::open(dir.path()).unwrap()), ..HubConfig::default() };
 
-        // Process A creates a briefing and the user saves a draft, then A dies.
-        let a = Hub::new(config());
-        let created = a.create(demo(), Some("a".into()));
-        assert!(a.set_url(&created.id, "http://a.example/briefing/x"));
-        assert!(!a.set_url(&created.id, "http://a.example/briefing/x"));
-        a.save_draft(&created.token, None, json!({"current": 1, "state": {}, "updatedAt": 1})).unwrap();
-        drop(a);
+        // The first hub creates a briefing and the user saves a draft, then it stops.
+        let first = Hub::new(config());
+        let id = first.create(demo(), Origin::source("first")).unwrap();
+        first.save_draft(&id, None, json!({"current": 1, "state": {}, "updatedAt": 1})).unwrap();
+        drop(first);
 
-        // Process B adopts it by id (agent side) and by token (browser side).
-        let b = Hub::new(config());
-        let info = b.info(&created.id).unwrap();
-        assert_eq!(info.url.as_deref(), Some("http://a.example/briefing/x"));
-        assert_eq!(info.draft.unwrap().screen, 2);
-        assert!(b.has_token(&created.token));
-        assert_eq!(b.page_payload(&created.token).unwrap()["draft"]["current"], 1);
+        // The next one serves it with the draft intact and takes the submission.
+        let second = Hub::new(config());
+        assert_eq!(second.info(&id).unwrap().source.as_deref(), Some("first"));
+        assert_eq!(second.page_payload(&id).unwrap()["draft"]["current"], 1);
+        assert_eq!(second.active_count(), 1);
+        second.submit(&id, &notes("done"), false).unwrap();
+        assert_eq!(second.active_count(), 0);
+        drop(second);
 
-        // A third process (the one the browser talks to) submits; B's waiter sees it via disk.
-        let c = Hub::new(config());
-        let mut body = crate::response::blank_submission(&demo());
-        body["notes"] = json!(["done"]);
-        c.submit_by_token(&created.token, &body, false, crate::protocol::PROTOCOL).unwrap();
-        match b.wait(&created.id, Duration::from_secs(1)).await.unwrap() {
+        // And a third returns the stored result without the user doing anything.
+        let third = Hub::new(config());
+        match third.wait(&id, Duration::from_millis(1)).await.unwrap() {
             Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["done"]),
             other => panic!("unexpected {other:?}"),
         }
-        assert_eq!(b.status(&created.id), Some(BriefingStatus::Completed));
+    }
 
-        // A brand-new process can fetch the result with no live record at all.
-        let d = Hub::new(config());
-        assert!(matches!(d.wait(&created.id, Duration::from_millis(1)).await, Ok(Outcome::Completed { .. })));
-        let listed = d.list();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].provenance, Provenance::Live);
+    #[tokio::test]
+    async fn a_failed_write_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = dir.path().join("records");
+        let hub = std::sync::Arc::new(Hub::new(HubConfig {
+            store: Some(Store::open(&records).unwrap()),
+            ..HubConfig::default()
+        }));
+        let id = hub.create(demo(), Origin::default()).unwrap();
+        let waiter = {
+            let (hub, id) = (hub.clone(), id.clone());
+            tokio::spawn(async move { hub.wait(&id, Duration::from_millis(200)).await })
+        };
 
-        // Listing without adopting reports disk-only records.
-        let e = Hub::new(config());
-        assert_eq!(e.list()[0].provenance, Provenance::DiskOnly);
+        // The store goes away: every change fails, and none of them happens.
+        std::fs::remove_dir_all(&records).unwrap();
+        assert!(matches!(hub.create(demo(), Origin::default()), Err(HubError::Storage(_))));
+        assert_eq!(hub.list().len(), 1);
+        let draft = json!({"current": 1, "state": {}, "updatedAt": 1});
+        assert!(matches!(hub.save_draft(&id, None, draft.clone()), Err(HubError::Storage(_))));
+        assert_eq!(hub.page_payload(&id).unwrap()["draftRevision"], 0);
+        assert!(matches!(hub.submit(&id, &notes("lost"), false), Err(HubError::Storage(_))));
+        assert!(matches!(hub.cancel(&id), Err(HubError::Storage(_))));
+        assert_eq!(hub.status(&id), Some(BriefingStatus::Active));
+        assert_eq!(waiter.await.unwrap(), Ok(Outcome::Pending), "no waiter sees an unsaved outcome");
+
+        // Once it is back, the same changes go through.
+        std::fs::create_dir_all(&records).unwrap();
+        assert_eq!(hub.save_draft(&id, None, draft), Ok(DraftSave::Saved { revision: 1 }));
+        hub.submit(&id, &notes("kept"), false).unwrap();
+        assert_eq!(hub.status(&id), Some(BriefingStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn a_waiter_wakes_only_once_the_outcome_is_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = || Store::open(dir.path()).unwrap();
+        let hub = std::sync::Arc::new(Hub::new(HubConfig { store: Some(store()), ..HubConfig::default() }));
+        let id = hub.create(demo(), Origin::default()).unwrap();
+        assert_eq!(store().load(&id).unwrap().status, BriefingStatus::Active, "created on disk");
+        let waiter = {
+            let (hub, id) = (hub.clone(), id.clone());
+            tokio::spawn(async move { hub.wait(&id, Duration::from_secs(5)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        hub.submit(&id, &notes("durable"), false).unwrap();
+        assert!(matches!(waiter.await.unwrap(), Ok(Outcome::Completed { .. })));
+        let stored = store().load(&id).unwrap();
+        assert_eq!(stored.status, BriefingStatus::Completed);
+        assert_eq!(stored.result.unwrap().notes, vec!["durable"]);
+    }
+
+    #[test]
+    fn sweep_deletes_expired_records_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = || Store::open(dir.path()).unwrap();
+        let config = |active_ttl| HubConfig { store: Some(store()), active_ttl, ..HubConfig::default() };
+        let id = Hub::new(config(HubConfig::ACTIVE_TTL)).create(demo(), Origin::default()).unwrap();
+        assert!(store().load(&id).is_some());
+        // A hub with a zero TTL loads it, finds it expired, and removes the file.
+        let hub = Hub::new(config(Duration::ZERO));
+        assert!(hub.status(&id).is_none());
+        assert!(store().load(&id).is_none());
+    }
+
+    #[test]
+    fn ids_are_alphanumeric() {
+        let id = random_id();
+        assert_eq!(id.len(), 22);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
     }
 }

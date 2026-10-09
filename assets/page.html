@@ -987,7 +987,7 @@
       syncTimer = null;
       cacheLocally(snapshot());
       try {
-        const response = await api(presentation.token + "/draft", {
+        const response = await api(presentation.id + "/draft", {
           method: "PUT", headers: { "content-type": "application/json" }, keepalive: flush,
           body: JSON.stringify({ baseRevision: draftRevision, draft: snapshot() }),
         });
@@ -1012,7 +1012,7 @@
       if (submitted || refreshing) return;
       refreshing = true;
       try {
-        const response = await api(presentation.token + "/presentation", { cache: "no-store" });
+        const response = await api(presentation.id + "/presentation", { cache: "no-store" });
         if (!response.ok) return;
         const latest = await response.json();
         if (latest.status !== "active") { submitted = true; renderDone(latest.status === "cancelled"); return; }
@@ -2225,7 +2225,7 @@
       return frag;
     }
 
-    const submitErrorText = detail => "Could not submit this briefing" + detail + ". Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to reopen this briefing.";
+    const submitErrorText = detail => "Could not submit this briefing" + detail + ". Your notes are saved; try Submit again. If the agent's process is gone, ask it to run await_briefing with id " + presentation.id + " to collect it.";
 
     async function finish() {
       const payload = {
@@ -2240,7 +2240,7 @@
         notes: state.notes.map(n => n.text.trim()).filter(Boolean),
       };
       try {
-        const response = await api(presentation.token + "/complete", {
+        const response = await api(presentation.id + "/complete", {
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
         });
         if (!response.ok) throw new Error("HTTP " + response.status);
@@ -2259,7 +2259,7 @@
     async function cancel() {
       if (!confirm("Cancel this briefing?")) return;
       try {
-        const response = await api(presentation.token + "/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        const response = await api(presentation.id + "/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
         if (!response.ok) throw new Error("HTTP " + response.status);
       } catch (error) {
         // Only say "cancelled" once the server has agreed; otherwise the briefing is still open.
@@ -2358,11 +2358,10 @@
 
     (async () => {
       try {
-        const token = location.pathname.split("/").filter(Boolean).pop();
-        const response = await api(token + "/presentation", { cache: "no-store" });
+        const id = location.pathname.split("/").filter(Boolean).pop();
+        const response = await api(id + "/presentation", { cache: "no-store" });
         if (!response.ok) throw new Error("Presentation unavailable");
         presentation = await response.json();
-        presentation.token = token;
         presentation.questions ||= [];
         document.title = presentation.title + " - Briefing";
         if (presentation.status !== "active") {

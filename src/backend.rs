@@ -1,32 +1,31 @@
-//! Where presentations live: an embedded server in this process, or a remote hub.
+//! Where presentations live: always in a hub. A client reaches one over HTTP - the configured
+//! `--hub`, or this machine's own [`LocalHub`] - except the hub's own `/mcp`, which uses the
+//! [`Site`] it is part of.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::Router;
 use serde::Serialize;
-use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use crate::bind::{BindMode, BindTarget, Scope};
+use crate::bind::{BindTarget, Scope};
 use crate::browser;
 use crate::content::{self, Briefing};
 use crate::http::{self, HttpConfig, RunningServer};
-use crate::hub::{BriefingInfo, BriefingStatus, Hub, HubConfig, Provenance, SWEEP_EVERY};
+use crate::hub::{BriefingInfo, Hub, Origin, SWEEP_EVERY};
+use crate::local_hub::LocalHub;
 use crate::response::{BriefingOutcome, Outcome};
 
 /// What a caller learns after creating a briefing.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Created {
+    #[serde(rename = "briefingId")]
     pub id: String,
     pub url: String,
     pub scope: Scope,
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bind_host: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub diagnostics: Option<String>,
+    #[serde(default)]
     pub opened_browser: bool,
 }
 
@@ -47,82 +46,64 @@ pub fn hostname() -> &'static str {
     })
 }
 
-/// How a [`Site`] is exposed and what it does when a briefing is created.
-#[derive(Debug, Clone, Default)]
-pub struct SiteOptions {
-    /// Serve the dashboard at `/` and the agent API under `/agent/*` (hub mode).
-    pub agent_api: bool,
-    /// Origin to put in briefing URLs when behind a reverse proxy; by default the bound address.
-    pub public_origin: Option<String>,
-}
-
-/// One briefing server: the registry, how it is reached, and the side effects of creating a
-/// briefing. Every entry point (CLI, MCP over stdio or HTTP, the hub agent API) creates
-/// briefings through [`Site::create`], so they all share validation and configured side effects.
+/// A hub's server: the registry and how it is reached. Every entry point (CLI, MCP over stdio or
+/// HTTP, the agent API) creates briefings through [`Site::create`], so they all share validation.
 pub struct Site {
     pub hub: Arc<Hub>,
     pub config: HttpConfig,
     pub target: BindTarget,
+    /// How far its links reach: the bound address's scope, unless a public origin fronts it.
+    pub scope: Scope,
 }
 
 impl Site {
-    /// Bind `target` on `port` (0 = ephemeral) and serve it. `mcp` may add routes (an MCP
-    /// service under `/mcp`) once the site exists; they are mounted only with the agent API.
+    /// Bind `target` on `port` (0 = ephemeral) and serve it. `public_origin` goes in briefing
+    /// URLs when a reverse proxy fronts the hub (by default the bound address). `mcp` may add
+    /// routes (an MCP service under `/mcp`) once the site exists.
     pub async fn start(
         hub: Arc<Hub>,
         target: BindTarget,
         port: u16,
-        options: SiteOptions,
+        public_origin: Option<String>,
         mcp: impl FnOnce(&Arc<Site>) -> Option<Router<Arc<Site>>>,
     ) -> anyhow::Result<(Arc<Site>, RunningServer)> {
         let listener = http::bind(target.host, port)
             .await
             .map_err(|error| anyhow::anyhow!("{} bind failed: {error}", target.label))?;
         let port = listener.local_addr()?.port();
-        let public_origin = options
-            .public_origin
+        let scope = if public_origin.is_some() { Scope::Hub } else { target.scope };
+        let public_origin = public_origin
             .map(|origin| origin.trim_end_matches('/').to_string())
             .unwrap_or_else(|| http::origin_for(target.host, port));
-        let site =
-            Arc::new(Site { hub, config: HttpConfig::new(public_origin, target.host, options.agent_api), target });
-        let mut running = http::serve_listener(http::router(site.clone(), mcp(&site)), listener)?;
-        if site.config.agent_api {
-            let shutdown = running.shutdown.clone();
-            let sweeper = start_hub_sweeper(site.hub.clone(), shutdown, SWEEP_EVERY);
-            running = running.with_background_task(sweeper);
-        }
-        Ok((site, running))
+        let config = HttpConfig::new(public_origin, target.host);
+        let site = Arc::new(Site { hub, config, target, scope });
+        let running = http::serve_listener(http::router(site.clone(), mcp(&site)), listener)?;
+        let sweeper = start_hub_sweeper(site.hub.clone(), running.shutdown.clone(), SWEEP_EVERY);
+        Ok((site, running.with_background_task(sweeper)))
     }
 
-    /// Validate and register a presentation and remember its link.
-    /// Opening a browser is the creating [`Backend`]'s job, not the server's.
-    pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
+    /// Validate and register a presentation. Opening a browser is the creating [`Backend`]'s
+    /// job, not the server's.
+    pub async fn create(&self, presentation: Briefing, origin: Origin) -> anyhow::Result<Created> {
         let validated = content::validate(&presentation)?;
-        let created = self.hub.create(validated, source);
-        let url = self.config.briefing_url(&created.token);
-        self.hub.set_url(&created.id, &url);
-        Ok(Created {
-            id: created.id,
-            url,
-            scope: self.target.scope,
-            label: self.target.label.clone(),
-            bind_host: Some(self.target.host.to_string()),
-            diagnostics: self.target.diagnostics.clone(),
-            opened_browser: false,
-        })
+        let id = self.hub.create(validated, origin)?;
+        let url = self.config.briefing_url(&id);
+        Ok(Created { id, url, scope: self.scope, opened_browser: false })
     }
 
-    /// URL at which this site serves briefing `id` (its origin plus the record's token).
-    pub fn url_for(&self, id: &str) -> Option<String> {
-        let token = self.hub.token_for(id)?;
-        Some(self.config.briefing_url(&token))
+    /// A briefing with its link.
+    pub fn info(&self, id: &str) -> Option<BriefingInfo> {
+        self.hub.info(id).map(|info| self.with_url(info))
     }
 
-    /// Point every record this site holds at this site's link.
-    pub fn with_live_urls(&self, infos: &mut [BriefingInfo]) {
-        for info in infos.iter_mut().filter(|info| info.provenance != Provenance::DiskOnly) {
-            info.url = self.url_for(&info.id);
-        }
+    /// Every briefing with its link.
+    pub fn list(&self) -> Vec<BriefingInfo> {
+        self.hub.list().into_iter().map(|info| self.with_url(info)).collect()
+    }
+
+    fn with_url(&self, mut info: BriefingInfo) -> BriefingInfo {
+        info.url = Some(self.config.briefing_url(&info.id));
+        info
     }
 }
 
@@ -137,134 +118,28 @@ fn start_hub_sweeper(hub: Arc<Hub>, shutdown: CancellationToken, every: Duration
     })
 }
 
-enum Server {
-    /// Starts on the first presentation (or the first adopted active briefing) and stays up
-    /// for the life of the process.
-    Lazy { bind: BindMode, options: SiteOptions, started: OnceCell<(Arc<Site>, RunningServer)> },
-    /// Hub mode: this process already serves the site.
-    Attached(Arc<Site>),
-}
-
-/// Briefings served by this process.
-pub struct LocalBackend {
-    hub: Arc<Hub>,
-    server: Server,
-}
-
-impl LocalBackend {
-    pub fn new(bind: BindMode, options: SiteOptions, config: HubConfig) -> Self {
-        Self { hub: Arc::new(Hub::new(config)), server: Server::Lazy { bind, options, started: OnceCell::new() } }
-    }
-
-    /// Use an already-running site (hub mode) instead of starting one.
-    pub fn attached(site: Arc<Site>) -> Self {
-        Self { hub: site.hub.clone(), server: Server::Attached(site) }
-    }
-
-    pub fn hub(&self) -> &Arc<Hub> {
-        &self.hub
-    }
-
-    fn site(&self) -> Option<&Arc<Site>> {
-        match &self.server {
-            Server::Lazy { started, .. } => started.get().map(|(site, _)| site),
-            Server::Attached(site) => Some(site),
-        }
-    }
-
-    async fn ensure_site(&self) -> anyhow::Result<&Arc<Site>> {
-        let (bind, options, started) = match &self.server {
-            Server::Attached(site) => return Ok(site),
-            Server::Lazy { bind, options, started } => (*bind, options, started),
-        };
-        let start = |target| Site::start(self.hub.clone(), target, 0, options.clone(), |_| None);
-        started
-            .get_or_try_init(|| async {
-                let preferred = bind.target().await?;
-                let fallback = bind.fallback(&preferred);
-                match start(preferred).await {
-                    Ok(started) => Ok(started),
-                    Err(error) => match fallback {
-                        Some(fallback) => {
-                            tracing::warn!(%error, "falling back to loopback");
-                            start(fallback).await
-                        }
-                        None => Err(error),
-                    },
-                }
-            })
-            .await
-            .map(|(site, _)| site)
-    }
-
-    pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
-        self.ensure_site().await?.create(presentation, source).await
-    }
-
-    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
-        Ok(self.hub.wait(id, timeout).await?)
-    }
-
-    pub fn cancel(&self, id: &str) -> bool {
-        self.hub.cancel(id)
-    }
-
-    /// Status of a briefing. An active briefing is served by this process (starting the
-    /// embedded server if needed), so the returned URL is live even for adopted records;
-    /// the provenance is `Reopened` the first time that link differs from the one on record.
-    pub async fn info(&self, id: &str) -> anyhow::Result<Option<BriefingInfo>> {
-        let Some(mut info) = self.hub.info(id) else {
-            return Ok(None);
-        };
-        if info.status == BriefingStatus::Active
-            && let Some(url) = self.ensure_site().await?.url_for(id)
-        {
-            if self.hub.set_url(id, &url) {
-                info.provenance = Provenance::Reopened;
-            }
-            info.url = Some(url);
-        }
-        Ok(Some(info))
-    }
-
-    pub fn list(&self) -> Vec<BriefingInfo> {
-        let mut infos = self.hub.list();
-        if let Some(site) = self.site() {
-            site.with_live_urls(&mut infos);
-        }
-        infos
-    }
-
-    pub async fn shutdown(self) {
-        if let Server::Lazy { started, .. } = self.server
-            && let Some((_, running)) = started.into_inner()
-        {
-            running.stop().await;
-        }
-    }
-}
-
 const HUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 #[error("hub request timed out")]
 struct HubRequestTimeout;
 
+/// The transport failed: nothing listening at the hub's address, or the connection dropped before
+/// the hub answered (it exited or was replaced mid-request), as opposed to an error from a hub
+/// that answered.
+#[derive(Debug, thiserror::Error)]
+#[error("hub at {0} is not reachable")]
+pub struct HubUnreachable(String);
+
 /// Minimal HTTP(S) client for the hub API: hyper + rustls with bundled webpki roots, so the
-/// binary cross-compiles without platform TLS frameworks.
+/// binary cross-compiles without platform TLS frameworks. Clones share one connection pool.
+#[derive(Clone)]
 pub struct RemoteBackend {
     client: hyper_util::client::legacy::Client<
         hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
         http_body_util::Full<bytes::Bytes>,
     >,
     base: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemoteCreated {
-    id: String,
-    url: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -310,8 +185,10 @@ impl RemoteBackend {
             None => Vec::new(),
         };
         let request = request.body(http_body_util::Full::new(bytes::Bytes::from(payload)))?;
-        let response =
-            tokio::time::timeout(timeout, self.client.request(request)).await.map_err(|_| HubRequestTimeout)??;
+        let response = tokio::time::timeout(timeout, self.client.request(request))
+            .await
+            .map_err(|_| HubRequestTimeout)?
+            .map_err(|_| HubUnreachable(self.base.clone()))?;
         let status = response.status();
         // A response in another protocol has shapes this client would misread, so stop here
         // with both versions named. A 426 carries the hub's own explanation instead.
@@ -321,7 +198,7 @@ impl RemoteBackend {
         {
             anyhow::bail!(error);
         }
-        let bytes = response.into_body().collect().await?.to_bytes();
+        let bytes = response.into_body().collect().await.map_err(|_| HubUnreachable(self.base.clone()))?.to_bytes();
         let value = if bytes.is_empty() { serde_json::Value::Null } else { serde_json::from_slice(&bytes)? };
         if status.is_success() {
             return Ok(value);
@@ -331,28 +208,26 @@ impl RemoteBackend {
         }
         let detail =
             serde_json::from_value::<RemoteError>(value.clone()).map(|e| e.error).unwrap_or_else(|_| value.to_string());
+        // A 400 is the hub rejecting the presentation: its message is what the caller must fix.
+        if status == ::http::StatusCode::BAD_REQUEST {
+            anyhow::bail!("{detail}");
+        }
         anyhow::bail!("hub returned {status}: {detail}")
     }
 
-    pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
+    pub async fn create(&self, presentation: Briefing, origin: Origin) -> anyhow::Result<Created> {
         let value = self
             .request(
                 ::http::Method::POST,
                 "/agent/briefings",
-                Some(serde_json::json!({"presentation": presentation, "source": source})),
+                Some(serde_json::json!({
+                    "presentation": presentation,
+                    "source": origin.source,
+                })),
                 HUB_REQUEST_TIMEOUT,
             )
             .await?;
-        let created: RemoteCreated = serde_json::from_value(value)?;
-        Ok(Created {
-            id: created.id,
-            url: created.url,
-            scope: Scope::Hub,
-            label: format!("hub {}", self.base),
-            bind_host: None,
-            diagnostics: None,
-            opened_browser: false,
-        })
+        Ok(serde_json::from_value(value)?)
     }
 
     pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
@@ -416,32 +291,51 @@ impl RemoteBackend {
 #[error("briefing not found on the hub")]
 struct NotFound;
 
-/// Where briefings live.
+/// How a client reaches its hub.
 pub enum BackendKind {
-    Local(LocalBackend),
+    /// Over HTTP at a configured URL (`--hub`).
     Remote(RemoteBackend),
+    /// Over HTTP to this machine's own hub, started on demand.
+    Local(LocalHub),
+    /// In-process: the hub's own `/mcp` uses the site it is part of.
+    Site(Arc<Site>),
 }
 
 /// How a client process creates and follows briefings: a [`BackendKind`] plus what this
-/// machine does once one is created. Opening the browser lives here, not on the server, so it
-/// behaves the same whether the briefing is served in-process or by a hub.
+/// machine does once one is created. Opening the browser lives here, not on the server, so a
+/// headless hub never opens one.
 pub struct Backend {
     kind: BackendKind,
     open_browser: bool,
 }
+
+/// How long to wait before re-checking a local hub that went away mid-wait.
+const LOCAL_HUB_RETRY: Duration = Duration::from_millis(500);
+/// How many times in a row restarting it may fail (about 10 s): the hub it replaces can still
+/// hold the port while it shuts down.
+const LOCAL_HUB_RESTARTS: u32 = 20;
 
 impl Backend {
     pub fn new(kind: BackendKind, open_browser: bool) -> Self {
         Self { kind, open_browser }
     }
 
+    /// A connection to the hub, starting this machine's hub first if it is not running.
+    async fn connect(&self) -> anyhow::Result<Conn<'_>> {
+        Ok(match &self.kind {
+            BackendKind::Remote(remote) => Conn::Http(remote.clone()),
+            BackendKind::Local(local) => Conn::Http(RemoteBackend::new(&local.origin().await?)?),
+            BackendKind::Site(site) => Conn::Site(site),
+        })
+    }
+
     /// Create a briefing and, when configured, try to open it in this machine's browser. The
     /// briefing is live either way, so a failed opener is only a warning: the caller still has
     /// the link to show.
-    pub async fn create(&self, presentation: Briefing, source: Option<String>) -> anyhow::Result<Created> {
-        let mut created = match &self.kind {
-            BackendKind::Local(local) => local.create(presentation, source).await?,
-            BackendKind::Remote(remote) => remote.create(presentation, source).await?,
+    pub async fn create(&self, presentation: Briefing, origin: Origin) -> anyhow::Result<Created> {
+        let mut created = match self.connect().await? {
+            Conn::Http(remote) => remote.create(presentation, origin).await?,
+            Conn::Site(site) => site.create(presentation, origin).await?,
         };
         if self.open_browser {
             match browser::open_url(&created.url).await {
@@ -452,56 +346,79 @@ impl Backend {
         Ok(created)
     }
 
+    /// Wait up to `timeout` for the briefing to finish. This machine's hub may exit or be
+    /// replaced mid-wait; it reloads its records when it starts again, so keep waiting on it.
     pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
-        match &self.kind {
-            BackendKind::Local(local) => local.wait(id, timeout).await,
-            BackendKind::Remote(remote) => remote.wait(id, timeout).await,
+        let local = match &self.kind {
+            BackendKind::Remote(remote) => return remote.wait(id, timeout).await,
+            BackendKind::Site(site) => return Ok(site.hub.wait(id, timeout).await?),
+            BackendKind::Local(local) => local,
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut failed_restarts = 0;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remote = match local.origin().await.and_then(|origin| RemoteBackend::new(&origin)) {
+                Ok(remote) => remote,
+                Err(error) if failed_restarts < LOCAL_HUB_RESTARTS => {
+                    tracing::debug!(error = format!("{error:#}"), "this machine's hub is not back yet");
+                    failed_restarts += 1;
+                    tokio::time::sleep(LOCAL_HUB_RETRY).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            failed_restarts = 0;
+            match remote.wait(id, remaining).await {
+                Err(error) if error.is::<HubUnreachable>() => tokio::time::sleep(LOCAL_HUB_RETRY).await,
+                result => return result,
+            }
         }
     }
 
     pub async fn cancel(&self, id: &str) -> anyhow::Result<bool> {
-        match &self.kind {
-            BackendKind::Local(local) => Ok(local.cancel(id)),
-            BackendKind::Remote(remote) => remote.cancel(id).await,
+        match self.connect().await? {
+            Conn::Http(remote) => remote.cancel(id).await,
+            Conn::Site(site) => Ok(site.hub.cancel(id)?),
         }
     }
 
     pub async fn info(&self, id: &str) -> anyhow::Result<Option<BriefingInfo>> {
-        match &self.kind {
-            BackendKind::Local(local) => local.info(id).await,
-            BackendKind::Remote(remote) => remote.info(id).await,
+        match self.connect().await? {
+            Conn::Http(remote) => remote.info(id).await,
+            Conn::Site(site) => Ok(site.info(id)),
         }
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<BriefingInfo>> {
-        match &self.kind {
-            BackendKind::Local(local) => Ok(local.list()),
-            BackendKind::Remote(remote) => remote.list().await,
+        match self.connect().await? {
+            Conn::Http(remote) => remote.list().await,
+            Conn::Site(site) => Ok(site.list()),
         }
     }
+}
 
-    pub async fn shutdown(self) {
-        if let BackendKind::Local(local) = self.kind {
-            local.shutdown().await;
-        }
-    }
+enum Conn<'a> {
+    Http(RemoteBackend),
+    Site(&'a Arc<Site>),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hub::HubConfig;
     use serde_json::json;
 
     #[tokio::test]
     async fn background_sweeper_expires_records() {
         let hub =
             Arc::new(Hub::new(HubConfig { finished_ttl: Duration::ZERO, active_ttl: Duration::ZERO, store: None }));
-        let created = hub.create(content::demo(), None);
+        let created = hub.create(content::demo(), Origin::default()).unwrap();
         let shutdown = CancellationToken::new();
         let task = start_hub_sweeper(hub.clone(), shutdown.clone(), Duration::from_millis(10));
 
         tokio::time::timeout(Duration::from_secs(1), async {
-            while hub.status(&created.id).is_some() {
+            while hub.status(&created).is_some() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -516,18 +433,16 @@ mod tests {
     async fn remote_wait_retries_hub_request_timeouts() {
         crate::tls::init();
         let hub = Arc::new(Hub::new(HubConfig::default()));
-        let options = SiteOptions { agent_api: true, ..SiteOptions::default() };
-        let (site, running) = Site::start(hub, BindTarget::local(None), 0, options, |_| None).await.unwrap();
+        let (site, running) = Site::start(hub, BindTarget::local(None), 0, None, |_| None).await.unwrap();
         let origin = site.config.public_origin.clone();
         let remote = RemoteBackend::new(&origin).unwrap();
-        let created = remote.create(content::demo(), Some("test".into())).await.unwrap();
-        let token = created.url.rsplit('/').next().unwrap().to_string();
+        let created = remote.create(content::demo(), Origin::source("test")).await.unwrap();
 
-        let submit_origin = origin.clone();
+        let (submit_origin, id) = (origin.clone(), created.id.clone());
         let submitter = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
             let response = reqwest::Client::new()
-                .post(format!("{submit_origin}/api/{token}/complete"))
+                .post(format!("{submit_origin}/api/{id}/complete"))
                 .header("origin", &submit_origin)
                 .header(crate::protocol::HEADER, crate::protocol::PROTOCOL.to_string())
                 .json(&{

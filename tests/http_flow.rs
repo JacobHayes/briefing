@@ -1,36 +1,44 @@
-//! End-to-end HTTP behaviour: embedded server, browser API, drafts, host/origin checks,
-//! the hub agent API and dashboard, and recovery of a briefing from another process.
+//! End-to-end HTTP behaviour: a client against a hub, the browser API, drafts, host/origin
+//! checks, the agent API and dashboard, and a hub restart that keeps its briefings and links.
 
 mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use briefing::backend::{LocalBackend, Site, SiteOptions};
-use briefing::bind::{BindMode, BindTarget, Scope};
+use briefing::backend::{Backend, BackendKind, RemoteBackend, Site};
+use briefing::bind::{BindTarget, Scope};
 use briefing::content::demo;
-use briefing::hub::{Hub, HubConfig, Provenance};
+use briefing::http::RunningServer;
+use briefing::hub::{Hub, HubConfig, Origin};
 use briefing::response::Outcome;
 use briefing::store::Store;
 use serde_json::{Value, json};
 
-fn local(config: HubConfig) -> LocalBackend {
-    LocalBackend::new(BindMode::Local, SiteOptions::default(), config)
+/// A hub on loopback, on `port` (0 = any).
+async fn start_hub(config: HubConfig, port: u16) -> (Arc<Site>, RunningServer) {
+    Site::start(Arc::new(Hub::new(config)), BindTarget::local(None), port, None, |_| None).await.unwrap()
+}
+
+/// A client of the hub at `origin`, as the CLI and stdio MCP are.
+fn client_of(origin: &str) -> Backend {
+    Backend::new(BackendKind::Remote(RemoteBackend::new(origin).unwrap()), false)
 }
 
 #[tokio::test]
-async fn embedded_server_roundtrip() {
+async fn client_and_browser_roundtrip() {
     briefing::tls::init();
-    let backend = local(HubConfig::default());
-    let created = backend.create(demo(), Some("test".into())).await.unwrap();
-    assert_eq!(backend.info(&created.id).await.unwrap().unwrap().provenance, Provenance::Live, "created here");
+    let (site, running) = start_hub(HubConfig::default(), 0).await;
+    let backend = client_of(&site.config.public_origin);
+    let created = backend.create(demo(), Origin::source("test")).await.unwrap();
     assert!(created.url.starts_with("http://127.0.0.1:"));
     assert_eq!(created.scope, Scope::Local);
     assert!(!created.opened_browser);
+    assert_eq!(backend.info(&created.id).await.unwrap().unwrap().url.as_deref(), Some(created.url.as_str()));
 
     let client = common::client();
     let origin = created.url.rsplit_once("/briefing/").unwrap().0.to_string();
-    let token = created.url.rsplit('/').next().unwrap().to_string();
+    let token = created.id.clone();
 
     // Page + assets + presentation JSON.
     let page = client.get(&created.url).send().await.unwrap();
@@ -68,10 +76,6 @@ async fn embedded_server_roundtrip() {
         .unwrap();
     assert_eq!(bad_origin.status(), 403);
 
-    // Agent API and dashboard are not exposed in embedded mode.
-    assert_eq!(client.get(format!("{origin}/agent/briefings")).send().await.unwrap().status(), 404);
-    assert_eq!(client.get(format!("{origin}/")).send().await.unwrap().status(), 404);
-
     // Drafts: saved with a revision, stale saves return the newer draft, page payload carries it.
     let draft = |current: u64, note: &str| json!({"current": current, "state": {"questions": {"c0-1": {"selected": [], "answer": note}}, "annotations": [], "notes": []}, "disclosures": {}, "updatedAt": 1});
     let put = |body: Value| client.put(format!("{origin}/api/{token}/draft")).header("origin", &origin).json(&body);
@@ -99,9 +103,10 @@ async fn embedded_server_roundtrip() {
     assert_eq!(info.source.as_deref(), Some("test"));
 
     // Wait in the background, then submit from the "browser".
-    let hub = backend.hub().clone();
     let id = created.id.clone();
-    let waiter = tokio::spawn(async move { hub.wait(&id, Duration::from_secs(5)).await.unwrap() });
+    let waiter_origin = origin.clone();
+    let waiter =
+        tokio::spawn(async move { client_of(&waiter_origin).wait(&id, Duration::from_secs(5)).await.unwrap() });
     let ok = client
         .post(format!("{origin}/api/{token}/complete"))
         .header("origin", &origin)
@@ -143,90 +148,71 @@ async fn embedded_server_roundtrip() {
     assert_eq!(presentation["status"], "completed");
     assert_eq!(put(json!({"draft": draft(3, "late")})).send().await.unwrap().status(), 409);
 
-    backend.shutdown().await;
+    running.stop().await;
 }
 
-/// A briefing created by one process is re-served by another with its draft intact, and a
-/// submission made against the second process reaches a waiter in a third.
+/// A hub restarted on the same port serves its briefings at the same links, drafts intact,
+/// and a submission after the restart reaches a client that waited across it.
 #[tokio::test]
-async fn briefing_recovered_by_another_process() {
+async fn a_restarted_hub_keeps_briefings_and_links() {
     briefing::tls::init();
     let dir = tempfile::tempdir().unwrap();
     let config = || HubConfig { store: Some(Store::open(dir.path()).unwrap()), ..HubConfig::default() };
     let client = common::client();
 
-    let first = local(config());
-    let created = first.create(demo(), Some("first".into())).await.unwrap();
-    let (origin1, token) = created.url.rsplit_once("/briefing/").unwrap();
+    let (site, running) = start_hub(config(), 0).await;
+    let port = running.local_addr.port();
+    let origin = site.config.public_origin.clone();
+    let created = client_of(&origin).create(demo(), Origin::source("first")).await.unwrap();
     let draft = json!({"current": 1, "state": {"questions": {}, "annotations": [], "notes": []}, "updatedAt": 7});
     let saved = client
-        .put(format!("{origin1}/api/{token}/draft"))
-        .header("origin", origin1)
+        .put(format!("{origin}/api/{}/draft", created.id))
+        .header("origin", &origin)
         .json(&json!({"draft": draft}))
         .send()
         .await
         .unwrap();
     assert_eq!(saved.status(), 200);
-    first.shutdown().await;
+    running.stop().await;
 
-    // Nothing running: status still lists it from disk, without a live URL.
-    let idle = local(config());
-    let listed = idle.list();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].provenance, Provenance::DiskOnly);
-    assert_eq!(listed[0].source.as_deref(), Some("first"));
+    // Nothing listening: the client sees an unreachable hub, not a missing briefing.
+    let error = RemoteBackend::new(&origin).unwrap().info(&created.id).await.unwrap_err();
+    assert!(error.is::<briefing::backend::HubUnreachable>(), "{error}");
 
-    // Second process adopts it on `info`, starts serving it, and the page carries the draft.
-    let second = local(config());
-    let info = second.info(&created.id).await.unwrap().unwrap();
-    assert_eq!(info.provenance, Provenance::Reopened, "first serve at a new link");
-    let url2 = info.url.clone().unwrap();
-    assert_eq!(second.info(&created.id).await.unwrap().unwrap().provenance, Provenance::Live, "same link again");
-    assert_ne!(url2, created.url);
-    assert!(url2.ends_with(&format!("/briefing/{token}")));
-    let origin2 = url2.rsplit_once("/briefing/").unwrap().0.to_string();
+    let (site, running) = start_hub(config(), port).await;
+    let info = client_of(&origin).info(&created.id).await.unwrap().unwrap();
+    assert_eq!(info.url.as_deref(), Some(created.url.as_str()), "same link after the restart");
+    assert_eq!(info.source.as_deref(), Some("first"));
     let page: Value =
-        client.get(format!("{origin2}/api/{token}/presentation")).send().await.unwrap().json().await.unwrap();
+        client.get(format!("{origin}/api/{}/presentation", created.id)).send().await.unwrap().json().await.unwrap();
     assert_eq!(page["draft"]["current"], 1);
     assert_eq!(page["draftRevision"], 1);
 
-    // Third process waits; the browser submits to the second; the third sees it via disk.
-    let third = local(config());
     let waiter = {
-        let hub = third.hub().clone();
-        let id = created.id.clone();
-        tokio::spawn(async move { hub.wait(&id, Duration::from_secs(10)).await.unwrap() })
+        let (origin, id) = (origin.clone(), created.id.clone());
+        tokio::spawn(async move { client_of(&origin).wait(&id, Duration::from_secs(10)).await.unwrap() })
     };
     let ok = client
-        .post(format!("{origin2}/api/{token}/complete"))
-        .header("origin", &origin2)
-        .json(&common::demo_submission(&["recovered"]))
+        .post(format!("{origin}/api/{}/complete", created.id))
+        .header("origin", &origin)
+        .json(&common::demo_submission(&["after restart"]))
         .send()
         .await
         .unwrap();
     assert_eq!(ok.status(), 200);
     match waiter.await.unwrap() {
-        Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["recovered"]),
+        Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["after restart"]),
         other => panic!("unexpected {other:?}"),
     }
-    // And a fourth, brand-new process gets the stored result immediately, no server needed.
-    let fourth = local(config());
-    let info = fourth.info(&created.id).await.unwrap().unwrap();
-    assert_eq!(info.status, briefing::hub::BriefingStatus::Completed);
-    assert!(matches!(
-        fourth.hub().wait(&created.id, Duration::from_millis(1)).await.unwrap(),
-        Outcome::Completed { .. }
-    ));
-    second.shutdown().await;
+    assert_eq!(site.hub.active_count(), 0);
+    running.stop().await;
 }
 
 /// The hub agent API creates briefings through the same path as the CLI and MCP.
 #[tokio::test]
 async fn hub_agent_api_and_dashboard() {
     briefing::tls::init();
-    let options = SiteOptions { agent_api: true, ..SiteOptions::default() };
-    let hub = Arc::new(Hub::new(HubConfig::default()));
-    let (site, running) = Site::start(hub, BindTarget::local(None), 0, options, |_| None).await.unwrap();
+    let (site, running) = start_hub(HubConfig::default(), 0).await;
     let origin = site.config.public_origin.clone();
     assert_eq!(origin, format!("http://127.0.0.1:{}", running.local_addr.port()));
     let client = common::client();
@@ -255,7 +241,7 @@ async fn hub_agent_api_and_dashboard() {
         .json()
         .await
         .unwrap();
-    let id = created["id"].as_str().unwrap().to_string();
+    let id = created["briefingId"].as_str().unwrap().to_string();
     let url = created["url"].as_str().unwrap().to_string();
     assert!(url.starts_with(&format!("{origin}/briefing/")));
 
@@ -275,9 +261,8 @@ async fn hub_agent_api_and_dashboard() {
     assert_eq!(pending, json!({"briefingId": id, "status": "pending"}));
 
     // Browser cancels -> wait reports cancelled.
-    let token = url.rsplit('/').next().unwrap();
     let cancel = client
-        .post(format!("{origin}/api/{token}/cancel"))
+        .post(format!("{origin}/api/{id}/cancel"))
         .header("origin", &origin)
         .json(&json!({}))
         .send()
@@ -305,7 +290,20 @@ async fn hub_agent_api_and_dashboard() {
         .json()
         .await
         .unwrap();
-    let second_id = second["id"].as_str().unwrap();
+    let second_id = second["briefingId"].as_str().unwrap();
+    assert_eq!(listed["briefings"][0]["briefingId"], id, "listings name the id like every other result");
+    // Another site cannot create or cancel through a browser; the hub's own dashboard can.
+    let cross_site = client
+        .post(format!("{origin}/agent/briefings"))
+        .header("origin", "http://127.0.0.1:1")
+        .json(&json!({"presentation": demo()}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cross_site.status(), 403);
+    let cross_cancel =
+        client.post(format!("{origin}/agent/briefings/{second_id}/cancel")).header("origin", "http://attacker.example");
+    assert_eq!(cross_cancel.send().await.unwrap().status(), 403);
     let agent_cancel: Value =
         client.post(format!("{origin}/agent/briefings/{second_id}/cancel")).send().await.unwrap().json().await.unwrap();
     assert_eq!(agent_cancel, json!({"ok": true, "cancelled": true}));
@@ -317,80 +315,70 @@ async fn hub_agent_api_and_dashboard() {
     running.stop().await;
 }
 
-/// Clients and pages from before protocol versioning (protocol 1) keep working for one version:
-/// the hub translates their requests and answers them in their shapes. Newer protocols are
-/// refused with both versions named, and unknown fields are rejected, not dropped.
+/// Clients one protocol behind keep working: the hub answers them in their shapes and their
+/// protocol. Anything older or newer is refused with both versions named, while pages, the
+/// dashboard, and `/healthz` stay reachable without a protocol header. Unknown fields are
+/// rejected, not dropped.
 #[tokio::test]
-async fn protocol_one_clients_and_version_negotiation() {
+async fn previous_protocol_clients_and_version_negotiation() {
     briefing::tls::init();
-    let options = SiteOptions { agent_api: true, ..SiteOptions::default() };
-    let hub = Arc::new(Hub::new(HubConfig::default()));
-    let (site, running) = Site::start(hub, BindTarget::local(None), 0, options, |_| None).await.unwrap();
+    let (site, running) = start_hub(HubConfig::default(), 0).await;
     let origin = site.config.public_origin.clone();
-    let old = reqwest::Client::new(); // sends no protocol header, like a protocol 1 build
+    let previous = (briefing::protocol::PROTOCOL - 1).to_string();
+    let old = {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(briefing::protocol::HEADER, previous.parse().unwrap());
+        reqwest::Client::builder().default_headers(headers).build().unwrap()
+    };
     let current = common::client();
 
-    // A protocol 1 client creates a briefing in the old shape.
-    let v1_presentation = json!({
-        "title": "Old", "goal": "g",
-        "chunks": [{ "title": "C", "mainPoint": "m", "checkpoint": "Why?",
-                     "decision": { "question": "Pick?", "required": true, "options": [{ "label": "A" }, { "label": "B" }] } }],
-        "decisions": [{ "question": "Ship?", "options": [{ "label": "Yes" }, { "label": "No" }] }]
-    });
+    // A protocol 2 client reads exactly `{id, url}` back, in protocol 2.
     let created = old
         .post(format!("{origin}/agent/briefings"))
-        .json(&json!({ "presentation": v1_presentation }))
+        .json(&json!({ "presentation": demo(), "source": "old" }))
         .send()
         .await
         .unwrap();
     assert_eq!(created.status(), 201);
     // Answered in the protocol it speaks, not the hub's.
-    assert_eq!(created.headers()[briefing::protocol::HEADER], briefing::protocol::UNVERSIONED.to_string());
+    assert_eq!(created.headers()[briefing::protocol::HEADER], previous.as_str());
     let created: Value = created.json().await.unwrap();
     let id = created["id"].as_str().unwrap().to_string();
-    let token = created["url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+    assert_eq!(created, json!({ "id": id, "url": format!("{origin}/briefing/{id}") }));
 
-    // ...and it arrives as questions.
-    let page: Value =
-        current.get(format!("{origin}/api/{token}/presentation")).send().await.unwrap().json().await.unwrap();
-    assert_eq!(
-        page["chunks"][0]["questions"],
-        json!([
-            { "question": "Pick?", "options": [{ "label": "A" }, { "label": "B" }] },
-            { "question": "Why?" }
-        ])
-    );
-    assert_eq!(page["questions"][0]["question"], "Ship?");
+    // Summaries call the id `id` for it, `briefingId` for current clients.
+    let info: Value = old.get(format!("{origin}/agent/briefings/{id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(info["id"], id);
+    assert!(info.get("briefingId").is_none());
+    let listed: Value = old.get(format!("{origin}/agent/briefings")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(listed["briefings"][0]["id"], id);
+    let info: Value = current.get(format!("{origin}/agent/briefings/{id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(info["briefingId"], id);
+    assert!(info.get("id").is_none());
 
-    // A protocol 1 page (an old tab) submits the old shape.
-    let submitted = old
-        .post(format!("{origin}/api/{token}/complete"))
-        .header("origin", &origin)
-        .json(&json!({
-            "chunks": [{ "title": "C", "status": "unmarked", "checkpoint": "because", "note": "" }],
-            "decisions": [{ "question": "Pick?", "selected": "A", "note": "" }, { "question": "Ship?", "selected": "", "note": "" }],
-            "annotations": [], "notes": [], "overallNote": "overall"
-        }))
+    // Wait results have the same shape in both.
+    let pending: Value = old
+        .get(format!("{origin}/agent/briefings/{id}/wait?timeout_secs=0"))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!(submitted.status(), 200, "{}", submitted.text().await.unwrap());
+    assert_eq!(pending, json!({ "briefingId": id, "status": "pending" }));
 
-    // Each client reads the result in its own shape.
-    let v1: Value = old.get(format!("{origin}/agent/briefings/{id}/wait")).send().await.unwrap().json().await.unwrap();
-    assert_eq!(v1["feedback"]["decisions"][0], json!({ "question": "Pick?", "selected": "A", "note": "" }));
-    assert_eq!(v1["feedback"]["overallNote"], "");
-    assert_eq!(v1["feedback"]["notes"], json!(["overall"]));
-    let v2: Value =
-        current.get(format!("{origin}/agent/briefings/{id}/wait")).send().await.unwrap().json().await.unwrap();
-    assert_eq!(
-        v2["feedback"]["questions"][1],
-        json!({ "question": "Why?", "section": "C", "selected": [], "answer": "because", "status": "answered" })
-    );
-    assert_eq!(v2["feedback"]["questions"][2]["status"], "unresolved");
-    assert!(v2["feedback"].get("decisions").is_none());
+    // Unversioned clients (protocol 1) are now two behind: refused, told to upgrade.
+    let unversioned = reqwest::Client::new();
+    let refused = unversioned.get(format!("{origin}/agent/briefings")).send().await.unwrap();
+    assert_eq!(refused.status(), 426);
+    let range = format!("{}-{}", briefing::protocol::OLDEST_SUPPORTED, briefing::protocol::PROTOCOL);
+    assert!(refused.text().await.unwrap().contains(&range), "names the protocols the hub speaks");
+    // Browsers and hub discovery send no header and are not part of the negotiation.
+    for path in [format!("/briefing/{id}"), "/".to_string(), "/healthz".to_string()] {
+        assert_eq!(unversioned.get(format!("{origin}{path}")).send().await.unwrap().status(), 200, "{path}");
+    }
 
-    // A protocol newer than the hub gets a 426 naming both versions.
+    // A protocol newer than the hub gets a 426 naming both versions, in the hub's protocol.
     let newer = current
         .get(format!("{origin}/agent/briefings"))
         .header(briefing::protocol::HEADER, (briefing::protocol::PROTOCOL + 1).to_string())

@@ -6,10 +6,9 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -28,22 +27,30 @@ after(async () => {
   for (const server of servers) server.stop();
 });
 
-/** Serve the fixture as a fresh briefing and return its page URL. */
+/** Serve the fixture as a fresh briefing and return its page URL. `present` returns at once;
+ * the briefing lives in the on-demand hub it starts in this test's own state dir, on a free
+ * port, which is stopped once the tests finish. */
 async function serve() {
   const dir = mkdtempSync(join(tmpdir(), "briefing-browser-"));
   const config = join(dir, "config.toml");
   writeFileSync(config, "");
-  const env = { ...process.env, BRIEFING_CONFIG: config, XDG_STATE_HOME: join(dir, "state"), BRIEFING_STATE_DIR: join(dir, "briefings") };
-  for (const key of Object.keys(env)) if (key.startsWith("BRIEFING_") && !["BRIEFING_CONFIG", "BRIEFING_STATE_DIR"].includes(key)) delete env[key];
-  const child = spawn(BINARY, ["present", FIXTURE, "--json", "--bind", "local", "--open", "false"], { env, stdio: ["ignore", "ignore", "pipe"] });
-  servers.push({ stop: () => { child.kill("SIGKILL"); rmSync(dir, { recursive: true, force: true }); } });
-  const url = await new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("exit", code => reject(new Error(`briefing exited with ${code} before it was ready`)));
-    createInterface({ input: child.stderr }).on("line", line => {
-      try { const event = JSON.parse(line); if (event.event === "ready") resolve(event.url); } catch { /* human-readable line */ }
-    });
+  const state = join(dir, "briefings");
+  const env = { ...process.env, BRIEFING_CONFIG: config, XDG_STATE_HOME: join(dir, "state"), BRIEFING_STATE_DIR: state, BRIEFING_PORT: "0" };
+  for (const key of Object.keys(env)) if (key.startsWith("BRIEFING_") && !["BRIEFING_CONFIG", "BRIEFING_STATE_DIR", "BRIEFING_PORT"].includes(key)) delete env[key];
+  servers.push({
+    stop: () => {
+      try { process.kill(JSON.parse(readFileSync(join(state, ".hub.json"), "utf8")).pid, "SIGKILL"); } catch { /* never started */ }
+      rmSync(dir, { recursive: true, force: true });
+    },
   });
+  const stdout = await new Promise((resolve, reject) => {
+    const child = spawn(BINARY, ["present", FIXTURE, "--json", "--bind", "local", "--open", "false"], { env, stdio: ["ignore", "pipe", "inherit"] });
+    let out = "";
+    child.stdout.on("data", chunk => (out += chunk));
+    child.on("error", reject);
+    child.on("exit", code => (code === 0 ? resolve(out) : reject(new Error(`briefing present exited with ${code}`))));
+  });
+  const { url } = JSON.parse(stdout);
   assert.match(url, /^http:\/\/127\.0\.0\.1:/, "tests must never reach a real hub");
   return url;
 }
@@ -237,8 +244,8 @@ test("a chosen option can be cleared, and skipped questions go back as unresolve
   assert.deepEqual(await page.$$eval('[data-question="c1-0"] input', boxes => boxes.map(box => box.checked)), [false, false]);
   await page.fill('[data-question="c1-1"] .question-answer', "my own words");
   await goToScreen(page, 2);
-  // Read now: `present` exits once the briefing is submitted.
-  const { keptFor } = await page.evaluate(async () => (await fetch(location.pathname.replace("/briefing/", "/api/") + "/presentation")).json());
+  // As the page itself asks: API routes need its protocol header.
+  const { keptFor } = await page.evaluate(async () => (await fetch(location.pathname.replace("/briefing/", "/api/") + "/presentation", { headers: { "briefing-protocol": PROTOCOL } })).json());
   const submitted = page.waitForRequest(request => request.url().endsWith("/complete"));
   for (let i = 0; i < 4 && !(await page.$(".done")); i++) {
     await page.click(".nav .btn.primary");

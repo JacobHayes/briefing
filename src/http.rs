@@ -2,7 +2,8 @@
 //! agent API, and an MCP endpoint used by remote harnesses.
 //!
 //! There is no authentication: the hub needs a trusted network or an authenticating reverse
-//! proxy with no untrusted direct access. Every briefing URL carries its own capability token.
+//! proxy with no untrusted direct access. Every briefing URL carries its unguessable id as its
+//! capability.
 //! Host and Origin checks guard against DNS rebinding and cross-site requests.
 
 use std::borrow::Cow;
@@ -24,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::assets;
 use crate::backend::Site;
 use crate::content::{self, Briefing};
-use crate::hub::{DraftSave, HubError, random_token};
+use crate::hub::{DraftSave, HubError, Origin, random_token};
 use crate::protocol;
 use crate::response::BriefingOutcome;
 
@@ -41,8 +42,6 @@ pub struct HttpConfig {
     /// Authorities accepted by every route, already split: an entry without a port accepts any
     /// port, an entry carrying one must match it exactly.
     allowed: Vec<(String, Option<u16>)>,
-    /// Serve the dashboard at `/` and the agent API under `/agent/*` (hub mode).
-    pub agent_api: bool,
 }
 
 /// How `url` - and so rmcp and every briefing URL - spells an IP host: an IPv6 literal bracketed
@@ -70,7 +69,7 @@ fn split_port(authority: &str) -> Option<(&str, Option<u16>)> {
 impl HttpConfig {
     /// Accept the host we bind on and, when `public_origin` names another host (a reverse
     /// proxy), that one too.
-    pub fn new(public_origin: String, bind_host: IpAddr, agent_api: bool) -> Self {
+    pub fn new(public_origin: String, bind_host: IpAddr) -> Self {
         let bind_host = canonical_host(bind_host);
         let mut allowed = vec![(bind_host.clone(), None)];
         if let Ok(url) = url::Url::parse(&public_origin)
@@ -79,7 +78,7 @@ impl HttpConfig {
         {
             allowed.push((host.to_string(), url.port()));
         }
-        Self { public_origin, allowed, agent_api }
+        Self { public_origin, allowed }
     }
 
     /// The allow-list as authority strings, for consumers that keep their own copy (rmcp's
@@ -108,15 +107,24 @@ impl HttpConfig {
         self.matches(&host, port)
     }
 
-    pub fn origin_allowed(&self, origin: &str) -> bool {
+    /// Whether a browser `Origin` is this hub's own: exactly the public origin (scheme, host, and
+    /// port), or the bound address over plain HTTP on the port this request arrived on
+    /// (`request_host`, its `Host` header). Another site on the same host but another port is
+    /// another origin.
+    pub fn origin_allowed(&self, origin: &str, request_host: Option<&str>) -> bool {
         let Ok(url) = url::Url::parse(origin.trim()) else {
             return false;
         };
-        if url.scheme() != "http" && url.scheme() != "https" {
-            return false;
+        let public = url::Url::parse(&self.public_origin).map(|public| public.origin());
+        if public.is_ok_and(|public| public == url.origin()) {
+            return true;
         }
         // `url` already canonicalizes the host, so this skips `host_allowed`'s normalization.
-        url.host_str().is_some_and(|host| self.matches(host, url.port()))
+        let bound = &self.allowed[0].0;
+        let arrived_on = request_host.and_then(|host| split_port(host.trim())).map(|(_, port)| port.unwrap_or(80));
+        url.scheme() == "http"
+            && url.host_str().is_some_and(|host| host.eq_ignore_ascii_case(bound))
+            && url.port_or_known_default().is_some_and(|port| Some(port) == arrived_on)
     }
 
     /// A canonical host and port against the allow-list.
@@ -126,8 +134,8 @@ impl HttpConfig {
         })
     }
 
-    pub fn briefing_url(&self, token: &str) -> String {
-        format!("{}/briefing/{token}", self.public_origin.trim_end_matches('/'))
+    pub fn briefing_url(&self, id: &str) -> String {
+        format!("{}/briefing/{id}", self.public_origin.trim_end_matches('/'))
     }
 }
 
@@ -148,6 +156,7 @@ impl IntoResponse for HubError {
             HubError::NotFound => StatusCode::NOT_FOUND,
             HubError::AlreadyFinished(_) => StatusCode::CONFLICT,
             HubError::Invalid(_) => StatusCode::BAD_REQUEST,
+            HubError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         json_response(status, json!({"error": self.to_string()}))
     }
@@ -181,7 +190,22 @@ async fn check_host(State(state): State<AppState>, request: Request<Body>, next:
     next.run(request).await
 }
 
+/// Liveness plus this hub's instance id, which a client matches against the hub file before
+/// trusting it. Never the control secret.
 async fn healthz() -> Response {
+    let instance = &crate::local_hub::identity().instance;
+    json_response(StatusCode::OK, json!({"ok": true, "version": env!("BRIEFING_VERSION"), "instance": instance}))
+}
+
+/// `POST /control/shutdown`: a newer client replacing this hub asks it to exit gracefully.
+/// Authorized by the control secret, which only the hub's own state dir holds.
+async fn control_shutdown(headers: HeaderMap) -> Response {
+    let bearer =
+        headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
+    if !bearer.is_some_and(crate::local_hub::control_matches) {
+        return text(StatusCode::UNAUTHORIZED, "Unauthorized");
+    }
+    crate::local_hub::request_shutdown();
     json_response(StatusCode::OK, json!({"ok": true}))
 }
 
@@ -217,8 +241,8 @@ fn html(body: String, csp: String) -> Response {
         .into_response()
 }
 
-async fn page(State(state): State<AppState>, Path(token): Path<String>) -> Response {
-    if !state.hub.has_token(&token) {
+async fn page(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if !state.hub.has(&id) {
         return text(StatusCode::NOT_FOUND, "Briefing not found");
     }
     let nonce = random_token(18);
@@ -238,27 +262,30 @@ async fn dashboard() -> Response {
     html(assets::render(assets::DASHBOARD_HTML, &nonce), csp)
 }
 
-async fn presentation(State(state): State<AppState>, Path(token): Path<String>) -> Result<Response, HubError> {
-    let payload = state.hub.page_payload(&token).ok_or(HubError::NotFound)?;
+async fn presentation(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response, HubError> {
+    let payload = state.hub.page_payload(&id).ok_or(HubError::NotFound)?;
     Ok(json_response(StatusCode::OK, payload))
 }
 
 fn origin_ok(state: &AppState, headers: &HeaderMap) -> bool {
-    headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).is_some_and(|origin| state.config.origin_allowed(origin))
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|origin| state.config.origin_allowed(origin, host))
 }
 
-async fn submit(
-    state: AppState,
-    headers: HeaderMap,
-    token: String,
-    body: Value,
-    cancelled: bool,
-    protocol: u32,
-) -> Response {
+/// Agent mutations accept requests without an `Origin` (CLIs and agents send none) but refuse a
+/// browser one from another site, so a page elsewhere cannot create or cancel briefings.
+fn agent_origin_ok(state: &AppState, headers: &HeaderMap) -> bool {
+    !headers.contains_key(header::ORIGIN) || origin_ok(state, headers)
+}
+
+async fn submit(state: AppState, headers: HeaderMap, id: String, body: Value, cancelled: bool) -> Response {
     if !origin_ok(&state, &headers) {
         return text(StatusCode::FORBIDDEN, "Forbidden");
     }
-    match state.hub.submit_by_token(&token, &body, cancelled, protocol) {
+    match state.hub.submit(&id, &body, cancelled) {
         Ok(()) => json_response(StatusCode::OK, json!({"ok": true})),
         Err(error) => error.into_response(),
     }
@@ -266,22 +293,20 @@ async fn submit(
 
 async fn complete(
     State(state): State<AppState>,
-    Path(token): Path<String>,
-    Extension(Protocol(protocol)): Extension<Protocol>,
+    Path(id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    submit(state, headers, token, body, false, protocol).await
+    submit(state, headers, id, body, false).await
 }
 
 async fn cancel_from_browser(
     State(state): State<AppState>,
-    Path(token): Path<String>,
-    Extension(Protocol(protocol)): Extension<Protocol>,
+    Path(id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    submit(state, headers, token, body, true, protocol).await
+    submit(state, headers, id, body, true).await
 }
 
 #[derive(Deserialize)]
@@ -293,11 +318,11 @@ pub struct DraftRequest {
     pub draft: Value,
 }
 
-/// `PUT /api/{token}/draft`: 200 `{revision}` when saved, 409 `{revision, draft}` when the
+/// `PUT /api/{id}/draft`: 200 `{revision}` when saved, 409 `{revision, draft}` when the
 /// server has a newer draft than `baseRevision`.
 async fn save_draft(
     State(state): State<AppState>,
-    Path(token): Path<String>,
+    Path(id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<DraftRequest>,
 ) -> Result<Response, HubError> {
@@ -307,7 +332,7 @@ async fn save_draft(
     if !body.draft.is_object() {
         return Ok(json_response(StatusCode::BAD_REQUEST, json!({"error": "draft must be an object"})));
     }
-    Ok(match state.hub.save_draft(&token, body.base_revision, body.draft)? {
+    Ok(match state.hub.save_draft(&id, body.base_revision, body.draft)? {
         DraftSave::Saved { revision } => json_response(StatusCode::OK, json!({"revision": revision})),
         DraftSave::Stale { revision, draft } => {
             json_response(StatusCode::CONFLICT, json!({"error": "stale", "revision": revision, "draft": draft}))
@@ -329,19 +354,24 @@ pub struct CreateRequest {
 async fn agent_create(
     State(site): State<AppState>,
     Extension(Protocol(protocol)): Extension<Protocol>,
-    Json(mut body): Json<Value>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
 ) -> Response {
-    if protocol == 1
-        && let Some(presentation) = body.get_mut("presentation")
-    {
-        protocol::presentation_from_v1(presentation);
+    if !agent_origin_ok(&site, &headers) {
+        return text(StatusCode::FORBIDDEN, "Forbidden");
     }
     let body: CreateRequest = match serde_json::from_value(body) {
         Ok(body) => body,
         Err(error) => return json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()})),
     };
-    match site.create(body.presentation, body.source).await {
-        Ok(created) => json_response(StatusCode::CREATED, json!({"id": created.id, "url": created.url})),
+    match site.create(body.presentation, Origin { source: body.source }).await {
+        Ok(created) => {
+            let mut created = serde_json::to_value(created).unwrap_or_default();
+            if protocol == 2 {
+                protocol::created_to_v2(&mut created);
+            }
+            json_response(StatusCode::CREATED, created)
+        }
         Err(error) if error.is::<content::ValidationError>() => {
             json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()}))
         }
@@ -350,11 +380,9 @@ async fn agent_create(
 }
 
 async fn agent_list(State(site): State<AppState>, Extension(Protocol(protocol)): Extension<Protocol>) -> Response {
-    let mut briefings = site.hub.list();
-    site.with_live_urls(&mut briefings);
-    let mut briefings = serde_json::to_value(briefings).unwrap_or_default();
-    if protocol == 1 {
-        briefings.as_array_mut().into_iter().flatten().for_each(protocol::info_to_v1);
+    let mut briefings = serde_json::to_value(site.list()).unwrap_or_default();
+    if protocol == 2 {
+        briefings.as_array_mut().into_iter().flatten().for_each(protocol::info_to_v2);
     }
     json_response(StatusCode::OK, json!({"briefings": briefings}))
 }
@@ -364,11 +392,9 @@ async fn agent_info(
     Extension(Protocol(protocol)): Extension<Protocol>,
     Path(id): Path<String>,
 ) -> Result<Response, HubError> {
-    let mut info = site.hub.info(&id).ok_or(HubError::NotFound)?;
-    info.url = site.url_for(&id);
-    let mut info = serde_json::to_value(info).unwrap_or_default();
-    if protocol == 1 {
-        protocol::info_to_v1(&mut info);
+    let mut info = serde_json::to_value(site.info(&id).ok_or(HubError::NotFound)?).unwrap_or_default();
+    if protocol == 2 {
+        protocol::info_to_v2(&mut info);
     }
     Ok(json_response(StatusCode::OK, info))
 }
@@ -387,53 +413,55 @@ pub fn clamp_wait(requested: Option<u64>) -> Duration {
 /// `GET /agent/briefings/{id}/wait`: a [`BriefingOutcome`], `pending` once the timeout passes.
 async fn agent_wait(
     State(site): State<AppState>,
-    Extension(Protocol(protocol)): Extension<Protocol>,
     Path(id): Path<String>,
     Query(query): Query<WaitQuery>,
 ) -> Result<Response, HubError> {
     let outcome = site.hub.wait(&id, clamp_wait(query.timeout_secs)).await?;
-    let mut body = serde_json::to_value(BriefingOutcome { briefing_id: id, outcome }).unwrap_or_default();
-    if protocol == 1 {
-        protocol::outcome_to_v1(&mut body);
-    }
+    let body = serde_json::to_value(BriefingOutcome { briefing_id: id, outcome }).unwrap_or_default();
     Ok(json_response(StatusCode::OK, body))
 }
 
-async fn agent_cancel(State(state): State<AppState>, Path(id): Path<String>) -> Result<Response, HubError> {
+async fn agent_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, HubError> {
+    if !agent_origin_ok(&state, &headers) {
+        return Ok(text(StatusCode::FORBIDDEN, "Forbidden"));
+    }
     state.hub.status(&id).ok_or(HubError::NotFound)?;
-    Ok(json_response(StatusCode::OK, json!({"ok": true, "cancelled": state.hub.cancel(&id)})))
+    Ok(json_response(StatusCode::OK, json!({"ok": true, "cancelled": state.hub.cancel(&id)?})))
 }
 
 /// Build the router. `mcp` is an optional router (e.g. one that nests an MCP service at
-/// `/mcp`); it is only mounted when the agent API is enabled.
+/// `/mcp`).
 pub fn router(site: Arc<Site>, mcp: Option<Router<Arc<Site>>>) -> Router {
     let state = site;
-    let mut app = Router::new()
+    // Fetched without a protocol header: by browsers, by MCP clients, and by clients finding
+    // or replacing a hub of any version. So these stay outside the protocol negotiation.
+    let mut unversioned = Router::new()
         .route("/healthz", get(healthz))
         .route(&format!("{}{{name}}", assets::ASSET_PREFIX), get(asset))
-        .route("/briefing/{token}", get(page))
-        .route("/api/{token}/presentation", get(presentation))
-        .route("/api/{token}/draft", axum::routing::put(save_draft))
-        .route("/api/{token}/complete", post(complete))
-        .route("/api/{token}/cancel", post(cancel_from_browser))
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
-
-    if state.config.agent_api {
-        let mut agent = Router::new()
-            .route("/", get(dashboard))
-            .route("/agent/briefings", post(agent_create).get(agent_list))
-            .route("/agent/briefings/{id}", get(agent_info))
-            .route("/agent/briefings/{id}/wait", get(agent_wait))
-            .route("/agent/briefings/{id}/cancel", post(agent_cancel))
-            .layer(DefaultBodyLimit::max(MAX_AGENT_REQUEST_BYTES));
-        if let Some(mcp) = mcp {
-            agent = agent.merge(mcp);
-        }
-        app = app.merge(agent);
+        .route("/briefing/{id}", get(page))
+        .route("/", get(dashboard))
+        .route("/control/shutdown", post(control_shutdown));
+    if let Some(mcp) = mcp {
+        unversioned = unversioned.merge(mcp.layer(DefaultBodyLimit::max(MAX_AGENT_REQUEST_BYTES)));
     }
-    app.layer(middleware::from_fn(protocol_layer))
-        .layer(middleware::from_fn_with_state(state.clone(), check_host))
-        .with_state(state)
+    let page_api = Router::new()
+        .route("/api/{id}/presentation", get(presentation))
+        .route("/api/{id}/draft", axum::routing::put(save_draft))
+        .route("/api/{id}/complete", post(complete))
+        .route("/api/{id}/cancel", post(cancel_from_browser))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
+    let agent_api = Router::new()
+        .route("/agent/briefings", post(agent_create).get(agent_list))
+        .route("/agent/briefings/{id}", get(agent_info))
+        .route("/agent/briefings/{id}/wait", get(agent_wait))
+        .route("/agent/briefings/{id}/cancel", post(agent_cancel))
+        .layer(DefaultBodyLimit::max(MAX_AGENT_REQUEST_BYTES));
+    let versioned = page_api.merge(agent_api).layer(middleware::from_fn(protocol_layer));
+    unversioned.merge(versioned).layer(middleware::from_fn_with_state(state.clone(), check_host)).with_state(state)
 }
 
 pub struct RunningServer {
@@ -489,7 +517,6 @@ mod tests {
         HttpConfig {
             public_origin: "http://127.0.0.1:4000".into(),
             allowed: vec![("127.0.0.1".into(), None), ("briefings.example".into(), None)],
-            agent_api: false,
         }
     }
 
@@ -506,10 +533,22 @@ mod tests {
         assert!(!config.host_allowed("127.0.0.1:"));
         assert!(!config.host_allowed("127.0.0.1:99999"));
         assert!(!config.host_allowed("127.0.0.1:+80"));
-        assert!(config.origin_allowed("http://127.0.0.1:4000"));
-        assert!(config.origin_allowed("https://briefings.example"));
-        assert!(!config.origin_allowed("null"));
-        assert!(!config.origin_allowed("http://attacker.example"));
+        let host = Some("127.0.0.1:4000");
+        assert!(config.origin_allowed("http://127.0.0.1:4000", host));
+        assert!(config.origin_allowed("http://127.0.0.1:4000", None), "the public origin needs no Host");
+        assert!(!config.origin_allowed("null", host));
+        assert!(!config.origin_allowed("http://attacker.example", host));
+        // Same host, another port or scheme: another site.
+        assert!(!config.origin_allowed("http://127.0.0.1:3000", host));
+        assert!(!config.origin_allowed("https://127.0.0.1:4000", host));
+        // Behind a proxy: the public origin exactly, or the bound address on the port reached.
+        let proxied = HttpConfig::new("https://briefings.example".into(), "127.0.0.1".parse().unwrap());
+        assert!(proxied.origin_allowed("https://briefings.example", Some("briefings.example")));
+        assert!(!proxied.origin_allowed("http://briefings.example", Some("briefings.example")));
+        assert!(!proxied.origin_allowed("https://briefings.example:8443", Some("briefings.example")));
+        assert!(proxied.origin_allowed("http://127.0.0.1:7789", Some("127.0.0.1:7789")));
+        assert!(!proxied.origin_allowed("http://127.0.0.1:3000", Some("127.0.0.1:7789")));
+        assert!(!proxied.origin_allowed("http://127.0.0.1:7789", None));
         assert_eq!(config.briefing_url("abc"), "http://127.0.0.1:4000/briefing/abc");
         assert_eq!(origin_for("fd7a::1".parse().unwrap(), 8), "http://[fd7a::1]:8");
         assert_eq!(clamp_wait(Some(10_000)), MAX_WAIT);
@@ -519,18 +558,19 @@ mod tests {
     #[test]
     fn ipv6_bind_hosts_and_origins_use_brackets() {
         for origin in ["http://[::1]:4000", "https://briefings.example"] {
-            let config = HttpConfig::new(origin.into(), "::1".parse().unwrap(), true);
+            let config = HttpConfig::new(origin.into(), "::1".parse().unwrap());
             assert!(config.allowed_hosts().contains(&"[::1]".to_string()));
             assert!(config.host_allowed("[::1]"));
             assert!(config.host_allowed("[::1]:4000"));
-            assert!(config.origin_allowed("http://[::1]:4000"));
+            let host = Some("[::1]:4000");
+            assert!(config.origin_allowed("http://[::1]:4000", host));
             assert!(!config.host_allowed("::1"));
             assert!(!config.host_allowed("[::2]:4000"));
-            assert!(!config.origin_allowed("http://[::2]:4000"));
+            assert!(!config.origin_allowed("http://[::2]:4000", host));
             assert!(!config.host_allowed("[::1].evil.example:4000"));
-            assert!(!config.origin_allowed("http://[::1].evil.example:4000"));
+            assert!(!config.origin_allowed("http://[::1].evil.example:4000", host));
         }
-        let mapped = HttpConfig::new("https://briefings.example".into(), "::ffff:127.0.0.1".parse().unwrap(), true);
+        let mapped = HttpConfig::new("https://briefings.example".into(), "::ffff:127.0.0.1".parse().unwrap());
         for host in ["[::ffff:127.0.0.1]:4000", "[0:0:0:0:0:ffff:7f00:1]:4000", "[::ffff:7f00:1]"] {
             assert!(mapped.host_allowed(host), "{host}");
         }
@@ -547,18 +587,18 @@ mod tests {
         }
         assert_eq!(origin_for("::ffff:127.0.0.1".parse().unwrap(), 4000), "http://[::ffff:7f00:1]:4000");
         assert_eq!(origin_for("::1".parse().unwrap(), 4000), "http://[::1]:4000");
-        let proxied = HttpConfig::new("http://[::1]:4000".into(), "127.0.0.1".parse().unwrap(), true);
+        let proxied = HttpConfig::new("http://[::1]:4000".into(), "127.0.0.1".parse().unwrap());
         assert_eq!(proxied.allowed_hosts(), vec!["127.0.0.1".to_string(), "[::1]:4000".to_string()]);
         assert!(proxied.host_allowed("[::1]:4000") && !proxied.host_allowed("[::1]:4001"));
     }
 
     #[test]
     fn allowed_hosts_follow_the_public_origin() {
-        let plain = HttpConfig::new("http://127.0.0.1:4000".into(), "127.0.0.1".parse().unwrap(), false);
+        let plain = HttpConfig::new("http://127.0.0.1:4000".into(), "127.0.0.1".parse().unwrap());
         assert_eq!(plain.allowed_hosts(), vec!["127.0.0.1".to_string()]);
-        let proxied = HttpConfig::new("https://briefings.example".into(), "100.64.0.1".parse().unwrap(), true);
+        let proxied = HttpConfig::new("https://briefings.example".into(), "100.64.0.1".parse().unwrap());
         assert_eq!(proxied.allowed_hosts(), vec!["100.64.0.1".to_string(), "briefings.example".to_string()]);
         assert!(proxied.host_allowed("briefings.example"));
-        assert!(proxied.origin_allowed("https://briefings.example"));
+        assert!(proxied.origin_allowed("https://briefings.example", Some("briefings.example")));
     }
 }

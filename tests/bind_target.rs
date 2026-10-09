@@ -5,10 +5,10 @@ mod common;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use briefing::backend::{Site, SiteOptions};
+use briefing::backend::Site;
 use briefing::bind::{BindMode, Scope};
 use briefing::content::demo;
-use briefing::hub::{Hub, HubConfig};
+use briefing::hub::{Hub, HubConfig, Origin};
 
 fn bind_mode(ip: &str) -> BindMode {
     ip.parse().unwrap()
@@ -43,26 +43,27 @@ async fn roundtrip(ip: &str) {
 async fn serve_and_check(ip: &str, public_origin: Option<&str>) {
     briefing::tls::init();
     let target = bind_mode(ip).target().await.unwrap();
-    let options = SiteOptions { agent_api: true, public_origin: public_origin.map(str::to_string) };
-    let (site, running) =
-        Site::start(Arc::new(Hub::new(HubConfig::default())), target, 0, options, |_| None).await.unwrap();
+    let hub = Arc::new(Hub::new(HubConfig::default()));
+    let (site, running) = Site::start(hub, target, 0, public_origin.map(str::to_string), |_| None).await.unwrap();
     assert_eq!(running.local_addr.ip(), ip.parse::<IpAddr>().unwrap());
     let origin = format!("http://{}", running.local_addr);
     let canonical_origin = url::Url::parse(&origin).unwrap().origin().ascii_serialization();
     assert_eq!(site.config.public_origin, public_origin.unwrap_or(&canonical_origin));
-    let created = site.create(demo(), None).await.unwrap();
+    let created = site.create(demo(), Origin::default()).await.unwrap();
     assert_eq!(created.url.rsplit_once("/briefing/").unwrap().0, site.config.public_origin);
-    let token = created.url.rsplit('/').next().unwrap();
+    // A proxy decides who can reach the link, so the bound address no longer describes it.
+    assert_eq!(created.scope, if public_origin.is_some() { Scope::Hub } else { Scope::Explicit });
+    let id = &created.id;
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let health = || client.get(format!("{origin}/healthz"));
     assert_eq!(status(health()).await, 200);
     // Explicit Host headers preserve std's dotted-tail IPv6 spelling, unlike URL parsing.
     assert_eq!(status(health().header("Host", running.local_addr.to_string())).await, 200);
     assert_eq!(status(health().header("Host", "evil.example")).await, 403);
-    assert_eq!(status(client.get(format!("{origin}/briefing/{token}"))).await, 200);
+    assert_eq!(status(client.get(format!("{origin}/briefing/{id}"))).await, 200);
     let complete = || {
         client
-            .post(format!("{origin}/api/{token}/complete"))
+            .post(format!("{origin}/api/{id}/complete"))
             .header(briefing::protocol::HEADER, briefing::protocol::PROTOCOL.to_string())
             .json(&common::demo_submission(&[]))
     };
@@ -99,7 +100,7 @@ async fn bind_target_occupied_port_fails_without_fallback() {
         Arc::new(Hub::new(HubConfig::default())),
         bind_mode("127.0.0.1").target().await.unwrap(),
         port,
-        SiteOptions::default(),
+        None,
         |_| None,
     )
     .await;

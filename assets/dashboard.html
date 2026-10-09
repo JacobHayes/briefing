@@ -56,11 +56,11 @@
 
     async function cancelBriefing(b, button) {
       if (!confirm(`Cancel briefing "${b.title}"?`)) return;
-      cancelling.add(b.id);
+      cancelling.add(b.briefingId);
       button.disabled = true;
       button.textContent = "Cancelling…";
       try {
-        const response = await fetch(`/agent/briefings/${encodeURIComponent(b.id)}/cancel`, { method: "POST", headers: { "briefing-protocol": PROTOCOL } });
+        const response = await fetch(`/agent/briefings/${encodeURIComponent(b.briefingId)}/cancel`, { method: "POST", headers: { "briefing-protocol": PROTOCOL } });
         if (!response.ok) throw new Error("HTTP " + response.status);
         const result = await response.json();
         document.getElementById("summary").textContent = result.cancelled ? "Briefing cancelled; refreshing…" : "Briefing was already finished; refreshing…";
@@ -68,7 +68,7 @@
       } catch (error) {
         document.getElementById("summary").textContent = "Could not cancel briefing: " + (error.message || error);
       } finally {
-        cancelling.delete(b.id);
+        cancelling.delete(b.briefingId);
         button.disabled = false;
         button.textContent = "Cancel";
       }
@@ -85,18 +85,17 @@
         if (b.draft.answered) parts.push(`${b.draft.answered} answer${b.draft.answered === 1 ? "" : "s"}`);
         meta.push(parts.join(", "));
       }
-      if (b.provenance === "diskOnly" && b.status === "active") meta.push("served by another process; the link may be stale");
       const actions = [el("span", { class: `status ${b.status}`, text: b.status === "active" ? "waiting" : b.status })];
       if (b.status === "active") {
-        const button = el("button", { class: "danger", type: "button", text: cancelling.has(b.id) ? "Cancelling…" : "Cancel" });
-        button.disabled = cancelling.has(b.id);
+        const button = el("button", { class: "danger", type: "button", text: cancelling.has(b.briefingId) ? "Cancelling…" : "Cancel" });
+        button.disabled = cancelling.has(b.briefingId);
         button.addEventListener("click", () => cancelBriefing(b, button));
         actions.push(button);
       }
       const children = [
         el("div", { class: "title", text: b.title }),
         el("div", { class: "actions" }, actions),
-        el("div", { class: "meta" }, [document.createTextNode(meta.join(" · ") + " · id "), el("code", { text: b.id })]),
+        el("div", { class: "meta" }, [document.createTextNode(meta.join(" · ") + " · id "), el("code", { text: b.briefingId })]),
       ];
       if (b.url && b.status === "active") children.push(el("div", { class: "url" }, el("a", { href: b.url, target: "_blank", rel: "noopener", text: b.url })));
       return el("div", { class: "card" }, children);

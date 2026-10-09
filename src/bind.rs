@@ -1,5 +1,4 @@
-//! What the embedded server listens on: the mode the user asked for, and the address it
-//! resolves to. [`crate::tailscale`] is one of the detectors this drives, not the owner.
+//! What a hub listens on: the mode the user asked for, and the address it resolves to. [`crate::tailscale`] is one of the detectors this drives, not the owner.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
@@ -37,6 +36,18 @@ impl FromStr for BindMode {
     }
 }
 
+/// The inverse of [`FromStr`], for handing the mode to another `briefing` process.
+impl std::fmt::Display for BindMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Local => f.write_str("local"),
+            Self::Tailscale => f.write_str("tailscale"),
+            Self::Ip(ip) => write!(f, "{ip}"),
+        }
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for BindMode {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = <String as serde::Deserialize>::deserialize(deserializer)?;
@@ -69,7 +80,7 @@ impl BindMode {
 /// How far a briefing link reaches, as far as we can honestly claim. Every value the CLI, the
 /// agent API, and the MCP schema can report, defined once so the schema is generated from the
 /// type rather than described in prose beside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 #[schemars(rename_all = "lowercase")]
 pub enum Scope {
@@ -79,8 +90,8 @@ pub enum Scope {
     Tailnet,
     /// User-selected address; makes no claim about network reachability or trust.
     Explicit,
-    // The one variant no `BindTarget` carries: nothing in this process binds a hub link.
-    /// Served by a remote hub.
+    // The one variant no `BindTarget` carries: the bound address says nothing about the link.
+    /// Served at a configured public origin (behind a proxy); reach depends on what fronts it.
     Hub,
 }
 
@@ -161,6 +172,10 @@ mod tests {
             let expected = BindMode::Ip(literal.parse().unwrap());
             assert_eq!(literal.parse(), Ok(expected), "{literal}");
             assert_eq!(from_toml(literal).unwrap(), expected, "{literal}");
+            assert_eq!(expected.to_string().parse(), Ok(expected), "{literal} displays as itself");
+        }
+        for mode in [BindMode::Auto, BindMode::Local, BindMode::Tailscale] {
+            assert_eq!(mode.to_string().parse(), Ok(mode));
         }
     }
 

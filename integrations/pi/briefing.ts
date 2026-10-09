@@ -3,18 +3,19 @@
 // Install: `pi install git:github.com/JacobHayes/briefing` (the repo's package.json
 // declares this extension). Requires the `briefing` binary on PATH.
 //
-// Pi has no tool timeout, so real briefings use a single blocking tool: `brief_user` spawns
-// `briefing present --json`, shows the link in Pi's UI while the user works, and returns the
-// feedback when they submit. Recovery/demo commands temporarily enable command-only tools so
-// they exercise the same active-tool UI. Esc or /brief-cancel cancels. Briefings are mirrored to disk by
-// the CLI, so `/brief-result <id>` recovers one after a crash (stored feedback, or a fresh
-// link with the draft intact) and `/brief-status` lists them.
+// Pi has no tool timeout, so real briefings use a single blocking tool: `brief_user` creates
+// the briefing with `briefing present --json`, then runs `briefing await --json`, showing the
+// link in Pi's UI while the user works and returning the feedback when they submit.
+// Recovery/demo commands temporarily enable command-only tools so they exercise the same
+// active-tool UI. Esc or /brief-cancel cancels the briefing (`briefing cancel`). Briefings live
+// in a hub, not in Pi, so `/brief-result <id>` recovers one after a crash (stored feedback, or
+// the same link with the draft intact) and `/brief-status` lists them.
 //
 // Every briefing the extension opens is recorded in the Pi session (`briefing-pending`, then
 // `briefing-settled` once it completes, is cancelled or fails). Ending or killing Pi while one is
-// open leaves it open rather than cancelling it, and resuming that session reattaches to it
-// through the same recovery path as `/brief-result`: the stored feedback if the user already
-// submitted, otherwise a fresh link and a new wait.
+// open only stops the wait, and resuming that session reattaches to it through the same
+// recovery path as `/brief-result`: the stored feedback if the user already submitted,
+// otherwise the same link and a new wait.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -32,16 +33,11 @@ const MIN_PI_VERSION = "0.99.1";
 const PENDING_ENTRY = "briefing-pending";
 const SETTLED_ENTRY = "briefing-settled";
 
-type ReadyEvent = {
-  event: "ready";
-  id: string;
-  url: string;
-  scope: string;
-  label: string;
-  bindHost?: string;
-  openedBrowser: boolean;
-  diagnostics?: string;
-};
+/** What `briefing present|demo --json` prints on stdout. */
+type Created = { briefingId: string; status: "active"; url: string };
+
+/** `briefing await --json`'s stderr event while the briefing is open. */
+type ReadyEvent = { event: "ready"; briefingId: string; url: string };
 
 type Feedback = {
   questions: Array<{ question: string; section?: string; selected: string[]; answer: string; status: "answered" | "unresolved" }>;
@@ -49,30 +45,43 @@ type Feedback = {
   notes: string[];
 };
 
-/** What `briefing present|demo|await --json` prints on stdout. */
+/** What `briefing await --json` prints on stdout. */
 type CliResult = { briefingId: string } & (
   | { status: "pending" }
   | { status: "completed"; feedback: Feedback }
   | { status: "cancelled"; feedback: Feedback }
 );
 
-/** `detached` marks a child stopped because Pi is going away, which leaves its briefing open. */
-type Active = { child: ChildProcess; ready?: ReadyEvent; detached?: boolean };
+/** The running `await`. `detached` marks one stopped because Pi is going away, which leaves its
+ * briefing open. */
+type Active = { child: ChildProcess; id: string; ready?: ReadyEvent; detached?: boolean };
+
+/** A briefing being created, before its id is known: what to do with it once it is. */
+type Creating = { cancelled: boolean; shutdown: boolean };
 
 /** Run the CLI and return its stdout; rejects with stderr on a non-zero exit. */
-function runCapture(args: string[]): Promise<string> {
+function runCapture(args: string[], stdin?: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(BINARY, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(BINARY, args, { stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    if (stdin !== undefined) child.stdin!.end(stdin);
     let out = "";
     let err = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.stderr.on("data", (d) => (err += d));
+    child.stdout!.on("data", (d) => (out += d));
+    child.stderr!.on("data", (d) => (err += d));
     child.on("error", reject);
     child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(err || `briefing ${args[0]} exited ${code}`))));
   });
 }
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** Cancel the briefing itself; an `await` on it then returns `cancelled`. */
+function cancelBriefing(id: string): Promise<void> {
+  return runCapture(["cancel", id]).then(
+    () => {},
+    () => {},
+  );
+}
 
 function parseStringArray(text: string, label: string): string[] {
   const value = JSON.parse(text);
@@ -116,6 +125,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
     throw new Error(`briefing needs Pi >=${MIN_PI_VERSION} for model-only tools; this is Pi ${PI_VERSION}`);
   }
   let active: Active | undefined;
+  let creating: Creating | undefined;
 
   // `/brief`, `/brief-demo` and `/brief-result` all queue one instruction for the next turn: the
   // command records it, `before_agent_start` sets the named command prompt section, and
@@ -144,26 +154,64 @@ export default function briefingExtension(pi: ExtensionAPI) {
     return forced?.tool === RESULT_TOOL_NAME ? forced.id : undefined;
   }
 
-  /** Run the CLI to completion; `onReady` fires once the link is known. */
-  function run(args: string[], stdin: string | undefined, ctx: ExtensionContext, signal?: AbortSignal, onReady?: (ready: ReadyEvent) => void): Promise<CliResult> {
-    if (active) return Promise.reject(new Error("A briefing is already open; wait for it or /brief-cancel"));
-    const child = spawn(BINARY, args, { stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
-    if (stdin !== undefined) child.stdin!.end(stdin);
-    const record: Active = { child };
-    active = record;
-    // `briefing await <id>` knows its id before the ready event (and may fail without one).
-    let briefingId = args[0] === "await" ? args[1] : undefined;
-    const settle = (status: string) => {
-      if (briefingId) pi.appendEntry(SETTLED_ENTRY, { id: briefingId, status });
-    };
-
+  /** Create a briefing (`present`/`demo` args), then wait for its feedback. */
+  async function presentAndAwait(args: string[], stdin: string | undefined, ctx: ExtensionContext, signal?: AbortSignal, onReady?: (ready: ReadyEvent) => void): Promise<CliResult> {
+    if (active || creating) throw new Error("A briefing is already open; wait for it or /brief-cancel");
+    // Esc, aborts, /brief-cancel and shutdown during creation are remembered and applied once
+    // the id is known.
+    const state: Creating = { cancelled: false, shutdown: false };
+    creating = state;
     ctx.ui.setWorkingMessage("Preparing briefing...");
-    const disposeInterrupt = ctx.ui.onTerminalInput((data) => {
-      if (matchesKey(data, "escape")) child.kill("SIGINT");
+    const disposeInterrupt = onInterrupt(ctx, signal, () => (state.cancelled = true));
+    let created: Created;
+    try {
+      created = JSON.parse(await runCapture(args, stdin)) as Created;
+    } catch (error) {
+      ctx.ui.setWorkingMessage();
+      throw error;
+    } finally {
+      if (creating === state) creating = undefined;
+      disposeInterrupt();
+    }
+    const id = created.briefingId;
+    if (state.shutdown) {
+      // Pi is going away: leave it open for a resumed session to reattach to.
+      pi.appendEntry(PENDING_ENTRY, { id });
+      throw new Error(`Pi is shutting down; recover briefing ${id} later with /brief-result ${id}`);
+    }
+    // Cancelled before the wait began: cancel it first, so `await` returns `cancelled` at once.
+    const cancelledEarly = state.cancelled || signal?.aborted;
+    if (cancelledEarly) await cancelBriefing(id);
+    return awaitBriefing(id, ctx, cancelledEarly ? undefined : signal, onReady);
+  }
+
+  /** Call `interrupt` on Esc or once `signal` aborts (at once if it already has); returns the
+   * teardown. */
+  function onInterrupt(ctx: ExtensionContext, signal: AbortSignal | undefined, interrupt: () => void): () => void {
+    const disposeInput = ctx.ui.onTerminalInput((data) => {
+      if (matchesKey(data, "escape")) interrupt();
       return undefined;
     });
-    const onAbort = () => child.kill("SIGINT");
-    signal?.addEventListener("abort", onAbort, { once: true });
+    signal?.addEventListener("abort", interrupt, { once: true });
+    if (signal?.aborted) interrupt();
+    return () => {
+      signal?.removeEventListener("abort", interrupt);
+      disposeInput();
+    };
+  }
+
+  /** Wait for a briefing's feedback; `onReady` fires once the link is known. Esc and aborts
+   * cancel the briefing, so `await` returns `cancelled` rather than being killed. */
+  function awaitBriefing(id: string, ctx: ExtensionContext, signal?: AbortSignal, onReady?: (ready: ReadyEvent) => void): Promise<CliResult> {
+    if (active) return Promise.reject(new Error("A briefing is already open; wait for it or /brief-cancel"));
+    const child = spawn(BINARY, ["await", id, "--json"], { stdio: ["ignore", "pipe", "pipe"] });
+    const record: Active = { child, id };
+    active = record;
+    pi.appendEntry(PENDING_ENTRY, { id });
+    const settle = (status: string) => pi.appendEntry(SETTLED_ENTRY, { id, status });
+
+    ctx.ui.setWorkingMessage("Preparing briefing...");
+    const disposeInterrupt = onInterrupt(ctx, signal, () => void cancelBriefing(id));
 
     let stdout = "";
     child.stdout!.on("data", (d) => (stdout += d));
@@ -179,12 +227,9 @@ export default function briefingExtension(pi: ExtensionAPI) {
       if (event.event !== "ready") return;
       const ready = event as ReadyEvent;
       record.ready = ready;
-      briefingId = ready.id;
-      pi.appendEntry(PENDING_ENTRY, { id: ready.id });
       // Keep Pi UI chrome minimal: the working row already stays visible while the
       // briefing blocks, and /brief-reopen can redisplay the link if needed.
-      const message = `Briefing: ${ready.url}`;
-      ctx.ui.setWorkingMessage(message);
+      ctx.ui.setWorkingMessage(`Briefing: ${ready.url}`);
       onReady?.(ready);
     });
 
@@ -211,13 +256,12 @@ export default function briefingExtension(pi: ExtensionAPI) {
         },
       )
       .finally(() => {
-      signal?.removeEventListener("abort", onAbort);
-      disposeInterrupt();
-      if (active?.child === child) active = undefined;
-      ctx.ui.setWorkingMessage();
-      ctx.ui.setStatus("briefing", undefined);
-      ctx.ui.setWidget("briefing", undefined);
-    });
+        disposeInterrupt();
+        if (active === record) active = undefined;
+        ctx.ui.setWorkingMessage();
+        ctx.ui.setStatus("briefing", undefined);
+        ctx.ui.setWidget("briefing", undefined);
+      });
   }
 
   function recover(id: string, prompt: string, message: string) {
@@ -270,10 +314,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
 
       async execute(_toolCallId, _params, signal, onUpdate, toolCtx) {
         try {
-          const result = await run(["demo", "--json"], undefined, toolCtx, signal, (ready) => {
+          const result = await presentAndAwait(["demo", "--json"], undefined, toolCtx, signal, (ready) => {
             onUpdate?.({
               content: [{ type: "text", text: `Briefing: ${ready.url}` }],
-              details: { status: "open", briefingId: ready.id, url: ready.url, scope: ready.scope },
+              details: { status: "open", briefingId: ready.briefingId, url: ready.url },
             });
           });
           if (result.status !== "completed") {
@@ -295,7 +339,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       },
 
       renderResult(result, { expanded, isPartial }, theme) {
-        const details = result.details as { status?: string; url?: string; scope?: string; feedback?: Feedback } | undefined;
+        const details = result.details as { status?: string; url?: string; feedback?: Feedback } | undefined;
         if (isPartial && details?.url) {
           let text = theme.fg("warning", "Briefing: ") + theme.fg("accent", details.url);
           if (expanded) text += `\n${theme.fg("dim", "Esc or /brief-cancel to cancel")}`;
@@ -311,7 +355,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       name: RESULT_TOOL_NAME,
       exposure: "model-only",
       label: "Briefing Result",
-      description: "Recover a briefing by id and return stored feedback or reopen it. Used only by /brief-result.",
+      description: "Recover a briefing by id and return its stored feedback or wait for it. Used only by /brief-result.",
       promptSnippet: "Recover a briefing result when /brief-result is requested",
       executionMode: "sequential",
       parameters: { type: "object", properties: {}, additionalProperties: false } as any,
@@ -320,10 +364,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
         const id = forcedResultId();
         if (!id) throw new Error("Missing briefing id");
         try {
-          const result = await run(["await", id, "--json"], undefined, toolCtx, signal, (ready) => {
+          const result = await awaitBriefing(id, toolCtx, signal, (ready) => {
             onUpdate?.({
               content: [{ type: "text", text: `Briefing: ${ready.url}` }],
-              details: { status: "open", briefingId: ready.id, url: ready.url, scope: ready.scope },
+              details: { status: "open", briefingId: ready.briefingId, url: ready.url },
             });
           });
           if (result.status !== "completed") {
@@ -346,7 +390,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       },
 
       renderResult(result, { expanded, isPartial }, theme) {
-        const details = result.details as { status?: string; url?: string; scope?: string; feedback?: Feedback } | undefined;
+        const details = result.details as { status?: string; url?: string; feedback?: Feedback } | undefined;
         if (isPartial && details?.url) {
           let text = theme.fg("warning", "Briefing: ") + theme.fg("accent", details.url);
           if (expanded) text += `\n${theme.fg("dim", "Esc or /brief-cancel to cancel")}`;
@@ -371,10 +415,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
       parameters: schema,
 
       async execute(_toolCallId, params, signal, onUpdate, toolCtx) {
-        const result = await run(["present", "--json"], JSON.stringify(params), toolCtx, signal, (ready) => {
+        const result = await presentAndAwait(["present", "--json"], JSON.stringify(params), toolCtx, signal, (ready) => {
           onUpdate?.({
             content: [{ type: "text", text: `Briefing: ${ready.url}` }],
-            details: { status: "open", briefingId: ready.id, url: ready.url, scope: ready.scope },
+            details: { status: "open", briefingId: ready.briefingId, url: ready.url },
           });
         });
         if (result.status !== "completed") {
@@ -396,7 +440,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
       },
 
       renderResult(result, { expanded, isPartial }, theme) {
-        const details = result.details as { status?: string; url?: string; scope?: string; feedback?: Feedback } | undefined;
+        const details = result.details as { status?: string; url?: string; feedback?: Feedback } | undefined;
         if (isPartial && details?.url) {
           let text = theme.fg("warning", "Briefing: ") + theme.fg("accent", details.url);
           if (expanded) text += `\n${theme.fg("dim", "Esc or /brief-cancel to cancel")}`;
@@ -446,7 +490,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("brief-result", {
-    description: "Recover a briefing by id: fetch its stored feedback, or reopen it with a fresh link",
+    description: "Recover a briefing by id: fetch its stored feedback, or wait on its link again",
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
       if (!ctx.isIdle()) return ctx.ui.notify("Pi is busy; wait for the current turn", "warning");
@@ -478,8 +522,9 @@ export default function briefingExtension(pi: ExtensionAPI) {
     description: "Cancel the open briefing",
     handler: async (_args, ctx) => {
       if (ctx.mode !== "tui") return ctx.ui.notify("Briefings require Pi's interactive TUI", "error");
-      if (!active) return ctx.ui.notify("No briefing is open", "warning");
-      active.child.kill("SIGINT");
+      if (creating) creating.cancelled = true;
+      else if (active) cancelBriefing(active.id);
+      else return ctx.ui.notify("No briefing is open", "warning");
       ctx.ui.notify("Briefing cancelled", "info");
     },
   });
@@ -489,10 +534,10 @@ export default function briefingExtension(pi: ExtensionAPI) {
   });
 
   // Pi is going away (quit, /new, /resume, /fork, reload), not the user cancelling: stop waiting
-  // but leave the briefing open. SIGHUP ends the CLI without the SIGINT/SIGTERM cancel, and the
-  // session's pending entry lets a resume reattach.
+  // but leave the briefing open in the hub. The session's pending entry lets a resume reattach.
   pi.on("session_shutdown", async () => {
     clearForced();
+    if (creating) creating.shutdown = true;
     if (!active) return;
     active.detached = true;
     active.child.kill("SIGHUP");

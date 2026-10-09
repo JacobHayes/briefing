@@ -20,12 +20,13 @@ call stay in the foreground.
 
 If a session dies or is restarted, ask the new session to call `await_briefing` with the
 briefing id (shown on the page and in the earlier tool output): it returns the stored feedback
-if you already submitted, or a fresh link with your draft intact if not.
+if you already submitted, or keeps waiting on the same link, with your draft intact, if not.
 
 ## Headless box, browser elsewhere
 
-The embedded server binds to the box's Tailscale address when Tailscale is running, and the
-model shows you the link, so opening it from a laptop or phone on the tailnet just works.
+The box's own hub, which the first briefing starts in the background, binds to its Tailscale
+address when Tailscale is running, and the model shows you the link, so opening it from a
+laptop or phone on the tailnet just works.
 
 ## Remote sessions (Claude Code web, another machine)
 
@@ -35,7 +36,7 @@ Run a hub on a box you can reach from both the agent and your browser, then poin
 # on the hub box (Tailscale address is picked automatically)
 briefing serve --mcp
 
-# on the agent side, either stdio with a remote backend...
+# on the agent side, either stdio pointed at the hub...
 claude mcp add --scope user briefing -e BRIEFING_HUB=http://100.x.y.z:7789 -- briefing mcp
 # ...or the hub's MCP endpoint directly
 claude mcp add --scope user --transport http briefing http://100.x.y.z:7789/mcp
@@ -48,5 +49,5 @@ The hub's `/` page lists briefings awaiting feedback with their links.
 | Tool | Purpose |
 |---|---|
 | `brief_user` | Validate, open the briefing, return `url` + `briefingId` immediately (the model shows you the link). |
-| `await_briefing` | Block until you submit and return `feedback` (or `pending` after the client's budget; the model calls it again). With an id from an earlier session it returns the stored feedback, or `reopened` plus a fresh link. |
+| `await_briefing` | Block until you submit and return `feedback` (or `pending` after the client's budget; the model calls it again). With an id from an earlier session it returns the stored feedback, or keeps waiting on the same link. |
 | `cancel_briefing` | Cancel an open briefing. |

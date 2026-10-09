@@ -7,8 +7,9 @@ must be on `PATH`, or selected by `BRIEFING_BIN`.
 
 ## Interaction and exposure
 
-- `brief_user` is the normal blocking tool: it opens a browser briefing, shows the
-  link in Pi's working row, and returns only submitted feedback.
+- `brief_user` is the normal blocking tool: it creates a browser briefing with
+  `briefing present`, waits on it with `briefing await`, shows the link in Pi's
+  working row, and returns only submitted feedback.
 - `brief_user`, `briefing_demo`, and `briefing_result` have `model-only` exposure.
   They can be declared to the model but are never callable through
   `ctx.executeTool()`, including codemode scripts. Opening or recovering a user
@@ -36,17 +37,19 @@ section on its next ordinary turn.
 
 ## Cancellation and recovery
 
-Esc, `/brief-cancel`, and the operation abort signal interrupt the CLI with
-`SIGINT`, cancelling the briefing and aborting the agent when the CLI reports
-cancellation. `/brief-reopen` redisplays the current link; `/brief-status` lists
-known briefings.
+Briefings live in a hub, not in the CLI process. Esc, `/brief-cancel`, and the
+operation abort signal run `briefing cancel <id>`, so the running `await` reports
+`cancelled` and the agent is aborted. While `present` is still creating the
+briefing there is no id yet; the cancel is remembered and applied once there is.
+`/brief-reopen` redisplays the current link; `/brief-status` lists known briefings.
 
-Session shutdown sends `SIGHUP` instead: it stops waiting without cancelling the
-browser briefing. CLI ready events record `briefing-pending` entries; completion,
-cancellation, or non-detached failure records `briefing-settled`. Resuming a
-session reattaches to its latest pending briefing through the same recovery tool
-as `/brief-result`: stored feedback if submitted, or a new link with the draft
-intact. New and forked sessions do not automatically reattach.
+Session shutdown only stops the wait (`SIGHUP` to `await`), leaving the briefing
+open. Starting a wait records a `briefing-pending` entry (as does a shutdown during
+creation); completion, cancellation, or non-detached failure records
+`briefing-settled`. Resuming a session reattaches to its latest pending briefing
+through the same recovery tool as `/brief-result`: stored feedback if submitted,
+or the same link with the draft intact. New and forked sessions do not
+automatically reattach.
 
 ## Boundaries and verification
 
@@ -61,6 +64,7 @@ The smoke suite (`smoke-test.mjs`) loads the extension against a minimal stand-i
 for Pi's host, with `fake-briefing.mjs` in place of the CLI: no browser, server,
 credentials or model requests. It covers tool exposure, the command section and
 its removal, command replacement, teardown on completion, failure, cancellation,
-abort and shutdown, and resume versus new or forked sessions. How Pi itself turns
+abort and shutdown (while the briefing is open and while it is still being
+created), and resume versus new or forked sessions. How Pi itself turns
 exposure and sections into callable tools and transcript patches is Pi's to test;
 real model compliance and terminal appearance are outside this suite.

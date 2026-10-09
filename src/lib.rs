@@ -9,6 +9,7 @@ pub mod content;
 pub mod guidance;
 pub mod http;
 pub mod hub;
+pub mod local_hub;
 pub mod mcp;
 pub mod migrate;
 pub mod protocol;
@@ -17,7 +18,7 @@ pub mod store;
 pub mod tailscale;
 pub mod tls;
 
-pub use backend::{Backend, BackendKind, Created, LocalBackend, RemoteBackend, Site, SiteOptions};
+pub use backend::{Backend, BackendKind, Created, RemoteBackend, Site};
 pub use bind::{BindMode, BindTarget, Scope};
 pub use content::Briefing;
 pub use hub::{BriefingStatus, Hub, HubConfig};

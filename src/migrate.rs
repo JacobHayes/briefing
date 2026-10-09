@@ -9,13 +9,13 @@
 use serde_json::{Map, Value, json};
 
 /// The shape `StoredRecord` serializes today.
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 
 /// Version assumed for a record file with no `schemaVersion`.
 pub const LEGACY_SCHEMA_VERSION: u64 = 1;
 
 /// `MIGRATIONS[n]` turns a version `n + 1` record into version `n + 2`.
-const MIGRATIONS: [fn(&mut Value); (SCHEMA_VERSION - LEGACY_SCHEMA_VERSION) as usize] = [v1_questions];
+const MIGRATIONS: [fn(&mut Value); (SCHEMA_VERSION - LEGACY_SCHEMA_VERSION) as usize] = [v1_questions, v2_one_id];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Migration {
@@ -53,6 +53,15 @@ fn text(value: &Value) -> String {
 
 fn as_object(value: &mut Value) -> Option<&mut Map<String, Value>> {
     value.as_object_mut()
+}
+
+/// v2 -> v3: the briefing's `id` became its link's capability too, so the separate `token`
+/// (and the `url` built from it) went. Links to such a briefing change; its id does not.
+fn v2_one_id(record: &mut Value) {
+    if let Some(object) = as_object(record) {
+        object.remove("token");
+        object.remove("url");
+    }
 }
 
 /// v1 -> v2: checkpoints and decisions became optional questions, sources were dropped, and
@@ -277,10 +286,19 @@ mod tests {
             "draft": { "state": { "questions": { "c0-0": { "selected": [], "answer": "kept" } }, "annotations": [], "notes": [] } },
             "result": { "questions": [{ "question": "Q?", "section": "C", "selected": [], "answer": "kept", "status": "answered" }], "annotations": [], "notes": [] }
         });
-        let before = record.clone();
+        let mut before = record.clone();
         assert_eq!(migrate(&mut record), Ok(Migration::Upgraded { from: 1 }));
         record.as_object_mut().unwrap().remove("schemaVersion");
+        before.as_object_mut().unwrap().remove("token");
         assert_eq!(record, before);
+    }
+
+    #[test]
+    fn v2_records_lose_their_token() {
+        let mut record =
+            json!({ "schemaVersion": 2, "id": "x", "token": "t", "url": "http://h/briefing/t", "status": "active" });
+        assert_eq!(migrate(&mut record), Ok(Migration::Upgraded { from: 2 }));
+        assert_eq!(record, json!({ "schemaVersion": SCHEMA_VERSION, "id": "x", "status": "active" }));
     }
 
     #[test]
