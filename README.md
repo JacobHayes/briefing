@@ -174,7 +174,8 @@ tool and the hub API return:
 { "briefingId": "7rJ-tS8jIOb8SPX5", "status": "pending" }
 ```
 
-Exit codes: 0 completed, 2 cancelled, 3 still pending after `--wait-seconds`, 130 interrupted.
+Exit codes: 0 whenever the briefing reached an outcome (read `status`: completed, cancelled, or
+pending after `--wait-seconds`), 130 interrupted, 1 on errors.
 
 | Flag / env | Meaning |
 |---|---|

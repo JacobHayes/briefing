@@ -17,8 +17,6 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use serde::Deserialize;
 use serde_json::json;
 
-const EXIT_CANCELLED: i32 = 2;
-const EXIT_PENDING: i32 = 3;
 const EXIT_INTERRUPTED: i32 = 130;
 
 /// Paced browser briefings for coding agents (Pi, Claude Code, Codex, ...).
@@ -321,10 +319,12 @@ async fn wait_and_print(backend: &Backend, id: &str, args: &WaitArgs) -> anyhow:
             return Ok(EXIT_INTERRUPTED);
         }
     };
-    let (code, event) = match &outcome {
-        Outcome::Pending => (EXIT_PENDING, "pending"),
-        Outcome::Completed { .. } => (0, "completed"),
-        Outcome::Cancelled { .. } => (EXIT_CANCELLED, "cancelled"),
+    // Every outcome the briefing can reach exits 0; which one it was lives in the result's
+    // `status`, so agents don't mistake "still open" or "cancelled" for a failed command.
+    let event = match &outcome {
+        Outcome::Pending => "pending",
+        Outcome::Completed { .. } => "completed",
+        Outcome::Cancelled { .. } => "cancelled",
     };
     let human =
         if outcome == Outcome::Pending { format!("Briefing {id} is still open") } else { format!("Briefing {event}") };
@@ -336,7 +336,7 @@ async fn wait_and_print(backend: &Backend, id: &str, args: &WaitArgs) -> anyhow:
     } else if outcome != Outcome::Pending {
         writeln!(out, "{}", outcome.format_text())?;
     }
-    Ok(code)
+    Ok(0)
 }
 
 async fn shutdown_signal() {

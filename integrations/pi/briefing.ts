@@ -191,7 +191,7 @@ export default function briefingExtension(pi: ExtensionAPI) {
     return new Promise<CliResult>((resolve, reject) => {
       child.on("error", reject);
       child.on("close", (code) => {
-        if (code !== 0 && code !== 2 && code !== 3) return reject(new Error(stderrLines.join("\n") || `briefing exited with ${code}`));
+        if (code !== 0) return reject(new Error(stderrLines.join("\n") || `briefing exited with ${code}`));
         try {
           resolve(JSON.parse(stdout) as CliResult);
         } catch (error) {

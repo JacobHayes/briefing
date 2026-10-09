@@ -64,7 +64,7 @@ async fn every_surface_rejects_an_invalid_value() {
 async fn ready(file: Option<&str>, env: Option<&str>, cli: Option<&str>) -> Value {
     let output = run(file, env, cli, &["demo", "--json", "--wait-seconds", "0"]).await;
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    assert!(output.status.success(), "{stderr}");
     stderr
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())

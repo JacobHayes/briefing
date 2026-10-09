@@ -13,7 +13,7 @@ if (command === "schema") {
   process.stdin.on("data", () => {});
   const finish = (status) => {
     console.log(JSON.stringify({ briefingId: id, status, feedback: { questions: [], annotations: [], notes: [] } }));
-    process.exit(status === "cancelled" ? 2 : 0);
+    process.exit(0);
   };
   const ready = () => console.error(JSON.stringify({ event: "ready", id, url: "http://fixture.invalid/briefing", scope: "local", label: "fixture", openedBrowser: false }));
   if (status === "wait") {
