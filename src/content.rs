@@ -123,12 +123,35 @@ pub struct Briefing {
     pub completion_prompt: Option<String>,
 }
 
+/// Every problem found in a presentation, joined into one message so a caller can fix them all
+/// in a single pass.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct ValidationError(pub String);
 
-fn require_text(text: &str, label: &str) -> Result<(), ValidationError> {
-    if text.trim().is_empty() { Err(ValidationError(format!("{label} cannot be empty"))) } else { Ok(()) }
+/// The problems found so far; validation keeps going after the first.
+#[derive(Default)]
+struct Problems(Vec<String>);
+
+impl Problems {
+    fn push(&mut self, problem: String) {
+        self.0.push(problem);
+    }
+
+    fn require_text(&mut self, text: &str, label: &str) {
+        if text.trim().is_empty() {
+            self.push(format!("{label} cannot be empty"));
+        }
+    }
+
+    /// `Ok` when nothing was found; one problem reads on its own, several are counted.
+    fn into_result(self) -> Result<(), ValidationError> {
+        match self.0.as_slice() {
+            [] => Ok(()),
+            [one] => Err(ValidationError(one.clone())),
+            many => Err(ValidationError(format!("{} problems: {}", many.len(), many.join("; ")))),
+        }
+    }
 }
 
 fn is_vega_lite_fence(language: &str) -> bool {
@@ -219,99 +242,100 @@ pub fn fenced_code_blocks(markdown: &str) -> Vec<(String, String)> {
     blocks
 }
 
-fn validate_rich_content(input: &Briefing) -> Result<(), ValidationError> {
+fn validate_rich_content(problems: &mut Problems, input: &Briefing) {
     for (label, value) in text_fields(input) {
         for (index, (language, source)) in fenced_code_blocks(value).iter().enumerate() {
             let block = index + 1;
             if source.len() > MAX_FENCED_SOURCE_BYTES {
-                return Err(ValidationError(format!(
-                    "{label} code block {block} exceeds {}KB",
-                    MAX_FENCED_SOURCE_BYTES / 1024
-                )));
-            }
-            if is_vega_lite_fence(language) {
-                let spec: serde_json::Value = serde_json::from_str(source).map_err(|error| {
-                    ValidationError(format!("{label} Vega-Lite block {block} is not valid JSON: {error}"))
-                })?;
-                if !spec.is_object() {
-                    return Err(ValidationError(format!("{label} Vega-Lite block {block} must be a JSON object")));
+                problems.push(format!("{label} code block {block} exceeds {}KB", MAX_FENCED_SOURCE_BYTES / 1024));
+            } else if is_vega_lite_fence(language) {
+                match serde_json::from_str::<serde_json::Value>(source) {
+                    Err(error) => problems.push(format!("{label} Vega-Lite block {block} is not valid JSON: {error}")),
+                    Ok(spec) if !spec.is_object() => {
+                        problems.push(format!("{label} Vega-Lite block {block} must be a JSON object"))
+                    }
+                    Ok(_) => {}
                 }
             }
         }
     }
-    Ok(())
 }
 
-fn validate_question(question: &Question, label: &str) -> Result<(), ValidationError> {
-    require_text(&question.question, &format!("{label} text"))?;
+fn validate_question(problems: &mut Problems, question: &Question, label: &str) {
+    problems.require_text(&question.question, &format!("{label} text"));
     let count = question.options.len();
     if count != 0 && !(MIN_OPTIONS..=MAX_OPTIONS).contains(&count) {
-        return Err(ValidationError(format!("{label} needs no options or {MIN_OPTIONS}-{MAX_OPTIONS} options")));
+        problems.push(format!("{label} needs no options or {MIN_OPTIONS}-{MAX_OPTIONS} options"));
     }
     let mut labels = std::collections::HashSet::new();
     for option in &question.options {
-        require_text(&option.label, &format!("{label} option label"))?;
+        problems.require_text(&option.label, &format!("{label} option label"));
         if !labels.insert(option.label.trim().to_lowercase()) {
-            return Err(ValidationError(format!("{label} has duplicate option: {}", option.label)));
+            problems.push(format!("{label} has duplicate option: {}", option.label));
         }
         if option.tradeoffs.as_ref().map_or(0, Vec::len) > MAX_TRADEOFFS {
-            return Err(ValidationError(format!(
-                "{label} option {} has more than {MAX_TRADEOFFS} tradeoffs",
-                option.label
-            )));
+            problems.push(format!("{label} option {} has more than {MAX_TRADEOFFS} tradeoffs", option.label));
         }
     }
     let multi = question.multi_select == Some(true);
     if !multi && question.options.iter().filter(|o| o.recommended == Some(true)).count() > 1 {
-        return Err(ValidationError(format!("{label} has more than one recommended option")));
+        problems.push(format!("{label} has more than one recommended option"));
     }
-    Ok(())
 }
 
-/// Validate a presentation and return a normalized copy (trimmed title/goal).
+/// Validate a presentation and return a normalized copy (trimmed title/goal). Reports every
+/// problem at once rather than stopping at the first.
 pub fn validate(input: &Briefing) -> Result<Briefing, ValidationError> {
     let serialized = serde_json::to_vec(input).map_err(|error| ValidationError(error.to_string()))?;
     if serialized.len() > MAX_PRESENTATION_BYTES {
+        // Too big to be worth picking apart, and the size is what to fix first.
         return Err(ValidationError(format!("brief_user input exceeds {}KB", MAX_PRESENTATION_BYTES / 1024)));
     }
-    require_text(&input.title, "title")?;
-    require_text(&input.goal, "goal")?;
+    let mut problems = Problems::default();
+    problems.require_text(&input.title, "title");
+    problems.require_text(&input.goal, "goal");
     if input.chunks.is_empty() || input.chunks.len() > MAX_CHUNKS {
-        return Err(ValidationError(format!("brief_user requires 1-{MAX_CHUNKS} chunks")));
+        problems.push(format!("brief_user requires 1-{MAX_CHUNKS} chunks"));
     }
 
     for (index, chunk) in input.chunks.iter().enumerate() {
         let n = index + 1;
-        require_text(&chunk.title, &format!("chunk {n} title"))?;
-        require_text(&chunk.main_point, &format!("chunk {n} mainPoint"))?;
-        let too_many = |len: usize, max: usize, what: &str| {
-            if len > max { Err(ValidationError(format!("chunk {n} has more than {max} {what}"))) } else { Ok(()) }
-        };
-        too_many(chunk.key_points.as_ref().map_or(0, Vec::len), MAX_KEY_POINTS, "keyPoints")?;
-        too_many(chunk.remember.as_ref().map_or(0, Vec::len), MAX_REMEMBER, "remember anchors")?;
-        too_many(chunk.questions.len(), MAX_CHUNK_QUESTIONS, "questions")?;
+        problems.require_text(&chunk.title, &format!("chunk {n} title"));
+        problems.require_text(&chunk.main_point, &format!("chunk {n} mainPoint"));
+        for (len, max, what) in [
+            (chunk.key_points.as_ref().map_or(0, Vec::len), MAX_KEY_POINTS, "keyPoints"),
+            (chunk.remember.as_ref().map_or(0, Vec::len), MAX_REMEMBER, "remember anchors"),
+            (chunk.questions.len(), MAX_CHUNK_QUESTIONS, "questions"),
+        ] {
+            if len > max {
+                problems.push(format!("chunk {n} has more than {max} {what}"));
+            }
+        }
         for (i, question) in chunk.questions.iter().enumerate() {
-            validate_question(question, &format!("chunk {n} question {}", i + 1))?;
+            validate_question(&mut problems, question, &format!("chunk {n} question {}", i + 1));
         }
     }
 
     if let Some(tray) = &input.tray {
-        if tray.key_context.as_ref().map_or(0, Vec::len) > MAX_KEY_CONTEXT {
-            return Err(ValidationError(format!("tray has more than {MAX_KEY_CONTEXT} keyContext items")));
-        }
-        if tray.open_questions.as_ref().map_or(0, Vec::len) > MAX_OPEN_QUESTIONS {
-            return Err(ValidationError(format!("tray has more than {MAX_OPEN_QUESTIONS} openQuestions")));
+        for (len, max, what) in [
+            (tray.key_context.as_ref().map_or(0, Vec::len), MAX_KEY_CONTEXT, "keyContext items"),
+            (tray.open_questions.as_ref().map_or(0, Vec::len), MAX_OPEN_QUESTIONS, "openQuestions"),
+        ] {
+            if len > max {
+                problems.push(format!("tray has more than {max} {what}"));
+            }
         }
     }
 
     if input.questions.len() > MAX_QUESTIONS {
-        return Err(ValidationError(format!("brief_user supports at most {MAX_QUESTIONS} top-level questions")));
+        problems.push(format!("brief_user supports at most {MAX_QUESTIONS} top-level questions"));
     }
     for (index, question) in input.questions.iter().enumerate() {
-        validate_question(question, &format!("question {}", index + 1))?;
+        validate_question(&mut problems, question, &format!("question {}", index + 1));
     }
 
-    validate_rich_content(input)?;
+    validate_rich_content(&mut problems, input);
+    problems.into_result()?;
 
     let mut normalized = input.clone();
     normalized.title = input.title.trim().to_string();
@@ -407,6 +431,25 @@ mod tests {
         assert!(validate(&p).unwrap_err().0.starts_with("chunk 1 question 2 text"));
         p.chunks[0].questions = vec![question(vec![]); 5];
         assert!(validate(&p).unwrap_err().0.contains("more than 4 questions"));
+    }
+
+    #[test]
+    fn reports_every_problem_at_once() {
+        let mut p = minimal();
+        p.title = " ".into();
+        p.chunks[0].main_point = " ".into();
+        p.tray = Some(Tray {
+            key_context: Some(vec!["x".into(); MAX_KEY_CONTEXT + 1]),
+            running_summary: None,
+            open_questions: None,
+        });
+        assert_eq!(
+            validate(&p).unwrap_err().0,
+            format!(
+                "3 problems: title cannot be empty; chunk 1 mainPoint cannot be empty; tray has more than \
+                 {MAX_KEY_CONTEXT} keyContext items"
+            )
+        );
     }
 
     #[test]
