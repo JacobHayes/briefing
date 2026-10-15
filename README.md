@@ -144,7 +144,9 @@ presentation, your in-progress draft, and the submitted result - before acknowle
 change, and reloads them when it starts. It comes back on the port and bind it last used
 (7789 and `auto` by default; `--port`/`--bind` choose), so links survive restarts. A browser
 alone cannot start the hub, though: after a reboot or an idle exit, a link answers again once
-any `briefing` command or MCP call has run.
+any `briefing` command or MCP call has run. A configured `--hub` is restarted by whoever runs
+it; waiting agents keep retrying through the restart (including a proxy's 502 while it is
+down) and give up only once it has been unreachable for a minute.
 
 - **Agent disconnected after you submitted:** `await_briefing` (or `briefing await <id>`)
   from any later process returns the stored result. Results are kept for 7 days.

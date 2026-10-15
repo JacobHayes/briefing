@@ -194,7 +194,8 @@ draft, which only the page reads.
   explicit settings or else the bind and port the last hub used; that hub exits a minute
   after nothing is open. A client newer than an on-demand hub replaces it immediately: a
   `POST /control/shutdown` with the secret, a wait for the lock to be released, then a fresh
-  start. Waiting clients reconnect across the switch, and a client still running the older
+  start. Waiting clients reconnect across the switch (and across a restart of a configured
+  hub, treating a proxy's 502/503/504 as the hub being unreachable, for up to a minute), and a client still running the older
   release keeps working against the newer hub, which answers it in its protocol (see the
   README's hub section). Discovery and replacement (`/healthz`, `/control/shutdown`) sit
   outside protocol negotiation, so they work across any two versions. A hub reloads every

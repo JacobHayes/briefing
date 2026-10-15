@@ -119,6 +119,12 @@ fn start_hub_sweeper(hub: Arc<Hub>, shutdown: CancellationToken, every: Duration
 }
 
 const HUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a configured hub may stay unreachable before a wait on it gives up: long enough to
+/// ride through a restart or upgrade, short enough that a hub that is really gone surfaces as
+/// an error.
+const REMOTE_HUB_OUTAGE: Duration = Duration::from_secs(60);
+/// How long to wait before trying a hub that went away mid-wait again.
+const HUB_RETRY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, thiserror::Error)]
 #[error("hub request timed out")]
@@ -190,6 +196,16 @@ impl RemoteBackend {
             .map_err(|_| HubRequestTimeout)?
             .map_err(|_| HubUnreachable(self.base.clone()))?;
         let status = response.status();
+        // A proxy in front of a hub that is down or restarting answers for it: the hub is
+        // unreachable, not speaking some other protocol. The hub itself never sends these.
+        if matches!(
+            status,
+            ::http::StatusCode::BAD_GATEWAY
+                | ::http::StatusCode::SERVICE_UNAVAILABLE
+                | ::http::StatusCode::GATEWAY_TIMEOUT
+        ) {
+            return Err(HubUnreachable(self.base.clone()).into());
+        }
         // A response in another protocol has shapes this client would misread, so stop here
         // with both versions named. A 426 carries the hub's own explanation instead.
         let hub_protocol = response.headers().get(crate::protocol::HEADER).and_then(|v| v.to_str().ok());
@@ -227,18 +243,22 @@ impl RemoteBackend {
         Ok(serde_json::from_value(value)?)
     }
 
-    pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
-        self.wait_with_limits(id, timeout, http::MAX_WAIT, HUB_REQUEST_TIMEOUT).await
+    /// Wait up to `timeout` for the briefing to finish, retrying while the hub is unreachable
+    /// for up to `outage` at a time: a restarted hub reloads its records, so the wait goes on.
+    pub async fn wait(&self, id: &str, timeout: Duration, outage: Duration) -> anyhow::Result<Outcome> {
+        self.wait_with_limits(id, timeout, outage, http::MAX_WAIT, HUB_REQUEST_TIMEOUT).await
     }
 
     async fn wait_with_limits(
         &self,
         id: &str,
         timeout: Duration,
+        outage: Duration,
         max_slice: Duration,
         request_timeout: Duration,
     ) -> anyhow::Result<Outcome> {
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut unreachable_since = None;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -252,8 +272,18 @@ impl RemoteBackend {
                 // still valid on the hub. Treat transport timeouts as "still pending" and
                 // reconnect instead of losing the briefing id.
                 Err(error) if error.is::<HubRequestTimeout>() => continue,
+                Err(error) if error.is::<HubUnreachable>() => {
+                    let since = *unreachable_since.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= outage {
+                        return Err(error);
+                    }
+                    tracing::debug!("{error}; retrying");
+                    tokio::time::sleep(HUB_RETRY.min(remaining)).await;
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
+            unreachable_since = None;
             match serde_json::from_value::<BriefingOutcome>(value)?.outcome {
                 Outcome::Pending => continue,
                 done => return Ok(done),
@@ -306,8 +336,6 @@ pub struct Backend {
     open_browser: bool,
 }
 
-/// How long to wait before re-checking a local hub that went away mid-wait.
-const LOCAL_HUB_RETRY: Duration = Duration::from_millis(500);
 /// How many times in a row restarting it may fail (about 10 s): the hub it replaces can still
 /// hold the port while it shuts down.
 const LOCAL_HUB_RESTARTS: u32 = 20;
@@ -347,7 +375,7 @@ impl Backend {
     /// replaced mid-wait; it reloads its records when it starts again, so keep waiting on it.
     pub async fn wait(&self, id: &str, timeout: Duration) -> anyhow::Result<Outcome> {
         let local = match &self.kind {
-            BackendKind::Remote(remote) => return remote.wait(id, timeout).await,
+            BackendKind::Remote(remote) => return remote.wait(id, timeout, REMOTE_HUB_OUTAGE).await,
             BackendKind::Site(site) => return Ok(site.hub.wait(id, timeout).await?),
             BackendKind::Local(local) => local,
         };
@@ -360,14 +388,15 @@ impl Backend {
                 Err(error) if failed_restarts < LOCAL_HUB_RESTARTS => {
                     tracing::debug!(error = format!("{error:#}"), "this machine's hub is not back yet");
                     failed_restarts += 1;
-                    tokio::time::sleep(LOCAL_HUB_RETRY).await;
+                    tokio::time::sleep(HUB_RETRY).await;
                     continue;
                 }
                 Err(error) => return Err(error),
             };
             failed_restarts = 0;
-            match remote.wait(id, remaining).await {
-                Err(error) if error.is::<HubUnreachable>() => tokio::time::sleep(LOCAL_HUB_RETRY).await,
+            // This machine's hub may need starting again, which only re-finding it does.
+            match remote.wait(id, remaining, Duration::ZERO).await {
+                Err(error) if error.is::<HubUnreachable>() => tokio::time::sleep(HUB_RETRY).await,
                 result => return result,
             }
         }
@@ -438,23 +467,17 @@ mod tests {
         let (submit_origin, id) = (origin.clone(), created.id.clone());
         let submitter = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
-            let response = reqwest::Client::new()
-                .post(format!("{submit_origin}/api/{id}/complete"))
-                .header("origin", &submit_origin)
-                .header(crate::protocol::HEADER, crate::protocol::PROTOCOL.to_string())
-                .json(&{
-                    let mut body = crate::response::blank_submission(&content::demo());
-                    body["notes"] = json!(["retried"]);
-                    body
-                })
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            submit(&submit_origin, &id, "retried").await;
         });
 
         let outcome = remote
-            .wait_with_limits(&created.id, Duration::from_secs(2), Duration::from_millis(25), Duration::from_millis(5))
+            .wait_with_limits(
+                &created.id,
+                Duration::from_secs(2),
+                Duration::ZERO,
+                Duration::from_millis(25),
+                Duration::from_millis(5),
+            )
             .await
             .unwrap();
         match outcome {
@@ -463,5 +486,88 @@ mod tests {
         }
         submitter.await.unwrap();
         running.stop().await;
+    }
+
+    /// Submit the demo briefing `id` through the page API with one note.
+    async fn submit(origin: &str, id: &str, note: &str) {
+        let response = reqwest::Client::new()
+            .post(format!("{origin}/api/{id}/complete"))
+            .header("origin", origin)
+            .header(crate::protocol::HEADER, crate::protocol::PROTOCOL.to_string())
+            .json(&{
+                let mut body = crate::response::blank_submission(&content::demo());
+                body["notes"] = json!([note]);
+                body
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    /// A configured hub restarting mid-wait: first nothing listens, then a proxy answers 502 for
+    /// it, then the hub is back on the same port with its records. The wait carries on.
+    #[tokio::test]
+    async fn remote_wait_rides_through_a_hub_restart() {
+        crate::tls::init();
+        let port = free_port();
+        let hub = Arc::new(Hub::new(HubConfig::default()));
+        let (site, running) = Site::start(hub.clone(), BindTarget::local(None), port, None, |_| None).await.unwrap();
+        let origin = site.config.public_origin.clone();
+        let remote = RemoteBackend::new(&origin).unwrap();
+        let created = remote.create(content::demo(), Origin::source("test")).await.unwrap();
+        running.stop().await;
+
+        let (restart_origin, id) = (origin.clone(), created.id.clone());
+        let restarter = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let listener = http::bind(std::net::Ipv4Addr::LOCALHOST.into(), port).await.unwrap();
+            let router = axum::Router::new().fallback(|| async { ::http::StatusCode::BAD_GATEWAY });
+            let proxy = tokio::spawn(async move { axum::serve(listener, router).await });
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            proxy.abort();
+            let _ = proxy.await;
+            let (_, running) = Site::start(hub, BindTarget::local(None), port, None, |_| None).await.unwrap();
+            submit(&restart_origin, &id, "after restart").await;
+            running
+        });
+
+        let outcome = remote
+            .wait_with_limits(
+                &created.id,
+                Duration::from_secs(10),
+                Duration::from_secs(5),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        match outcome {
+            Outcome::Completed { feedback } => assert_eq!(feedback.notes, vec!["after restart"]),
+            other => panic!("unexpected {other:?}"),
+        }
+        restarter.await.unwrap().stop().await;
+    }
+
+    /// A hub that stays gone past the outage allowance ends the wait with an error.
+    #[tokio::test]
+    async fn remote_wait_gives_up_on_a_hub_that_stays_gone() {
+        crate::tls::init();
+        let remote = RemoteBackend::new(&format!("http://127.0.0.1:{}", free_port())).unwrap();
+        let error = remote
+            .wait_with_limits(
+                "gone",
+                Duration::from_secs(10),
+                Duration::from_millis(600),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.is::<HubUnreachable>(), "{error:#}");
     }
 }
