@@ -20,6 +20,8 @@
       --focus: color-mix(in srgb, var(--accent) 34%, transparent);
       --radius: 14px;
       --content: 640px;
+      /* Diagrams, charts and tables may grow past the reading column up to this width. */
+      --wide: 880px;
       font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
     }
     @media (prefers-color-scheme: dark) {
@@ -307,6 +309,24 @@
     .notes-actions .btn { padding: 8px 14px; }
     .notes-hint { margin-right: auto; color: var(--muted); font-size: .78rem; }
     @media (pointer: coarse) { .notes-hint { display: none; } }
+    /* On wide screens, figures and tables break out of the reading column (which stays at a
+       readable line length), centred on it; with the sidebar docked in the left margin they grow
+       into the right margin only. 100cqw is the column's width. */
+    @media (min-width: 900px) {
+      main .reading { container-type: inline-size; }
+      main .reading .rich-block, main .reading .table-wrap {
+        --w: min(var(--wide), calc(100vw - 64px));
+        width: var(--w);
+        margin-left: calc((100cqw - var(--w)) / 2);
+      }
+      /* A table only takes the extra width its content needs. */
+      main .reading .table-wrap table { width: auto; min-width: 100cqw; margin: 0 auto; }
+      body.sidebar-docked main .reading .rich-block, body.sidebar-docked main .reading .table-wrap {
+        --w: min(var(--wide), calc(100cqw + (100vw - 100cqw) / 2 - 32px));
+        margin-left: 0;
+      }
+      body.sidebar-docked main .reading .table-wrap table { margin-left: 0; }
+    }
     @media (min-width: 1200px) {
       .notes { inset: 88px auto 16px 16px; width: min(320px, calc((100vw - var(--content)) / 2 - 44px)); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,.12); }
     }
@@ -1996,6 +2016,7 @@
       const panel = document.getElementById("notes-panel");
       const modal = Boolean(panel) && !notesDocked.matches;
       document.body.classList.toggle("sidebar-modal", modal);
+      document.body.classList.toggle("sidebar-docked", Boolean(panel) && notesDocked.matches);
       if (modal) {
         // Full screen, with the content padded into the visible viewport so a touch keyboard
         // never covers the composer and its buttons. The panel itself still covers everything:

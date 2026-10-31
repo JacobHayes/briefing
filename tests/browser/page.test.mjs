@@ -306,3 +306,25 @@ test("a comment on a diagram node or edge marks its target, and survives a reloa
   assert.deepEqual(marked, ["pele-edge-label:L_A_B_0", "pele-edge:L_A_B_0", "pele-node:B"]);
   await done(page);
 });
+
+test("figures grow past the reading column on wide screens, clear of a docked sidebar", async () => {
+  const url = await serve();
+  const box = (page, selector) => page.locator(selector).first().evaluate(node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, width: r.width }; });
+
+  const wide = await open(url, { viewport: { width: 1440, height: 900 } });
+  await wide.waitForSelector(".rich-mermaid svg");
+  const prose = await box(wide, ".reading p");
+  const figure = await box(wide, ".rich-mermaid");
+  assert.ok(figure.width > prose.width + 100, "the diagram should be wider than the prose");
+  assert.ok(Math.abs((figure.left + figure.right) / 2 - (prose.left + prose.right) / 2) < 2, "and centred on it");
+  assert.ok((await box(wide, ".table-wrap table")).width <= prose.width + 1, "a narrow table keeps the column width");
+  await wide.click('header button:has-text("Outline")');
+  await wide.waitForTimeout(300);
+  assert.ok((await box(wide, ".rich-mermaid")).left >= (await box(wide, "#notes-panel")).right, "the docked sidebar never covers a figure");
+  await done(wide);
+
+  const phone = await open(url, { viewport: { width: 390, height: 844 } });
+  await phone.waitForSelector(".rich-mermaid svg");
+  assert.ok((await box(phone, ".rich-mermaid")).width <= (await box(phone, ".reading p")).width + 1, "on a phone a figure keeps the column width");
+  await done(phone);
+});
