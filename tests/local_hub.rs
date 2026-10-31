@@ -128,3 +128,26 @@ async fn a_restarted_hub_comes_back_on_the_last_port() {
     assert_eq!(second.port, machine.port);
     assert_eq!(second.origin, first.origin);
 }
+
+/// Stopping a `briefing await` watcher only stops watching: the briefing it watched belongs to
+/// whoever created it and stays open.
+#[test]
+fn interrupting_await_leaves_the_briefing_open() {
+    let machine = Machine::new();
+    let file = machine.state.path().join("demo.json");
+    std::fs::write(&file, serde_json::to_string(&briefing::content::demo()).unwrap()).unwrap();
+    let opened = machine.command().args(["present", "--json", "--open", "false"]).arg(&file).output().unwrap();
+    assert!(opened.status.success(), "{}", String::from_utf8_lossy(&opened.stderr));
+    let opened: serde_json::Value = serde_json::from_slice(&opened.stdout).unwrap();
+    let id = opened["briefingId"].as_str().unwrap().to_string();
+
+    let watcher = machine.command().args(["await", &id, "--json"]).stdout(Stdio::null()).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    std::process::Command::new("kill").args(["-TERM", &watcher.id().to_string()]).status().unwrap();
+    let exit = watcher.wait_with_output().unwrap().status;
+    assert_eq!(exit.code(), Some(130));
+
+    let status = machine.command().args(["status", &id, "--json"]).output().unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["status"], "active", "{status}");
+}
