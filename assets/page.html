@@ -363,6 +363,7 @@
     let submitted = false;
     let contextOpen = false;
     let pendingFocus = null;
+    let restoringFocus = false;
     let pendingSelection = null;
     let composer = null;
     let composerRect = null;
@@ -1121,6 +1122,7 @@
     }
 
     function showPopover(mark, pinned) {
+      if (!pinned && restoringFocus) return;
       const anns = annotationsForMark(mark);
       if (!anns.length) return;
       popover.mark = mark;
@@ -1373,15 +1375,17 @@
       node.style.maxWidth = "";
       node.dataset.placement = "overlay";
       const columnRect = document.querySelector("main")?.getBoundingClientRect();
+      // The visible part of the page: zoomed in on the text column, the rail is off screen.
+      const view = visibleRect();
       if (columnRect) {
         const left = columnRect.right + MARGIN_RAIL_GAP;
-        const available = window.innerWidth - margin - left;
+        const available = view.left + view.width - margin - left;
         if (available >= MARGIN_RAIL_MIN_USABLE) {
           const width = Math.min(MARGIN_RAIL_WIDTH, available);
           node.style.width = width + "px";
           node.style.maxWidth = width + "px";
           const h = node.offsetHeight;
-          const top = Math.max(margin, Math.min(viewportRect.top, window.innerHeight - h - margin));
+          const top = Math.max(view.top + margin, Math.min(viewportRect.top, view.top + view.height - h - margin));
           node.style.left = (left + window.scrollX) + "px";
           node.style.top = (top + window.scrollY) + "px";
           node.dataset.placement = "margin";
@@ -1646,7 +1650,7 @@
         onSave: comment => {
           const ann = addAnnotation(sel, comment);
           if (!ann) return "Comment limit reached.";
-          // Land focus on the new highlight so keyboard users get the preview.
+          // Land focus on the new highlight, so the keyboard carries on from it.
           pendingFocus = '[data-anno-ids~="' + ann.id + '"]';
           closeComposer(true);
         },
@@ -2038,6 +2042,7 @@
     // ignored), once the keyboard animation has settled.
     if (window.visualViewport) {
       let viewportHeight = visualViewport.height;
+      let viewportScale = visualViewport.scale;
       // The composer scrolls with the page, so only a change in the visible size (the keyboard,
       // zoom) re-places it.
       const relayout = () => {
@@ -2047,9 +2052,15 @@
       };
       visualViewport.addEventListener("scroll", layoutNotes);
       visualViewport.addEventListener("resize", () => {
-        const grew = visualViewport.height > viewportHeight;
+        // Zooming out also grows the visible height; only an unchanged scale means the keyboard.
+        const zoomed = visualViewport.scale !== viewportScale;
+        const grew = !zoomed && visualViewport.height > viewportHeight;
+        const shrank = !zoomed && visualViewport.height < viewportHeight;
         viewportHeight = visualViewport.height;
+        viewportScale = visualViewport.scale;
         relayout();
+        // The keyboard rises after the composer has been placed and revealed, and can cover it.
+        if (shrank && composer) revealNode(composer);
         if (grew) setTimeout(() => { window.scrollBy(0, 1); window.scrollBy(0, -1); relayout(); }, 50);
       });
     }
@@ -2314,8 +2325,19 @@
       pendingFocus = null;
       requestAnimationFrame(() => {
         const node = (target && document.querySelector(target)) || document.querySelector("main h1") || document.querySelector("h1");
+        // A just-saved comment lands focus on its highlight; its preview would cover the text.
+        restoringFocus = true;
         node?.focus({ preventScroll: true });
+        restoringFocus = false;
       });
+    }
+
+    // Pinch zoom (or a desktop "smart zoom" onto the text column) moves the visual viewport,
+    // which window.scrollTo leaves alone: the next screen would open at the old depth. Scrolling
+    // the document into view moves both viewports to the top and keeps the zoom's sideways pan.
+    function scrollToTop() {
+      if (window.visualViewport && visualViewport.scale > 1) document.documentElement.scrollIntoView({ block: "start", inline: "nearest" });
+      else window.scrollTo(0, 0);
     }
 
     // `top` is for moving to another screen; every other re-render keeps the reader where they were.
@@ -2337,7 +2359,7 @@
       layoutNotes();
       decorateHighlights();
       watchQuestions();
-      if (top) window.scrollTo(0, 0);
+      if (top) scrollToTop();
       else window.scrollTo(scrollX, scrollY);
       applyFocus();
     }
@@ -2376,8 +2398,12 @@
 
     document.addEventListener("keydown", event => {
       if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement || submitted || event.shiftKey || document.querySelector("dialog[open]")) return;
-      if (event.key === "ArrowLeft" && current > 0) { current--; save(); render({ top: true }); }
-      if (event.key === "ArrowRight" && current < screens.length && !revealUnseenQuestion()) { current++; save(); render({ top: true }); }
+      // Claim the key: on a pinch-zoomed page the browser would also pan the view sideways.
+      if (event.key === "ArrowLeft" && current > 0) { event.preventDefault(); current--; save(); render({ top: true }); }
+      if (event.key === "ArrowRight" && current < screens.length) {
+        event.preventDefault();
+        if (!revealUnseenQuestion()) { current++; save(); render({ top: true }); }
+      }
     });
 
     (async () => {

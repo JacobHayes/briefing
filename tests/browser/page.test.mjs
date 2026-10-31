@@ -328,3 +328,35 @@ test("figures grow past the reading column on wide screens, clear of a docked si
   assert.ok((await box(phone, ".rich-mermaid")).width <= (await box(phone, ".reading p")).width + 1, "on a phone a figure keeps the column width");
   await done(phone);
 });
+
+test("saving a comment leaves its text uncovered", async () => {
+  const page = await open(await serve());
+  await select(page, "Intro paragraph");
+  await comment(page, "no preview please");
+  assert.ok(await page.evaluate(() => document.activeElement.matches(".anno-mark")), "focus lands on the new highlight");
+  assert.ok(await page.evaluate(() => document.querySelector(".anno-tip").hidden), "no saved-comment preview opens on its own");
+  await done(page);
+});
+
+test("on a pinch-zoomed page the arrow keys change screen at the top, keeping the zoom", async () => {
+  const page = await open(await serve(), { viewport: { width: 1280, height: 800 } });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  const column = await page.evaluate(() => { const r = document.querySelector("main").getBoundingClientRect(); return { x: r.left + r.width / 2, y: 300 }; });
+  await page.mouse.move(column.x, column.y);
+  await page.mouse.wheel(300, 400);
+  await page.waitForTimeout(300);
+  const view = () => page.evaluate(() => ({ scale: visualViewport.scale, left: visualViewport.pageLeft, top: visualViewport.pageTop, title: document.querySelector("main h1").textContent }));
+  const zoomed = await view();
+  assert.ok(zoomed.scale > 1 && zoomed.left > 0 && zoomed.top > 0, "the view is zoomed in and panned");
+  for (const key of ["ArrowRight", "ArrowLeft"]) {
+    const before = await view();
+    await page.keyboard.press(key);
+    await page.waitForTimeout(300);
+    const after = await view();
+    assert.notEqual(after.title, before.title, key + " changes screen");
+    assert.equal(after.top, 0, key + " opens the screen at its top");
+    assert.equal(after.left, zoomed.left, key + " keeps the zoom's sideways pan");
+  }
+  await done(page);
+});
