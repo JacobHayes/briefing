@@ -271,18 +271,21 @@ impl BriefingMcp {
         if self.harness_session.is_some() { format!("{client}@{}", crate::backend::hostname()) } else { client }
     }
 
+    /// The client's name: per request in `_meta` since MCP 2026-07-28 (stateless, no
+    /// `initialize`), else from the legacy handshake.
     fn client_name(ctx: &RequestContext<RoleServer>) -> String {
-        ctx.peer.peer_info().map(|info| info.client_info.name.clone()).unwrap_or_default()
+        ctx.client_info().map(|info| info.name).unwrap_or_default()
     }
 
     /// Hold + budget for this call: explicit flags win, otherwise the client profile.
     fn plan(&self, ctx: &RequestContext<RoleServer>) -> (HoldMode, Duration) {
-        let supports_elicitation = ctx.peer.peer_info().is_some_and(|info| info.capabilities.elicitation.is_some());
-        let profile = ClientProfile::for_client(&Self::client_name(ctx));
+        let supports_elicitation = ctx.client_capabilities().is_some_and(|caps| caps.elicitation.is_some());
+        let client = Self::client_name(ctx);
+        let profile = ClientProfile::for_client(&client);
         let hold =
             resolve_hold(if self.hold == HoldMode::Auto { profile.hold } else { self.hold }, supports_elicitation);
         let budget = self.max_wait.unwrap_or_else(|| profile.budget_for(hold));
-        tracing::debug!(client = %Self::client_name(ctx), profile = profile.name, ?hold, ?budget, "planned wait");
+        tracing::info!(%client, profile = profile.name, ?hold, ?budget, "planned wait");
         (hold, budget)
     }
 
@@ -440,7 +443,7 @@ impl BriefingMcp {
     }
 
     fn require_structured_content(ctx: &RequestContext<RoleServer>) -> Result<(), ErrorData> {
-        let version = ctx.peer.peer_info().map(|info| info.protocol_version.to_string()).unwrap_or_default();
+        let version = ctx.protocol_version().map(|version| version.to_string()).unwrap_or_default();
         if !version.is_empty() && version.as_str() < MIN_PROTOCOL {
             return Err(ErrorData::internal_error(
                 format!(

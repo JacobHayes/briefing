@@ -51,6 +51,31 @@ impl McpClient {
         client
     }
 
+    /// A client on MCP 2026-07-28 or later: no `initialize`; who it is travels in every
+    /// request's `_meta` instead (see `stateless_request`).
+    fn spawn_stateless(machine: &Machine, args: &[&str]) -> Self {
+        let mut child = machine
+            .command()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn briefing mcp");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        Self { child, stdin, stdout }
+    }
+
+    fn stateless_request(&mut self, id: u64, method: &str, mut params: Value, client_name: &str) -> Value {
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": client_name, "version": "0.0.0"},
+            "io.modelcontextprotocol/clientCapabilities": {},
+        });
+        self.request(id, method, params)
+    }
+
     fn send(&mut self, message: Value) {
         writeln!(self.stdin, "{message}").unwrap();
         self.stdin.flush().unwrap();
@@ -323,4 +348,23 @@ fn a_waiting_await_survives_its_hub_restarting() {
     let done = client.read_response(3, |_, _| {});
     assert_eq!(done["result"]["structuredContent"]["status"], "completed", "{done}");
     assert_eq!(done["result"]["structuredContent"]["feedback"]["notes"][0], "survived");
+}
+
+/// Claude Code speaks MCP 2026-07-28: no handshake, client identity per request. The server
+/// must still recognise it, or waits fall back to the unknown client's short budget.
+#[test]
+fn stateless_client_is_recognised_from_request_meta() {
+    let machine = Machine::new();
+    let mut client = McpClient::spawn_stateless(&machine, &["mcp"]);
+    let opened = client.stateless_request(
+        1,
+        "tools/call",
+        json!({"name": "brief_user", "arguments": demo_presentation()}),
+        "claude-code",
+    );
+    let id = opened["result"]["structuredContent"]["briefingId"].as_str().expect("briefing opened").to_string();
+    let status = machine.command().args(["status", &id, "--json"]).output().unwrap();
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert!(status["source"].as_str().unwrap().starts_with("claude-code@"), "{status}");
 }
