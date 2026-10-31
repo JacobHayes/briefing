@@ -8,7 +8,7 @@ option or answer in your own words), a free-standing Notes panel, and a review s
 you send it back.
 Only what you wrote returns to the agent.
 
-![Walkthrough: read a chunk, select a sentence and comment on it, open the Context panel, pick a decision, review, submit](docs/screenshots/tour.gif)
+![Walkthrough: read a chunk, comment on a passage, open the Context panel, answer a question, review what goes back](docs/screenshots/tour.gif)
 
 ```mermaid
 flowchart LR
@@ -36,10 +36,12 @@ flowchart LR
 
 | | |
 |---|---|
-| ![Inline comment pinned in the margin next to the highlighted passage](docs/screenshots/03-inline-comment.png) | ![The Context panel: goal, things to keep in mind, running summary, open questions](docs/screenshots/04-context.png) |
+| ![A comment pinned next to its highlighted passage](docs/screenshots/03-inline-comment.png) | ![The Context panel: goal, things to keep in mind, running summary, open questions](docs/screenshots/04-context.png) |
 | Select text, press **Comment**, and the note lives next to the passage. | The **Context** panel keeps the goal and stable facts one click away. |
-| ![A decision card with a recommended option and tradeoffs](docs/screenshots/05-decision.png) | ![The review screen listing every answer, decision, and comment before submit](docs/screenshots/06-review.png) |
-| Decisions come with a recommendation and honest tradeoffs. | The review screen shows exactly what goes back, and nothing else. |
+| ![A question with its recommended option chosen and room to answer in your own words](docs/screenshots/05-question.png) | ![The review screen listing answers, unresolved questions and comments before submit](docs/screenshots/06-review.png) |
+| Questions sit under the section they depend on, with a recommendation and honest tradeoffs. Answers are optional. | The review screen shows exactly what goes back; a skipped question goes back as unresolved. |
+| ![The Outline sidebar listing each section with its open questions](docs/screenshots/07-outline.png) | ![A Mermaid diagram rendered in dark mode](docs/screenshots/08-dark.png) |
+| The **Outline** jumps to any section and shows what's still open; **Notes** shares the sidebar. | Light and dark follow your system, diagrams included. |
 | ![A Mermaid diagram inside a chunk with its own Comment button](docs/screenshots/02-rich-content.png) | ![A Vega-Lite bar chart inside a chunk](docs/screenshots/02b-chart.png) |
 | Markdown, GFM tables, code, and Mermaid diagrams render inline; nodes and edges are commentable, and a diagram expands to fill the screen. | Vega-Lite charts too, all served from the binary with no CDN. |
 
@@ -306,6 +308,7 @@ mise install         # rust (+ clippy, rustfmt, release targets), zig, cargo-zig
 mise run check       # full project gate: format, generated skill, clippy -D warnings, tests, Pi extension
 mise run pi:check    # focused Pi extension typecheck/smoke
 mise run fix         # format, clippy --fix, regenerate skill
+mise run docs:screenshots  # recapture the README screenshots and tour.gif from assets/demo.json
 mise use -g github:JacobHayes/briefing@latest   # or: cargo install --path . --locked
 mise run assets:update
 cargo zigbuild --release --target aarch64-apple-darwin   # any release target, from Linux

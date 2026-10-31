@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-concurrency=1 page.test.mjs"
+    "test": "node --test --test-concurrency=1 page.test.mjs",
+    "screenshots": "node capture.mjs"
   },
   "devDependencies": {
     "playwright": "*"

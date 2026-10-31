@@ -38,6 +38,20 @@ cargo build --locked --quiet
 npm test
 """
 
+[tasks."docs:screenshots"]
+description = "recapture the README screenshots and walkthrough GIF from assets/demo.json"
+dir = "tests/browser"
+tools = { "conda:ffmpeg" = "9" }
+run = """
+set -eu
+if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+  npm ci --no-audit --no-fund
+fi
+npx playwright install chromium
+cargo build --locked --quiet
+npm run screenshots
+"""
+
 [tasks.check]
 description = "verify the full project: format, generated skill, clippy, tests, Pi extension, and browser tests"
 run = """

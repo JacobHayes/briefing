@@ -5,55 +5,25 @@
 // and drives it with Playwright's Chromium. They assert behaviour, never wording.
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { chromium } from "playwright";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const BINARY = process.env.BRIEFING_BIN || join(here, "../../target/debug/briefing");
-const FIXTURE = join(here, "fixture.json");
+import { serve as serveFile, stopAll } from "./serve.mjs";
+
+const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixture.json");
 
 let browser;
-const servers = [];
 
 before(async () => { browser = await chromium.launch(); });
 after(async () => {
   await browser?.close();
-  for (const server of servers) server.stop();
+  stopAll();
 });
 
-/** Serve the fixture as a fresh briefing and return its page URL. `present` returns at once;
- * the briefing lives in the on-demand hub it starts in this test's own state dir, on a free
- * port, which is stopped once the tests finish. */
-async function serve() {
-  const dir = mkdtempSync(join(tmpdir(), "briefing-browser-"));
-  const config = join(dir, "config.toml");
-  writeFileSync(config, "");
-  const state = join(dir, "briefings");
-  const env = { ...process.env, BRIEFING_CONFIG: config, XDG_STATE_HOME: join(dir, "state"), BRIEFING_STATE_DIR: state, BRIEFING_PORT: "0" };
-  for (const key of Object.keys(env)) if (key.startsWith("BRIEFING_") && !["BRIEFING_CONFIG", "BRIEFING_STATE_DIR", "BRIEFING_PORT"].includes(key)) delete env[key];
-  servers.push({
-    stop: () => {
-      try { process.kill(JSON.parse(readFileSync(join(state, ".hub.json"), "utf8")).pid, "SIGKILL"); } catch { /* never started */ }
-      rmSync(dir, { recursive: true, force: true });
-    },
-  });
-  const stdout = await new Promise((resolve, reject) => {
-    const child = spawn(BINARY, ["present", FIXTURE, "--json", "--bind", "local", "--open", "false"], { env, stdio: ["ignore", "pipe", "inherit"] });
-    let out = "";
-    child.stdout.on("data", chunk => (out += chunk));
-    child.on("error", reject);
-    child.on("exit", code => (code === 0 ? resolve(out) : reject(new Error(`briefing present exited with ${code}`))));
-  });
-  const { url } = JSON.parse(stdout);
-  assert.match(url, /^http:\/\/127\.0\.0\.1:/, "tests must never reach a real hub");
-  return url;
-}
+const serve = () => serveFile(FIXTURE);
 
 async function open(url, options = {}) {
   const context = await browser.newContext({ viewport: { width: 1100, height: 700 }, ...options });
