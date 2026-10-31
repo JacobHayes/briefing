@@ -311,8 +311,8 @@ mise run assets:update
 cargo zigbuild --release --target aarch64-apple-darwin   # any release target, from Linux
 ```
 
-The build embeds the browser renderer libraries (marked, DOMPurify, highlight.js, Mermaid,
-Vega, Vega-Lite, vega-embed). `build.rs` installs the versions pinned in
+The build embeds the browser renderer libraries (marked, DOMPurify, highlight.js,
+[Pele](https://pele.run) for Mermaid syntax, Vega, Vega-Lite, vega-embed). `build.rs` installs the versions pinned in
 `assets/package-lock.json` with `npm ci` (or `bun install`) on first build, so Node or Bun must
 be available; offline builds can point `BRIEFING_VENDOR_DIR` at a directory holding the
 seven files.

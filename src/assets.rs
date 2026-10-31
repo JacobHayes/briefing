@@ -18,7 +18,7 @@ pub static ASSETS: &[(&str, &[u8])] = &[
     vendored!("marked.umd.js"),
     vendored!("purify.min.js"),
     vendored!("highlight.min.js"),
-    vendored!("mermaid.min.js"),
+    vendored!("pele.global.js"),
     vendored!("vega.min.js"),
     vendored!("vega-lite.min.js"),
     vendored!("vega-embed.min.js"),

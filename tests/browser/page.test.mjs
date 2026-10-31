@@ -315,3 +315,24 @@ test("a key point with its own sub-list renders it as nested bullets", async () 
   ]);
   await done(page);
 });
+
+test("a comment on a diagram node or edge marks its target, and survives a reload", async () => {
+  const url = await serve();
+  const page = await open(url);
+  const commentOn = async selector => {
+    await page.click(selector);
+    await page.fill(".composer-input", "on " + selector);
+    await page.click(".composer .btn.primary");
+    await page.waitForTimeout(200);
+  };
+  await page.waitForSelector('.rich-mermaid g.pele-node[data-id="B"]');
+  await commentOn('.rich-mermaid g.pele-node[data-id="B"]');
+  // An edge's label is the same target as the edge it labels.
+  await commentOn('.rich-mermaid g.pele-edge-label[data-id="L_A_B_0"]');
+  await page.waitForTimeout(800); // debounced draft save
+  await page.reload();
+  await page.waitForSelector(".rich-mermaid .rich-has-comments");
+  const marked = await page.$$eval(".rich-mermaid .rich-has-comments", nodes => nodes.map(n => n.getAttribute("class").split(" ")[0] + ":" + n.getAttribute("data-id")).sort());
+  assert.deepEqual(marked, ["pele-edge-label:L_A_B_0", "pele-edge:L_A_B_0", "pele-node:B"]);
+  await done(page);
+});

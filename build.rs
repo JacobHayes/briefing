@@ -17,7 +17,7 @@ const FILES: &[(&str, &str)] = &[
     ("marked.umd.js", "marked/lib/marked.umd.js"),
     ("purify.min.js", "dompurify/dist/purify.min.js"),
     ("highlight.min.js", "@highlightjs/cdn-assets/highlight.min.js"),
-    ("mermaid.min.js", "mermaid/dist/mermaid.min.js"),
+    ("pele.global.js", "pele/dist/pele.global.js"),
     ("vega.min.js", "vega/build/vega.min.js"),
     ("vega-lite.min.js", "vega-lite/build/vega-lite.min.js"),
     ("vega-embed.min.js", "vega-embed/build/vega-embed.min.js"),

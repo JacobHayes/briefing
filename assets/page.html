@@ -150,6 +150,12 @@
     .rich-comment:hover { color: var(--accent); border-color: var(--accent); }
     .rich-body { overflow-x: auto; }
     .rich-body svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+    /* Pele themes diagrams from CSS variables, so they follow the page palette, light and dark. */
+    .rich-mermaid, .diagram-modal {
+      --pele-bg: var(--surface); --pele-fg: var(--text); --pele-muted: var(--muted); --pele-line: var(--muted);
+      --pele-surface: var(--accent-soft); --pele-surface-alt: var(--bg); --pele-border: var(--accent);
+      --pele-accent: var(--accent); --pele-critical: var(--danger); --pele-error: var(--danger); --pele-radius: 8px;
+    }
     .rich-vega-lite .rich-body, .rich-vega-lite .vega-embed { width: 100%; }
     .rich-targetable { cursor: pointer; }
     .rich-targetable:hover, .rich-targetable.rich-has-comments { filter: drop-shadow(0 0 4px var(--accent)); }
@@ -314,7 +320,7 @@
   <script src="/briefing-assets/marked.umd.js"></script>
   <script src="/briefing-assets/purify.min.js"></script>
   <script src="/briefing-assets/highlight.min.js"></script>
-  <script src="/briefing-assets/mermaid.min.js"></script>
+  <script src="/briefing-assets/pele.global.js"></script>
   <script src="/briefing-assets/vega.min.js"></script>
   <script src="/briefing-assets/vega-lite.min.js"></script>
   <script src="/briefing-assets/vega-embed.min.js"></script>
@@ -371,7 +377,6 @@
     };
 
     let richCounter = 0;
-    let mermaidInitialized = false;
     // Diagrams and charts render asynchronously, so every re-render briefly leaves their blocks
     // empty. Holding each block at its last rendered height keeps the page from shrinking under
     // the reader (and the browser from clamping the scroll position) in the meantime.
@@ -416,7 +421,6 @@
     };
     const SANITIZE_SVG = {
       USE_PROFILES: { html: true, svg: true, svgFilters: true },
-      ADD_TAGS: ["foreignObject", "style"],
       ADD_ATTR: ["class", "id", "style", "transform", "d", "x", "y", "x1", "y1", "x2", "y2", "width", "height", "viewBox", "xmlns", "role", "aria-label", "marker-end", "marker-start"],
     };
 
@@ -540,26 +544,6 @@
       return out;
     }
 
-    function stableMermaidId(rawId) {
-      return cleanTargetText(rawId).replace(/^briefing-mermaid-\d+-/, "");
-    }
-
-    function semanticMermaidId(stableId) {
-      return cleanTargetText(stableId).replace(/^flowchart-/, "").replace(/-\d+$/, "");
-    }
-
-    function mermaidLabelMap(source) {
-      const map = new Map();
-      const text = String(source || "");
-      const pattern = /(^|[\s;])([A-Za-z][A-Za-z0-9_-]*)\s*(?:\[([^\]]+)\]|\(([^)]+)\)|\{([^}]+)\})/g;
-      for (const match of text.matchAll(pattern)) {
-        const id = match[2];
-        const label = cleanTargetText(match[3] || match[4] || match[5] || "").replace(/^['"]|['"]$/g, "");
-        if (id && label) map.set(id, label);
-      }
-      return map;
-    }
-
     function richTargetsMatch(left, right) {
       const a = normalizeTarget(left);
       const b = normalizeTarget(right);
@@ -647,18 +631,14 @@
       return { figure, body, target, settled };
     }
 
+    // Pele marks every node and edge (and an edge's label, under the edge's id) with a data-id
+    // taken from the diagram source, so comment targets stay stable across re-renders.
     function attachMermaidTargets(svg, source, baseTarget) {
       if (!svg) return;
-      const labels = mermaidLabelMap(source);
-      const candidates = svg.querySelectorAll("g.node, g.edgePath, g.edgeLabel, .node, .edgeLabel");
-      candidates.forEach((node, index) => {
-        const classes = String(node.getAttribute("class") || "");
-        const targetType = /edge/i.test(classes) ? "edge" : "node";
-        const rawId = node.getAttribute("id") || targetType + "-" + index;
-        const stableId = stableMermaidId(rawId);
-        const semanticId = semanticMermaidId(stableId);
-        const label = cleanTargetText(labels.get(semanticId) || node.textContent || semanticId || stableId).slice(0, 160);
-        if (!label && !stableId) return;
+      svg.querySelectorAll("g.pele-node[data-id], g.pele-edge[data-id], g.pele-edge-label[data-id]").forEach(node => {
+        const targetType = node.matches(".pele-node") ? "node" : "edge";
+        const targetId = cleanTargetText(node.getAttribute("data-id"));
+        const label = cleanTargetText(node.textContent || targetId).slice(0, 160);
         node.classList.add("rich-targetable");
         node.setAttribute("tabindex", "0");
         node.setAttribute("role", "button");
@@ -666,7 +646,7 @@
         const target = normalizeTarget({
           ...baseTarget,
           targetType,
-          targetId: stableId,
+          targetId,
           targetLabel: label || targetType,
           sourceExcerpt: sourceExcerpt(source),
         });
@@ -677,26 +657,25 @@
     async function renderMermaidBlock(pre, source) {
       const block = makeRichBlock(pre, "mermaid", "Mermaid diagram", "diagram", source);
       pre.replaceWith(block.figure);
-      if (!window.mermaid) {
-        block.body.append(renderRichError("Mermaid renderer unavailable", "The local Mermaid library did not load.", source));
+      // Markdown renders into a detached node that its caller attaches right after; wait for that
+      // so the block has a width to lay out for.
+      await Promise.resolve();
+      if (!window.pele) {
+        block.body.append(renderRichError("Mermaid renderer unavailable", "The local Pele library did not load.", source));
         block.settled();
         return;
       }
       try {
-        if (!mermaidInitialized) {
-          window.mermaid.initialize({
-            startOnLoad: false,
-            securityLevel: "strict",
-            theme: window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
-            htmlLabels: false,
-            flowchart: { htmlLabels: false },
-          });
-          mermaidInitialized = true;
-        }
-        const id = "briefing-mermaid-" + (++richCounter);
-        const rendered = await window.mermaid.render(id, source);
+        // Pele measures labels to size nodes, so it measures in the page's own font, and lays out
+        // for the width the block actually has. Its default 640px breakpoint is wider than the
+        // desktop column, so only phone-width blocks turn a wide LR flow vertical.
+        const rendered = window.pele.render(source, {
+          idPrefix: "briefing-mermaid-" + (++richCounter) + "-",
+          fontFamily: getComputedStyle(document.body).fontFamily,
+          maxWidth: block.body.clientWidth || undefined,
+          directionBreakpoint: 480,
+        });
         block.body.innerHTML = sanitizeSvg(rendered.svg);
-        if (rendered.bindFunctions) rendered.bindFunctions(block.body);
         const svg = block.body.querySelector("svg");
         attachMermaidTargets(svg, source, block.target);
         if (svg) block.figure.querySelector(".rich-actions").prepend(el("button", {

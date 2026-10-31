@@ -46,7 +46,7 @@ async fn client_and_browser_roundtrip() {
     let csp = page.headers().get("content-security-policy").unwrap().to_str().unwrap().to_string();
     let html = page.text().await.unwrap();
     assert!(csp.contains("'nonce-"));
-    assert!(html.contains("/briefing-assets/mermaid.min.js"));
+    assert!(html.contains("/briefing-assets/pele.global.js"));
     let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap();
     assert!(html.contains(&format!("nonce=\"{nonce}\"")));
 
