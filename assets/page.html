@@ -155,6 +155,16 @@
       --pele-bg: var(--surface); --pele-fg: var(--text); --pele-muted: var(--muted); --pele-line: var(--muted);
       --pele-surface: var(--accent-soft); --pele-surface-alt: var(--bg); --pele-border: var(--accent);
       --pele-accent: var(--accent); --pele-critical: var(--danger); --pele-error: var(--danger); --pele-radius: 8px;
+      /* Pie/series colours, led by the page's teal; checked for colour-blind separation and 3:1
+         contrast on the surface, separately for light and dark. */
+      --pele-series-1: #1d8a72; --pele-series-2: #c97520; --pele-series-3: #4a6fd1; --pele-series-4: #c94f6d;
+      --pele-series-5: #7f9a1f; --pele-series-6: #8e5cc2; --pele-series-7: #a8830f; --pele-series-8: #2596be;
+    }
+    @media (prefers-color-scheme: dark) {
+      .rich-mermaid, .diagram-modal {
+        --pele-series-1: #36a68b; --pele-series-2: #cc7a30; --pele-series-3: #6a88dc; --pele-series-4: #d06c86;
+        --pele-series-5: #839e2c; --pele-series-6: #9c76cc; --pele-series-7: #b08f22; --pele-series-8: #3896bd;
+      }
     }
     .rich-vega-lite .rich-body, .rich-vega-lite .vega-embed { width: 100%; }
     .rich-targetable { cursor: pointer; }
