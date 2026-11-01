@@ -49,7 +49,7 @@ async fn serve_and_check(ip: &str, public_origin: Option<&str>) {
     let origin = format!("http://{}", running.local_addr);
     let canonical_origin = url::Url::parse(&origin).unwrap().origin().ascii_serialization();
     assert_eq!(site.config.public_origin, public_origin.unwrap_or(&canonical_origin));
-    let created = site.create(demo(), Origin::default()).await.unwrap();
+    let created = site.create(demo(), Vec::new(), Origin::default()).await.unwrap();
     assert_eq!(created.url.rsplit_once("/briefing/").unwrap().0, site.config.public_origin);
     // A proxy decides who can reach the link, so the bound address no longer describes it.
     assert_eq!(created.scope, if public_origin.is_some() { Scope::Hub } else { Scope::Explicit });

@@ -468,7 +468,8 @@ impl BriefingMcp {
         Self::require_structured_content(&ctx)?;
         let created: Created = self
             .backend
-            .create(input, self.origin(&ctx))
+            // This server runs where the agent does, usually in its working directory.
+            .create(input, &std::env::current_dir().unwrap_or_default(), self.origin(&ctx))
             .await
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         let opened = if created.opened_browser {

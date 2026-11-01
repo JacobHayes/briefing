@@ -1,5 +1,5 @@
 use std::io::{IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -389,8 +389,20 @@ async fn shutdown_signal() {
     }
 }
 
-async fn present(common: &Common, presentation: Briefing, args: &PresentArgs) -> anyhow::Result<i32> {
-    let created = backend(common)?.create(presentation, cli_origin()).await?;
+/// Relative image paths in a presentation file are taken from the file's directory, and from
+/// the working directory for one piped on stdin.
+async fn present(
+    common: &Common,
+    presentation: Briefing,
+    file: Option<&str>,
+    args: &PresentArgs,
+) -> anyhow::Result<i32> {
+    let cwd = std::env::current_dir()?;
+    let image_dir = match file {
+        Some(file) if file != "-" => cwd.join(file).parent().map(Path::to_path_buf).unwrap_or(cwd),
+        _ => cwd,
+    };
+    let created = backend(common)?.create(presentation, &image_dir, cli_origin()).await?;
     print_created(&created, args.json)?;
     Ok(0)
 }
@@ -567,9 +579,9 @@ async fn run(mut cli: Cli) -> anyhow::Result<i32> {
     match cli.command {
         Command::Present { file, args } => {
             let presentation = read_presentation(file.as_deref())?;
-            present(&cli.common, presentation, &args).await
+            present(&cli.common, presentation, file.as_deref(), &args).await
         }
-        Command::Demo { args } => present(&cli.common, content::demo(), &args).await,
+        Command::Demo { args } => present(&cli.common, content::demo(), None, &args).await,
         Command::Mcp { hold } => {
             run_mcp_stdio(&cli.common, hold).await?;
             Ok(0)

@@ -30,7 +30,7 @@ async fn client_and_browser_roundtrip() {
     briefing::tls::init();
     let (site, running) = start_hub(HubConfig::default(), 0).await;
     let backend = client_of(&site.config.public_origin);
-    let created = backend.create(demo(), Origin::source("test")).await.unwrap();
+    let created = backend.create(demo(), std::path::Path::new("."), Origin::source("test")).await.unwrap();
     assert!(created.url.starts_with("http://127.0.0.1:"));
     assert_eq!(created.scope, Scope::Local);
     assert!(!created.opened_browser);
@@ -164,7 +164,7 @@ async fn a_restarted_hub_keeps_briefings_and_links() {
     let (site, running) = start_hub(config(), 0).await;
     let port = running.local_addr.port();
     let origin = site.config.public_origin.clone();
-    let created = client_of(&origin).create(demo(), Origin::source("first")).await.unwrap();
+    let created = client_of(&origin).create(demo(), std::path::Path::new("."), Origin::source("first")).await.unwrap();
     let draft = json!({"current": 1, "state": {"questions": {}, "annotations": [], "notes": []}, "updatedAt": 7});
     let saved = client
         .put(format!("{origin}/api/{}/draft", created.id))
@@ -400,5 +400,47 @@ async fn previous_protocol_clients_and_version_negotiation() {
     assert_eq!(unknown.status(), 400);
     assert!(unknown.text().await.unwrap().contains("unknown field `decision`"));
 
+    running.stop().await;
+}
+
+/// A local image travels with the presentation, is served to the page from the hub after a
+/// restart, and goes when the briefing expires.
+#[tokio::test]
+async fn local_images_are_uploaded_served_and_expired() {
+    briefing::tls::init();
+    let files = tempfile::tempdir().unwrap();
+    let png = b"\x89PNG\r\n\x1a\nnot really pixels".to_vec();
+    std::fs::write(files.path().join("shot.png"), &png).unwrap();
+    let mut presentation = demo();
+    presentation.chunks[0].details = Some("Here it is:\n\n![the shot](shot.png)".into());
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = || HubConfig { store: Some(Store::open(dir.path()).unwrap()), ..HubConfig::default() };
+    let client = common::client();
+    let (site, running) = start_hub(config(), 0).await;
+    let port = running.local_addr.port();
+    let origin = site.config.public_origin.clone();
+    let created = client_of(&origin).create(presentation, files.path(), Origin::source("test")).await.unwrap();
+    running.stop().await;
+
+    let (_site, running) = start_hub(config(), port).await;
+    let page: Value =
+        client.get(format!("{origin}/api/{}/presentation", created.id)).send().await.unwrap().json().await.unwrap();
+    let details = page["chunks"][0]["details"].as_str().unwrap();
+    let src = details.split_once("](").unwrap().1.trim_end_matches(')');
+    let name = src.strip_prefix(briefing::images::SCHEME).expect("the reference points at the upload");
+    let image = client.get(format!("{origin}/briefing/{}/images/{name}", created.id)).send().await.unwrap();
+    assert_eq!(image.status(), 200);
+    assert_eq!(image.headers()["content-type"], "image/png");
+    assert_eq!(image.bytes().await.unwrap().to_vec(), png);
+    let missing = client.get(format!("{origin}/briefing/{}/images/9", created.id)).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    running.stop().await;
+
+    let expired = HubConfig { active_ttl: Duration::ZERO, ..config() };
+    let (_site, running) = start_hub(expired, port).await;
+    let gone = client.get(format!("{origin}/briefing/{}/images/{name}", created.id)).send().await.unwrap();
+    assert_eq!(gone.status(), 404);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "the record and its images are removed");
     running.stop().await;
 }

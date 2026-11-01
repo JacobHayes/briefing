@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use crate::content::Briefing;
 use crate::hub::{BriefingStatus, Origin};
+use crate::images::{self, Image};
 use crate::migrate::{self, Migration};
 use crate::response::BriefingResponse;
 
@@ -118,6 +119,36 @@ impl Store {
         if let Some(path) = self.path(id) {
             let _ = std::fs::remove_file(path);
         }
+        if let Some(dir) = self.images_dir(id) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// A briefing's images live in `<id>.images/<name>` beside its record, and go with it.
+    fn images_dir(&self, id: &str) -> Option<PathBuf> {
+        self.path(id).map(|path| path.with_extension("images"))
+    }
+
+    pub fn save_images(&self, id: &str, images: &[Image]) -> std::io::Result<()> {
+        if images.is_empty() {
+            return Ok(());
+        }
+        let dir = self.images_dir(id).ok_or_else(|| std::io::Error::other("invalid briefing id"))?;
+        std::fs::create_dir_all(&dir)?;
+        for image in images {
+            if !images::valid_name(&image.name) {
+                return Err(std::io::Error::other("invalid image name"));
+            }
+            write_atomic(&dir.join(&image.name), &image.data)?;
+        }
+        Ok(())
+    }
+
+    pub fn load_image(&self, id: &str, name: &str) -> Option<Vec<u8>> {
+        if !images::valid_name(name) {
+            return None;
+        }
+        std::fs::read(self.images_dir(id)?.join(name)).ok()
     }
 
     pub fn list(&self) -> Vec<StoredRecord> {

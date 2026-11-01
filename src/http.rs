@@ -26,12 +26,15 @@ use crate::assets;
 use crate::backend::Site;
 use crate::content::{self, Briefing};
 use crate::hub::{DraftSave, HubError, Origin, random_token};
+use crate::images::{self, Image};
 use crate::protocol;
 use crate::response::BriefingOutcome;
 
 /// Browser submission cap: 500 annotations of 2 KB quote + 4 KB comment plus notes fits well inside.
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AGENT_REQUEST_BYTES: usize = content::MAX_PRESENTATION_BYTES + 64 * 1024;
+/// A create can carry images, base64-encoded (4 bytes for every 3).
+pub const MAX_CREATE_REQUEST_BYTES: usize = MAX_AGENT_REQUEST_BYTES + images::MAX_TOTAL_IMAGE_BYTES / 3 * 4 + 64 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 
@@ -253,6 +256,20 @@ async fn page(State(state): State<AppState>, Path(id): Path<String>) -> Response
     html(assets::render(assets::PAGE_HTML, &nonce), csp)
 }
 
+/// An image uploaded with a briefing. Fetched by `<img>`, which sends no protocol header; the
+/// briefing id is the capability, as for the page itself.
+async fn image(State(state): State<AppState>, Path((id, name)): Path<(String, String)>) -> Result<Response, HubError> {
+    let bytes = state.hub.image(&id, &name).ok_or(HubError::NotFound)?;
+    let media_type = images::media_type(&bytes).ok_or(HubError::NotFound)?;
+    let mut response = Response::new(Body::from(bytes));
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(media_type));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=31536000, immutable"));
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'"));
+    Ok(response)
+}
+
 async fn dashboard() -> Response {
     let nonce = random_token(18);
     let csp = format!(
@@ -346,6 +363,10 @@ async fn save_draft(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateRequest {
     pub presentation: Briefing,
+    /// Local images the presentation refers to as `briefing-image:<name>`. Left out when there
+    /// are none, so a hub that predates images still accepts the request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
     /// Who created it, e.g. `claude-code@laptop`; shown on the dashboard.
     #[serde(flatten)]
     pub origin: Origin,
@@ -364,7 +385,7 @@ async fn agent_create(
         Ok(body) => body,
         Err(error) => return json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()})),
     };
-    match site.create(body.presentation, body.origin).await {
+    match site.create(body.presentation, body.images, body.origin).await {
         Ok(created) => {
             let mut created = serde_json::to_value(created).unwrap_or_default();
             if protocol == 2 {
@@ -443,6 +464,7 @@ pub fn router(site: Arc<Site>, mcp: Option<Router<Arc<Site>>>) -> Router {
         .route("/healthz", get(healthz))
         .route(&format!("{}{{name}}", assets::ASSET_PREFIX), get(asset))
         .route("/briefing/{id}", get(page))
+        .route("/briefing/{id}/images/{name}", get(image))
         .route("/", get(dashboard))
         .route("/control/shutdown", post(control_shutdown));
     if let Some(mcp) = mcp {
@@ -455,7 +477,10 @@ pub fn router(site: Arc<Site>, mcp: Option<Router<Arc<Site>>>) -> Router {
         .route("/api/{id}/cancel", post(cancel_from_browser))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES));
     let agent_api = Router::new()
-        .route("/agent/briefings", post(agent_create).get(agent_list))
+        .route(
+            "/agent/briefings",
+            post(agent_create).layer(DefaultBodyLimit::max(MAX_CREATE_REQUEST_BYTES)).get(agent_list),
+        )
         .route("/agent/briefings/{id}", get(agent_info))
         .route("/agent/briefings/{id}/wait", get(agent_wait))
         .route("/agent/briefings/{id}/cancel", post(agent_cancel))

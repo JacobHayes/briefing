@@ -52,7 +52,9 @@ fn rich_text_guidance() -> String {
     "Text fields accept Markdown, GFM tables, fenced code with a language tag, and ```mermaid and ```vega-lite fences, \
      which render as diagrams and charts the user can comment on. Use a Mermaid diagram whenever structure is \
      easier to see than read (flows, architecture, sequences, state machines, dependencies), and a Vega-Lite chart for \
-     magnitudes or trends; skip them when they would only decorate."
+     magnitudes or trends; skip them when they would only decorate. Show an image with `![alt](path)`: an https URL, \
+     or a PNG, JPEG, GIF or WebP file on this machine (an absolute path, or relative to your working directory), which \
+     is uploaded with the briefing; use one when seeing it beats describing it, such as a screenshot of the change."
         .into()
 }
 

@@ -101,7 +101,7 @@ pub struct Tray {
     pub open_questions: Option<Vec<String>>,
 }
 
-/// A paced browser briefing: semantic chunks in dependency order, optional context panel, and questions. Every prose field accepts Markdown (GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, ```vega-lite fences for charts); use them only when they clarify.
+/// A paced browser briefing: semantic chunks in dependency order, optional context panel, and questions. Every prose field accepts Markdown (GFM tables, fenced code with a language tag, ```mermaid fences for flows/architecture/state, ```vega-lite fences for charts, `![alt](path)` images from an https URL or a local PNG/JPEG/GIF/WebP file); use them only when they clarify.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Briefing {

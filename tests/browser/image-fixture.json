@@ -1,0 +1,11 @@
+{
+  "title": "Images",
+  "goal": "Show an attached screenshot",
+  "chunks": [
+    {
+      "title": "A screenshot",
+      "mainPoint": "A local image is attached and shown.",
+      "details": "Before the image.\n\n![A test pattern](image.png)\n\nAfter the image."
+    }
+  ]
+}

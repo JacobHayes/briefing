@@ -360,3 +360,24 @@ test("on a pinch-zoomed page the arrow keys change screen at the top, keeping th
   }
   await done(page);
 });
+
+test("an attached local image shows within the column and enlarges on tap", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 800 } });
+  const page = await context.newPage();
+  page.errors = [];
+  page.on("pageerror", error => page.errors.push(error.message));
+  await page.goto(await serveFile(join(dirname(FIXTURE), "image-fixture.json")));
+  const image = page.locator("img.md-image");
+  await image.waitFor();
+  await page.waitForFunction(() => document.querySelector("img.md-image").complete);
+  const shown = await image.evaluate(img => ({ natural: img.naturalWidth, right: img.getBoundingClientRect().right, column: img.closest("main").getBoundingClientRect().right }));
+  assert.equal(shown.natural, 160, "the uploaded file loads");
+  assert.ok(shown.right <= shown.column, "the image fits the column");
+  await image.click();
+  const enlarged = page.locator("dialog[open] img");
+  await enlarged.waitFor();
+  assert.ok((await enlarged.evaluate(img => img.getBoundingClientRect().width)) > shown.natural, "the enlarged copy is bigger");
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("dialog[open]").count(), 0);
+  await done(page);
+});

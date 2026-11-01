@@ -181,6 +181,10 @@
     .diagram-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px 0 20px; }
     .diagram-modal-body { flex: 1; min-height: 0; padding: clamp(12px, 3vw, 32px); display: grid; place-items: center; }
     .diagram-modal-body svg { width: 100%; height: 100%; max-width: 100% !important; max-height: 100%; display: block; }
+    .diagram-modal-body img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .markdown img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; vertical-align: middle; }
+    .markdown img.md-image { cursor: zoom-in; }
+    .markdown img.md-image:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
     .vega-embed details { display: none; }
 
     /* Text entry */
@@ -429,6 +433,9 @@
 
     function safeImageUrl(value) {
       const raw = String(value || "").trim();
+      // A local image the agent attached: the hub serves it beside the page.
+      const uploaded = /^briefing-image:(\d{1,3})$/.exec(raw);
+      if (uploaded) return presentation ? location.origin + "/briefing/" + encodeURIComponent(presentation.id) + "/images/" + uploaded[1] : null;
       if (/^data:image\/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$/i.test(raw)) return raw;
       return safeMarkdownUrl(raw);
     }
@@ -520,8 +527,13 @@
       });
       root.querySelectorAll("img[src]").forEach(image => {
         const safe = safeImageUrl(image.getAttribute("src"));
-        if (!safe) image.remove();
-        else image.setAttribute("src", safe);
+        if (!safe) { image.remove(); return; }
+        image.setAttribute("src", safe);
+        // Tap or Enter shows it full screen.
+        image.classList.add("md-image");
+        image.setAttribute("tabindex", "0");
+        image.setAttribute("role", "button");
+        image.setAttribute("aria-label", "Enlarge image" + (image.alt ? ": " + image.alt : ""));
       });
     }
 
@@ -721,8 +733,6 @@
     // A read-only copy of a diagram filling most of the screen. The SVG keeps its viewBox, so it
     // scales to the dialog without changing its aspect ratio.
     function openDiagram(svg, returnFocus) {
-      hidePopover();
-      hideCommentButton();
       const copy = svg.cloneNode(true);
       copy.removeAttribute("width");
       copy.removeAttribute("height");
@@ -731,11 +741,22 @@
         node.removeAttribute("tabindex");
         node.removeAttribute("role");
       });
-      const dialog = el("dialog", { class: "diagram-modal", "aria-label": "Diagram" });
+      openViewer(copy, "Mermaid diagram", "Diagram", returnFocus);
+    }
+
+    function openImage(image) {
+      const copy = el("img", { src: image.src, alt: image.alt || "" });
+      openViewer(copy, image.alt || "Image", "Image", image);
+    }
+
+    function openViewer(content, title, label, returnFocus) {
+      hidePopover();
+      hideCommentButton();
+      const dialog = el("dialog", { class: "diagram-modal", "aria-label": label });
       const close = el("button", { class: "ghost", type: "button", text: "Close", onclick: () => dialog.close() });
       dialog.append(
-        el("div", { class: "diagram-modal-head" }, [el("span", { class: "rich-title", text: "Mermaid diagram" }), close]),
-        el("div", { class: "diagram-modal-body" }, copy),
+        el("div", { class: "diagram-modal-head" }, [el("span", { class: "rich-title", text: title }), close]),
+        el("div", { class: "diagram-modal-body" }, content),
       );
       // A click on the backdrop lands on the dialog element itself.
       dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
@@ -2389,6 +2410,9 @@
     }
 
     document.addEventListener("click", event => {
+      const image = event.target.closest?.("img.md-image");
+      // A drag that selected text is a selection, not a tap.
+      if (image && !String(window.getSelection() || "")) { event.preventDefault(); openImage(image); return; }
       const link = event.target.closest?.('a[href^="#section-"]');
       if (!link || !SECTION_LINK.test(link.getAttribute("href"))) return;
       event.preventDefault();
@@ -2397,6 +2421,7 @@
     });
 
     document.addEventListener("keydown", event => {
+      if ((event.key === "Enter" || event.key === " ") && event.target.matches?.("img.md-image")) { event.preventDefault(); openImage(event.target); return; }
       if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement || submitted || event.shiftKey || document.querySelector("dialog[open]")) return;
       // Claim the key: on a pinch-zoomed page the browser would also pan the view sideways.
       if (event.key === "ArrowLeft" && current > 0) { event.preventDefault(); current--; save(); render({ top: true }); }

@@ -43,7 +43,7 @@ flowchart LR
 | ![The Outline sidebar listing each section with its open questions](docs/screenshots/07-outline.png) | ![A Mermaid diagram rendered in dark mode](docs/screenshots/08-dark.png) |
 | The **Outline** jumps to any section and shows what's still open; **Notes** shares the sidebar. | Light and dark follow your system, diagrams included. |
 | ![A Mermaid diagram inside a chunk with its own Comment button](docs/screenshots/02-rich-content.png) | ![A Vega-Lite bar chart inside a chunk](docs/screenshots/02b-chart.png) |
-| Markdown, GFM tables, code, and Mermaid diagrams render inline; nodes and edges are commentable, and a diagram expands to fill the screen. | Vega-Lite charts too, all served from the binary with no CDN. |
+| Markdown, GFM tables, code, and Mermaid diagrams render inline; nodes and edges are commentable, and a diagram expands to fill the screen. | Vega-Lite charts too, all served from the binary with no CDN. Images as well, from a URL or a local file. |
 
 Try it yourself: `briefing demo`.
 
@@ -99,6 +99,13 @@ block is a one-line summary because Claude Code hands the model only the structu
 All three tools (`brief_user`, `await_briefing`, `cancel_briefing`) declare an
 `outputSchema`. Caps: 500 inline comments, 4 000-character comments, 100 free-standing notes,
 20 000-character notes.
+
+Images use ordinary Markdown, `![alt](path)`. A local PNG, JPEG, GIF or WebP file (absolute,
+or relative to the agent's working directory, or to the presentation file for `briefing
+present`) is read by the CLI or the local `briefing mcp` server, uploaded with the
+briefing, and kept with it: up to 20 images, 10 MB each and 25 MB in all. A hub's own `/mcp`
+endpoint runs on the hub, not the agent's machine, so it takes https URLs only. Tap an image
+to see it full screen.
 
 The page itself is a single calm reading column: `Step X of Y`, Back and Next, an **Outline**
 to jump to any section, and no timers or auto-advance. The full interaction model, the

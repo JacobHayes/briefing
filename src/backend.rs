@@ -2,6 +2,7 @@
 //! `--hub`, or this machine's own [`LocalHub`] - except the hub's own `/mcp`, which uses the
 //! [`Site`] it is part of.
 
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use crate::browser;
 use crate::content::{self, Briefing};
 use crate::http::{self, HttpConfig, RunningServer};
 use crate::hub::{BriefingInfo, Hub, Origin, SWEEP_EVERY};
+use crate::images::{self, Image, LocalFiles};
 use crate::local_hub::LocalHub;
 use crate::response::{BriefingOutcome, Outcome};
 
@@ -84,9 +86,10 @@ impl Site {
 
     /// Validate and register a presentation. Opening a browser is the creating [`Backend`]'s
     /// job, not the server's.
-    pub async fn create(&self, presentation: Briefing, origin: Origin) -> anyhow::Result<Created> {
+    pub async fn create(&self, presentation: Briefing, images: Vec<Image>, origin: Origin) -> anyhow::Result<Created> {
         let validated = content::validate(&presentation)?;
-        let id = self.hub.create(validated, origin)?;
+        images::validate(&validated, &images)?;
+        let id = self.hub.create(validated, images, origin)?;
         let url = self.config.briefing_url(&id);
         Ok(Created { id, url, scope: self.scope, opened_browser: false })
     }
@@ -119,6 +122,7 @@ fn start_hub_sweeper(hub: Arc<Hub>, shutdown: CancellationToken, every: Duration
 }
 
 const HUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const HUB_UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a configured hub may stay unreachable before a wait on it gives up: long enough to
 /// ride through a restart or upgrade, short enough that a hub that is really gone surfaces as
 /// an error.
@@ -231,13 +235,15 @@ impl RemoteBackend {
         anyhow::bail!("hub returned {status}: {detail}")
     }
 
-    pub async fn create(&self, presentation: Briefing, origin: Origin) -> anyhow::Result<Created> {
+    pub async fn create(&self, presentation: Briefing, images: Vec<Image>, origin: Origin) -> anyhow::Result<Created> {
+        // Images can make this request tens of megabytes.
+        let timeout = if images.is_empty() { HUB_REQUEST_TIMEOUT } else { HUB_UPLOAD_TIMEOUT };
         let value = self
             .request(
                 ::http::Method::POST,
                 "/agent/briefings",
-                Some(serde_json::to_value(http::CreateRequest { presentation, origin })?),
-                HUB_REQUEST_TIMEOUT,
+                Some(serde_json::to_value(http::CreateRequest { presentation, images, origin })?),
+                timeout,
             )
             .await?;
         Ok(serde_json::from_value(value)?)
@@ -356,11 +362,22 @@ impl Backend {
 
     /// Create a briefing and, when configured, try to open it in this machine's browser. The
     /// briefing is live either way, so a failed opener is only a warning: the caller still has
-    /// the link to show.
-    pub async fn create(&self, presentation: Briefing, origin: Origin) -> anyhow::Result<Created> {
+    /// the link to show. Local images in its Markdown are read from this machine, with relative
+    /// paths taken from `image_dir`; the hub's own `/mcp` never reads them.
+    pub async fn create(
+        &self,
+        mut presentation: Briefing,
+        image_dir: &Path,
+        origin: Origin,
+    ) -> anyhow::Result<Created> {
+        let files = match self.kind {
+            BackendKind::Site(_) => LocalFiles::Refused,
+            _ => LocalFiles::From(image_dir.to_path_buf()),
+        };
+        let images = images::collect(&mut presentation, &files)?;
         let mut created = match self.connect().await? {
-            Conn::Http(remote) => remote.create(presentation, origin).await?,
-            Conn::Site(site) => site.create(presentation, origin).await?,
+            Conn::Http(remote) => remote.create(presentation, images, origin).await?,
+            Conn::Site(site) => site.create(presentation, images, origin).await?,
         };
         if self.open_browser {
             match browser::open_url(&created.url).await {
@@ -439,7 +456,7 @@ mod tests {
     async fn background_sweeper_expires_records() {
         let hub =
             Arc::new(Hub::new(HubConfig { finished_ttl: Duration::ZERO, active_ttl: Duration::ZERO, store: None }));
-        let created = hub.create(content::demo(), Origin::default()).unwrap();
+        let created = hub.create(content::demo(), Vec::new(), Origin::default()).unwrap();
         let shutdown = CancellationToken::new();
         let task = start_hub_sweeper(hub.clone(), shutdown.clone(), Duration::from_millis(10));
 
@@ -462,7 +479,7 @@ mod tests {
         let (site, running) = Site::start(hub, BindTarget::local(None), 0, None, |_| None).await.unwrap();
         let origin = site.config.public_origin.clone();
         let remote = RemoteBackend::new(&origin).unwrap();
-        let created = remote.create(content::demo(), Origin::source("test")).await.unwrap();
+        let created = remote.create(content::demo(), Vec::new(), Origin::source("test")).await.unwrap();
 
         let (submit_origin, id) = (origin.clone(), created.id.clone());
         let submitter = tokio::spawn(async move {
@@ -519,7 +536,7 @@ mod tests {
         let (site, running) = Site::start(hub.clone(), BindTarget::local(None), port, None, |_| None).await.unwrap();
         let origin = site.config.public_origin.clone();
         let remote = RemoteBackend::new(&origin).unwrap();
-        let created = remote.create(content::demo(), Origin::source("test")).await.unwrap();
+        let created = remote.create(content::demo(), Vec::new(), Origin::source("test")).await.unwrap();
         running.stop().await;
 
         let (restart_origin, id) = (origin.clone(), created.id.clone());

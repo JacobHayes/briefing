@@ -9,6 +9,7 @@ pub mod content;
 pub mod guidance;
 pub mod http;
 pub mod hub;
+pub mod images;
 pub mod local_hub;
 pub mod mcp;
 pub mod migrate;
