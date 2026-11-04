@@ -2,6 +2,7 @@
 //! an MCP server (stdio or streamable HTTP), and a shared hub.
 
 pub mod assets;
+pub mod attachments;
 pub mod backend;
 pub mod bind;
 pub mod browser;
@@ -9,7 +10,6 @@ pub mod content;
 pub mod guidance;
 pub mod http;
 pub mod hub;
-pub mod images;
 pub mod local_hub;
 pub mod mcp;
 pub mod migrate;

@@ -10,14 +10,15 @@ use axum::Router;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
+use crate::attachments::{self, LocalAttachment, LocalFiles};
 use crate::bind::{BindTarget, Scope};
 use crate::browser;
 use crate::content::{self, Briefing};
 use crate::http::{self, HttpConfig, RunningServer};
 use crate::hub::{BriefingInfo, Hub, Origin, SWEEP_EVERY};
-use crate::images::{self, Image, LocalFiles};
 use crate::local_hub::LocalHub;
 use crate::response::{BriefingOutcome, Outcome};
+use crate::store::Staged;
 
 /// What a caller learns after creating a briefing.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -86,10 +87,15 @@ impl Site {
 
     /// Validate and register a presentation. Opening a browser is the creating [`Backend`]'s
     /// job, not the server's.
-    pub async fn create(&self, presentation: Briefing, images: Vec<Image>, origin: Origin) -> anyhow::Result<Created> {
+    pub async fn create(
+        &self,
+        presentation: Briefing,
+        staged: Option<Staged>,
+        origin: Origin,
+    ) -> anyhow::Result<Created> {
         let validated = content::validate(&presentation)?;
-        images::validate(&validated, &images)?;
-        let id = self.hub.create(validated, images, origin)?;
+        attachments::validate(&validated, staged.as_ref().map(|s| s.attachments.as_slice()).unwrap_or_default())?;
+        let id = self.hub.create(validated, staged, origin)?;
         let url = self.config.briefing_url(&id);
         Ok(Created { id, url, scope: self.scope, opened_browser: false })
     }
@@ -141,13 +147,27 @@ struct HubRequestTimeout;
 #[error("hub at {0} is not reachable")]
 pub struct HubUnreachable(String);
 
+type RequestBody = http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, std::io::Error>;
+
+/// What a request to the hub carries.
+enum Payload {
+    None,
+    Json(serde_json::Value),
+    /// A `multipart/form-data` body of `len` bytes, streamed.
+    Multipart {
+        boundary: String,
+        body: RequestBody,
+        len: u64,
+    },
+}
+
 /// Minimal HTTP(S) client for the hub API: hyper + rustls with bundled webpki roots, so the
 /// binary cross-compiles without platform TLS frameworks. Clones share one connection pool.
 #[derive(Clone)]
 pub struct RemoteBackend {
     client: hyper_util::client::legacy::Client<
         hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-        http_body_util::Full<bytes::Bytes>,
+        RequestBody,
     >,
     base: String,
 }
@@ -177,7 +197,7 @@ impl RemoteBackend {
         &self,
         method: ::http::Method,
         path: &str,
-        body: Option<serde_json::Value>,
+        payload: Payload,
         timeout: Duration,
     ) -> anyhow::Result<serde_json::Value> {
         use http_body_util::BodyExt;
@@ -187,14 +207,23 @@ impl RemoteBackend {
             .uri(uri)
             .header(::http::header::ACCEPT, "application/json")
             .header(crate::protocol::HEADER, crate::protocol::PROTOCOL.to_string());
-        let payload = match body {
-            Some(value) => {
-                request = request.header(::http::header::CONTENT_TYPE, "application/json");
-                serde_json::to_vec(&value)?
-            }
-            None => Vec::new(),
+        let full = |bytes: Vec<u8>| {
+            http_body_util::Full::new(bytes::Bytes::from(bytes)).map_err(|never| match never {}).boxed_unsync()
         };
-        let request = request.body(http_body_util::Full::new(bytes::Bytes::from(payload)))?;
+        let body = match payload {
+            Payload::None => full(Vec::new()),
+            Payload::Json(value) => {
+                request = request.header(::http::header::CONTENT_TYPE, "application/json");
+                full(serde_json::to_vec(&value)?)
+            }
+            Payload::Multipart { boundary, body, len } => {
+                request = request
+                    .header(::http::header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+                    .header(::http::header::CONTENT_LENGTH, len);
+                body
+            }
+        };
+        let request = request.body(body)?;
         let response = tokio::time::timeout(timeout, self.client.request(request))
             .await
             .map_err(|_| HubRequestTimeout)?
@@ -235,17 +264,21 @@ impl RemoteBackend {
         anyhow::bail!("hub returned {status}: {detail}")
     }
 
-    pub async fn create(&self, presentation: Briefing, images: Vec<Image>, origin: Origin) -> anyhow::Result<Created> {
-        // Images can make this request tens of megabytes.
-        let timeout = if images.is_empty() { HUB_REQUEST_TIMEOUT } else { HUB_UPLOAD_TIMEOUT };
-        let value = self
-            .request(
-                ::http::Method::POST,
-                "/agent/briefings",
-                Some(serde_json::to_value(http::CreateRequest { presentation, images, origin })?),
-                timeout,
-            )
-            .await?;
+    pub async fn create(
+        &self,
+        presentation: Briefing,
+        attachments: Vec<LocalAttachment>,
+        origin: Origin,
+    ) -> anyhow::Result<Created> {
+        let request = serde_json::to_value(http::CreateRequest { presentation, origin })?;
+        let (payload, timeout) = if attachments.is_empty() {
+            (Payload::Json(request), HUB_REQUEST_TIMEOUT)
+        } else {
+            let (payload, len) = multipart(&request, attachments)?;
+            // Allow for a slow uplink: a video can be gigabytes.
+            (payload, HUB_UPLOAD_TIMEOUT + Duration::from_secs(len / UPLOAD_BYTES_PER_SEC))
+        };
+        let value = self.request(::http::Method::POST, "/agent/briefings", payload, timeout).await?;
         Ok(serde_json::from_value(value)?)
     }
 
@@ -272,7 +305,7 @@ impl RemoteBackend {
             }
             let slice = remaining.min(max_slice);
             let path = format!("/agent/briefings/{id}/wait?timeout_secs={}", slice.as_secs().max(1));
-            let value = match self.request(::http::Method::GET, &path, None, slice + request_timeout).await {
+            let value = match self.request(::http::Method::GET, &path, Payload::None, slice + request_timeout).await {
                 Ok(value) => value,
                 // A remote long-poll can outlive one HTTP request even though the briefing is
                 // still valid on the hub. Treat transport timeouts as "still pending" and
@@ -299,13 +332,16 @@ impl RemoteBackend {
 
     pub async fn cancel(&self, id: &str) -> anyhow::Result<bool> {
         let value = self
-            .request(::http::Method::POST, &format!("/agent/briefings/{id}/cancel"), None, HUB_REQUEST_TIMEOUT)
+            .request(::http::Method::POST, &format!("/agent/briefings/{id}/cancel"), Payload::None, HUB_REQUEST_TIMEOUT)
             .await?;
         Ok(value["cancelled"].as_bool().unwrap_or(false))
     }
 
     pub async fn info(&self, id: &str) -> anyhow::Result<Option<BriefingInfo>> {
-        match self.request(::http::Method::GET, &format!("/agent/briefings/{id}"), None, HUB_REQUEST_TIMEOUT).await {
+        match self
+            .request(::http::Method::GET, &format!("/agent/briefings/{id}"), Payload::None, HUB_REQUEST_TIMEOUT)
+            .await
+        {
             Ok(value) => Ok(Some(serde_json::from_value(value)?)),
             Err(error) if error.is::<NotFound>() => Ok(None),
             Err(error) => Err(error),
@@ -313,10 +349,62 @@ impl RemoteBackend {
     }
 
     pub async fn list(&self) -> anyhow::Result<Vec<BriefingInfo>> {
-        let value = self.request(::http::Method::GET, "/agent/briefings", None, HUB_REQUEST_TIMEOUT).await?;
+        let value = self.request(::http::Method::GET, "/agent/briefings", Payload::None, HUB_REQUEST_TIMEOUT).await?;
         let list: RemoteList = serde_json::from_value(value)?;
         Ok(list.briefings)
     }
+}
+
+/// The slowest upload a create waits for.
+const UPLOAD_BYTES_PER_SEC: u64 = 256 * 1024;
+
+/// A multipart create: the request, then each attachment read from disk as it is sent.
+fn multipart(request: &serde_json::Value, attachments: Vec<LocalAttachment>) -> anyhow::Result<(Payload, u64)> {
+    use futures_util::{StreamExt, TryStreamExt};
+    use http_body_util::BodyExt;
+    use tokio::io::AsyncReadExt;
+    enum Part {
+        Bytes(bytes::Bytes),
+        File(LocalAttachment),
+    }
+    let boundary = format!("briefing-{}", crate::hub::random_token(18));
+    let header = |name: &str, content_type: &str| {
+        let filename = if name == http::CREATE_PART { String::new() } else { format!("; filename=\"{name}\"") };
+        bytes::Bytes::from(format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"{filename}\r\nContent-Type: {content_type}\r\n\r\n"
+        ))
+    };
+    let mut parts = vec![
+        Part::Bytes(header(http::CREATE_PART, "application/json")),
+        Part::Bytes(serde_json::to_vec(request)?.into()),
+    ];
+    for attachment in attachments {
+        parts.push(Part::Bytes(bytes::Bytes::from_static(b"\r\n")));
+        parts.push(Part::Bytes(header(&attachment.name, "application/octet-stream")));
+        parts.push(Part::File(attachment));
+    }
+    parts.push(Part::Bytes(bytes::Bytes::from(format!("\r\n--{boundary}--\r\n"))));
+    let len = parts
+        .iter()
+        .map(|part| match part {
+            Part::Bytes(bytes) => bytes.len() as u64,
+            Part::File(attachment) => attachment.len,
+        })
+        .sum();
+    let stream = futures_util::stream::iter(parts)
+        .map(|part| match part {
+            Part::Bytes(bytes) => futures_util::stream::once(async { Ok(bytes) }).boxed(),
+            // Exactly the length announced: a file that changed since is cut off or comes up
+            // short, and a short body fails the request.
+            Part::File(attachment) => futures_util::stream::once(tokio::fs::File::open(attachment.path))
+                .map_ok(move |file| tokio_util::io::ReaderStream::new(file.take(attachment.len)))
+                .try_flatten()
+                .boxed(),
+        })
+        .flatten()
+        .map_ok(http_body::Frame::data);
+    let body = http_body_util::StreamBody::new(stream).boxed_unsync();
+    Ok((Payload::Multipart { boundary, body, len }, len))
 }
 
 /// The hub answered 404.
@@ -362,7 +450,7 @@ impl Backend {
 
     /// Create a briefing and, when configured, try to open it in this machine's browser. The
     /// briefing is live either way, so a failed opener is only a warning: the caller still has
-    /// the link to show. Local images in its Markdown are read from this machine, with relative
+    /// the link to show. Local images and videos in its Markdown are read from this machine, with relative
     /// paths taken from `image_dir`; the hub's own `/mcp` never reads them.
     pub async fn create(
         &self,
@@ -374,10 +462,11 @@ impl Backend {
             BackendKind::Site(_) => LocalFiles::Refused,
             _ => LocalFiles::From(image_dir.to_path_buf()),
         };
-        let images = images::collect(&mut presentation, &files)?;
+        let attachments = attachments::collect(&mut presentation, &files)?;
         let mut created = match self.connect().await? {
-            Conn::Http(remote) => remote.create(presentation, images, origin).await?,
-            Conn::Site(site) => site.create(presentation, images, origin).await?,
+            Conn::Http(remote) => remote.create(presentation, attachments, origin).await?,
+            // Never any: local files are refused above.
+            Conn::Site(site) => site.create(presentation, None, origin).await?,
         };
         if self.open_browser {
             match browser::open_url(&created.url).await {
@@ -456,7 +545,7 @@ mod tests {
     async fn background_sweeper_expires_records() {
         let hub =
             Arc::new(Hub::new(HubConfig { finished_ttl: Duration::ZERO, active_ttl: Duration::ZERO, store: None }));
-        let created = hub.create(content::demo(), Vec::new(), Origin::default()).unwrap();
+        let created = hub.create(content::demo(), None, Origin::default()).unwrap();
         let shutdown = CancellationToken::new();
         let task = start_hub_sweeper(hub.clone(), shutdown.clone(), Duration::from_millis(10));
 

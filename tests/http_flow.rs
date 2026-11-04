@@ -6,6 +6,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use briefing::attachments::Kind;
 use briefing::backend::{Backend, BackendKind, RemoteBackend, Site};
 use briefing::bind::{BindTarget, Scope};
 use briefing::content::demo;
@@ -403,16 +404,18 @@ async fn previous_protocol_clients_and_version_negotiation() {
     running.stop().await;
 }
 
-/// A local image travels with the presentation, is served to the page from the hub after a
-/// restart, and goes when the briefing expires.
+/// Local images and videos stream to the hub with the presentation, are served to the page
+/// (videos in byte ranges) after a restart, and go when the briefing expires.
 #[tokio::test]
-async fn local_images_are_uploaded_served_and_expired() {
+async fn local_attachments_are_uploaded_served_and_expired() {
     briefing::tls::init();
     let files = tempfile::tempdir().unwrap();
     let png = b"\x89PNG\r\n\x1a\nnot really pixels".to_vec();
+    let mp4 = [&b"\0\0\0\x20ftypisom"[..], &vec![7u8; 3 << 20]].concat();
     std::fs::write(files.path().join("shot.png"), &png).unwrap();
+    std::fs::write(files.path().join("demo.mp4"), &mp4).unwrap();
     let mut presentation = demo();
-    presentation.chunks[0].details = Some("Here it is:\n\n![the shot](shot.png)".into());
+    presentation.chunks[0].details = Some("Here it is:\n\n![the shot](shot.png)\n\n![the demo](demo.mp4)".into());
 
     let dir = tempfile::tempdir().unwrap();
     let config = || HubConfig { store: Some(Store::open(dir.path()).unwrap()), ..HubConfig::default() };
@@ -427,19 +430,29 @@ async fn local_images_are_uploaded_served_and_expired() {
     let page: Value =
         client.get(format!("{origin}/api/{}/presentation", created.id)).send().await.unwrap().json().await.unwrap();
     let details = page["chunks"][0]["details"].as_str().unwrap();
-    let src = details.split_once("](").unwrap().1.trim_end_matches(')');
-    let name = src.strip_prefix(briefing::images::SCHEME).expect("the reference points at the upload");
-    let image = client.get(format!("{origin}/briefing/{}/images/{name}", created.id)).send().await.unwrap();
-    assert_eq!(image.status(), 200);
-    assert_eq!(image.headers()["content-type"], "image/png");
-    assert_eq!(image.bytes().await.unwrap().to_vec(), png);
-    let missing = client.get(format!("{origin}/briefing/{}/images/9", created.id)).send().await.unwrap();
+    let references: Vec<&str> = details.split("](").skip(1).map(|rest| rest.split_once(')').unwrap().0).collect();
+    let [image, video] = references[..] else { panic!("two references in {details}") };
+    let image = image.strip_prefix(Kind::Image.scheme()).expect("the image points at its upload");
+    let video = video.strip_prefix(Kind::Video.scheme()).expect("the video points at its upload");
+    let url = |name: &str| format!("{origin}/briefing/{}/images/{name}", created.id);
+    let response = client.get(url(image)).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.bytes().await.unwrap().to_vec(), png);
+    let response = client.get(url(video)).header("range", "bytes=4-11").send().await.unwrap();
+    assert_eq!(response.status(), 206);
+    assert_eq!(response.headers()["content-type"], "video/mp4");
+    assert_eq!(response.headers()["content-range"], format!("bytes 4-11/{}", mp4.len()));
+    assert_eq!(response.bytes().await.unwrap().to_vec(), mp4[4..12]);
+    let response = client.get(url(video)).send().await.unwrap();
+    assert_eq!(response.bytes().await.unwrap().len(), mp4.len());
+    let missing = client.get(url("9")).send().await.unwrap();
     assert_eq!(missing.status(), 404);
     running.stop().await;
 
     let expired = HubConfig { active_ttl: Duration::ZERO, ..config() };
     let (_site, running) = start_hub(expired, port).await;
-    let gone = client.get(format!("{origin}/briefing/{}/images/{name}", created.id)).send().await.unwrap();
+    let gone = client.get(format!("{origin}/briefing/{}/images/{image}", created.id)).send().await.unwrap();
     assert_eq!(gone.status(), 404);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "the record and its images are removed");
     running.stop().await;

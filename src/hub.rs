@@ -18,9 +18,8 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::content::Briefing;
-use crate::images::Image;
 use crate::response::{BriefingResponse, Outcome, parse_submission};
-use crate::store::{Store, StoredRecord, now_secs};
+use crate::store::{Staged, Store, StoredRecord, now_secs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -213,14 +212,12 @@ pub fn draft_summary(presentation: &Briefing, draft: &Value) -> DraftSummary {
 struct Record {
     stored: StoredRecord,
     status: watch::Sender<BriefingStatus>,
-    /// Its images, when there is no store to keep them in.
-    images: Vec<Image>,
 }
 
 impl Record {
     fn new(stored: StoredRecord) -> Record {
         let (status, _) = watch::channel(stored.status);
-        Record { stored, status, images: Vec::new() }
+        Record { stored, status }
     }
 
     fn is_active(&self) -> bool {
@@ -307,8 +304,22 @@ impl Hub {
         })
     }
 
-    /// Register a presentation and return its id once it is saved.
-    pub fn create(&self, presentation: Briefing, images: Vec<Image>, origin: Origin) -> Result<String, HubError> {
+    /// A place for attachments to arrive before their briefing is created.
+    pub fn stage(&self) -> Result<Staged, HubError> {
+        let store = self.config.store.as_ref().ok_or_else(|| {
+            HubError::Storage("this hub keeps no state directory, so it cannot take attachments".into())
+        })?;
+        store.stage().map_err(|error| HubError::Storage(error.to_string()))
+    }
+
+    /// The bytes every attachment on this hub takes, including ones still arriving.
+    pub fn attachment_bytes(&self) -> u64 {
+        self.config.store.as_ref().map(Store::attachment_bytes).unwrap_or(0)
+    }
+
+    /// Register a presentation, with the attachments it refers to, and return its id once it is
+    /// saved.
+    pub fn create(&self, presentation: Briefing, staged: Option<Staged>, origin: Origin) -> Result<String, HubError> {
         self.sweep_if_due();
         let stored = StoredRecord {
             schema_version: crate::migrate::SCHEMA_VERSION,
@@ -324,37 +335,27 @@ impl Hub {
         };
         let id = stored.id.clone();
         let mut records = self.records.lock().unwrap();
-        // Images first, so a saved record never refers to a missing one.
-        let in_memory = match &self.config.store {
-            Some(store) => {
-                store.save_images(&id, &images).map_err(|error| {
-                    tracing::error!(%error, id, "could not write briefing images");
-                    HubError::Storage(error.to_string())
-                })?;
-                Vec::new()
-            }
-            None => images,
-        };
+        // Attachments first, so a saved record never refers to a missing one.
+        if let (Some(staged), Some(store)) = (&staged, &self.config.store) {
+            store.commit(staged, &id).map_err(|error| {
+                tracing::error!(%error, id, "could not keep briefing attachments");
+                HubError::Storage(error.to_string())
+            })?;
+        }
         if let Err(error) = self.persist(&stored) {
             if let Some(store) = &self.config.store {
                 store.remove(&id);
             }
             return Err(error);
         }
-        let mut record = Record::new(stored);
-        record.images = in_memory;
-        records.insert(id.clone(), record);
+        records.insert(id.clone(), Record::new(stored));
         Ok(id)
     }
 
-    /// An image of a live briefing, by name.
-    pub fn image(&self, id: &str, name: &str) -> Option<Vec<u8>> {
-        let in_memory =
-            self.with_record(id, |record| record.images.iter().find(|i| i.name == name).map(|i| i.data.clone()))?;
-        match &self.config.store {
-            Some(store) => store.load_image(id, name),
-            None => in_memory,
-        }
+    /// Where an attachment of a live briefing is, by name.
+    pub fn attachment(&self, id: &str, name: &str) -> Option<std::path::PathBuf> {
+        self.with_record(id, |_| ())?;
+        self.config.store.as_ref()?.attachment_path(id, name)
     }
 
     fn with_record<R>(&self, id: &str, read: impl FnOnce(&Record) -> R) -> Option<R> {
@@ -539,7 +540,7 @@ mod tests {
     async fn create_submit_wait_roundtrip() {
         let finished_ttl = Duration::from_secs(2 * 86_400);
         let hub = Hub::new(HubConfig { finished_ttl, ..HubConfig::default() });
-        let created = hub.create(demo(), Vec::new(), Origin::source("test")).unwrap();
+        let created = hub.create(demo(), None, Origin::source("test")).unwrap();
         assert_eq!(hub.status(&created), Some(BriefingStatus::Active));
 
         let page = hub.page_payload(&created).unwrap();
@@ -565,7 +566,7 @@ mod tests {
     #[test]
     fn drafts_are_revisioned() {
         let hub = Hub::new(HubConfig::default());
-        let created = hub.create(demo(), Vec::new(), Origin::default()).unwrap();
+        let created = hub.create(demo(), None, Origin::default()).unwrap();
         let draft = json!({"current": 1, "state": {"questions": {"c0-0": {"selected": ["A"], "answer": ""}, "c1-0": {"selected": [], "answer": ""}}, "annotations": [{}]}, "updatedAt": 5});
         assert_eq!(hub.save_draft(&created, Some(0), draft.clone()), Ok(DraftSave::Saved { revision: 1 }));
         assert_eq!(hub.save_draft(&created, None, draft.clone()), Ok(DraftSave::Saved { revision: 2 }));
@@ -592,7 +593,7 @@ mod tests {
     #[tokio::test]
     async fn wake_waiter_on_cancel() {
         let hub = std::sync::Arc::new(Hub::new(HubConfig::default()));
-        let created = hub.create(demo(), Vec::new(), Origin::default()).unwrap();
+        let created = hub.create(demo(), None, Origin::default()).unwrap();
         let waiter = {
             let hub = hub.clone();
             let id = created.clone();
@@ -607,7 +608,7 @@ mod tests {
     #[test]
     fn sweep_expires_records() {
         let hub = Hub::new(HubConfig { finished_ttl: Duration::ZERO, active_ttl: Duration::ZERO, store: None });
-        let created = hub.create(demo(), Vec::new(), Origin::default()).unwrap();
+        let created = hub.create(demo(), None, Origin::default()).unwrap();
         hub.sweep();
         assert!(hub.status(&created).is_none());
         assert!(hub.page_payload(&created).is_none());
@@ -620,7 +621,7 @@ mod tests {
 
         // The first hub creates a briefing and the user saves a draft, then it stops.
         let first = Hub::new(config());
-        let id = first.create(demo(), Vec::new(), Origin::source("first")).unwrap();
+        let id = first.create(demo(), None, Origin::source("first")).unwrap();
         first.save_draft(&id, None, json!({"current": 1, "state": {}, "updatedAt": 1})).unwrap();
         drop(first);
 
@@ -649,7 +650,7 @@ mod tests {
             store: Some(Store::open(&records).unwrap()),
             ..HubConfig::default()
         }));
-        let id = hub.create(demo(), Vec::new(), Origin::default()).unwrap();
+        let id = hub.create(demo(), None, Origin::default()).unwrap();
         let waiter = {
             let (hub, id) = (hub.clone(), id.clone());
             tokio::spawn(async move { hub.wait(&id, Duration::from_millis(200)).await })
@@ -657,7 +658,7 @@ mod tests {
 
         // The store goes away: every change fails, and none of them happens.
         std::fs::remove_dir_all(&records).unwrap();
-        assert!(matches!(hub.create(demo(), Vec::new(), Origin::default()), Err(HubError::Storage(_))));
+        assert!(matches!(hub.create(demo(), None, Origin::default()), Err(HubError::Storage(_))));
         assert_eq!(hub.list().len(), 1);
         let draft = json!({"current": 1, "state": {}, "updatedAt": 1});
         assert!(matches!(hub.save_draft(&id, None, draft.clone()), Err(HubError::Storage(_))));
@@ -679,7 +680,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = || Store::open(dir.path()).unwrap();
         let hub = std::sync::Arc::new(Hub::new(HubConfig { store: Some(store()), ..HubConfig::default() }));
-        let id = hub.create(demo(), Vec::new(), Origin::default()).unwrap();
+        let id = hub.create(demo(), None, Origin::default()).unwrap();
         assert_eq!(store().load(&id).unwrap().status, BriefingStatus::Active, "created on disk");
         let waiter = {
             let (hub, id) = (hub.clone(), id.clone());
@@ -698,7 +699,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = || Store::open(dir.path()).unwrap();
         let config = |active_ttl| HubConfig { store: Some(store()), active_ttl, ..HubConfig::default() };
-        let id = Hub::new(config(HubConfig::ACTIVE_TTL)).create(demo(), Vec::new(), Origin::default()).unwrap();
+        let id = Hub::new(config(HubConfig::ACTIVE_TTL)).create(demo(), None, Origin::default()).unwrap();
         assert!(store().load(&id).is_some());
         // A hub with a zero TTL loads it, finds it expired, and removes the file.
         let hub = Hub::new(config(Duration::ZERO));

@@ -15,9 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::attachments::{self, Kind};
 use crate::content::Briefing;
 use crate::hub::{BriefingStatus, Origin};
-use crate::images::{self, Image};
 use crate::migrate::{self, Migration};
 use crate::response::BriefingResponse;
 
@@ -124,31 +124,49 @@ impl Store {
         }
     }
 
-    /// A briefing's images live in `<id>.images/<name>` beside its record, and go with it.
+    /// A briefing's attachments live in `<id>.images/<name>` beside its record, and go with it.
     fn images_dir(&self, id: &str) -> Option<PathBuf> {
         self.path(id).map(|path| path.with_extension("images"))
     }
 
-    pub fn save_images(&self, id: &str, images: &[Image]) -> std::io::Result<()> {
-        if images.is_empty() {
-            return Ok(());
+    /// A new, empty place for attachments arriving before their briefing exists.
+    pub fn stage(&self) -> std::io::Result<Staged> {
+        let dir = self.dir.join(format!(".{}{STAGED_SUFFIX}", crate::hub::random_id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
         }
-        let dir = self.images_dir(id).ok_or_else(|| std::io::Error::other("invalid briefing id"))?;
-        std::fs::create_dir_all(&dir)?;
-        for image in images {
-            if !images::valid_name(&image.name) {
-                return Err(std::io::Error::other("invalid image name"));
-            }
-            write_atomic(&dir.join(&image.name), &image.data)?;
-        }
-        Ok(())
+        builder.create(&dir)?;
+        Ok(Staged { dir, attachments: Vec::new() })
     }
 
-    pub fn load_image(&self, id: &str, name: &str) -> Option<Vec<u8>> {
-        if !images::valid_name(name) {
-            return None;
-        }
-        std::fs::read(self.images_dir(id)?.join(name)).ok()
+    /// Make `staged` the attachments of briefing `id`.
+    pub fn commit(&self, staged: &Staged, id: &str) -> std::io::Result<()> {
+        let dir = self.images_dir(id).ok_or_else(|| std::io::Error::other("invalid briefing id"))?;
+        std::fs::rename(&staged.dir, dir)
+    }
+
+    pub fn attachment_path(&self, id: &str, name: &str) -> Option<PathBuf> {
+        attachments::valid_name(name).then(|| self.images_dir(id).map(|dir| dir.join(name)))?
+    }
+
+    /// The bytes every attachment takes, including ones still arriving.
+    pub fn attachment_bytes(&self) -> u64 {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| {
+                entry.file_name().to_str().is_some_and(|n| n.ends_with(".images") || n.ends_with(STAGED_SUFFIX))
+            })
+            .filter_map(|entry| std::fs::read_dir(entry.path()).ok())
+            .flat_map(|files| files.flatten())
+            .filter_map(|file| file.metadata().ok())
+            .map(|meta| meta.len())
+            .sum()
     }
 
     pub fn list(&self) -> Vec<StoredRecord> {
@@ -178,17 +196,55 @@ impl Store {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let is_tmp = name.to_str().is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"));
-                let stale = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|m| SystemTime::now().duration_since(m).ok())
-                    .is_some_and(|age| age > Duration::from_secs(60));
-                if is_tmp && stale {
+                if is_tmp && age(&entry.path()).is_some_and(|age| age > Duration::from_secs(60)) {
                     let _ = std::fs::remove_file(entry.path());
+                }
+                // Attachments whose upload stopped: nothing has been written to them for a while.
+                let is_staged = name.to_str().is_some_and(|n| n.starts_with('.') && n.ends_with(STAGED_SUFFIX));
+                if is_staged {
+                    let files = std::fs::read_dir(entry.path()).into_iter().flatten().flatten();
+                    let idle = std::iter::once(entry.path())
+                        .chain(files.map(|file| file.path()))
+                        .map(|path| age(&path).unwrap_or_default())
+                        .min()
+                        .unwrap_or_default();
+                    if idle > STAGED_IDLE {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    }
                 }
             }
         }
+    }
+}
+
+const STAGED_SUFFIX: &str = ".upload";
+const STAGED_IDLE: Duration = Duration::from_secs(10 * 60);
+
+fn age(path: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    SystemTime::now().duration_since(modified).ok()
+}
+
+/// Attachments arriving for a briefing that does not exist yet, in a hidden directory of the
+/// store. [`Store::commit`] moves them to the briefing; otherwise they go when this is dropped.
+#[derive(Debug)]
+pub struct Staged {
+    dir: PathBuf,
+    /// Each one's name and kind, as written.
+    pub attachments: Vec<(String, Kind)>,
+}
+
+impl Staged {
+    /// Where to write the attachment called `name`.
+    pub fn path(&self, name: &str) -> Option<PathBuf> {
+        attachments::valid_name(name).then(|| self.dir.join(name))
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        // Gone already once committed.
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

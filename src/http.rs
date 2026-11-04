@@ -23,18 +23,16 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::assets;
+use crate::attachments::{self, MAX_ATTACHMENTS, MAX_HUB_BYTES};
 use crate::backend::Site;
 use crate::content::{self, Briefing};
 use crate::hub::{DraftSave, HubError, Origin, random_token};
-use crate::images::{self, Image};
 use crate::protocol;
 use crate::response::BriefingOutcome;
 
 /// Browser submission cap: 500 annotations of 2 KB quote + 4 KB comment plus notes fits well inside.
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_AGENT_REQUEST_BYTES: usize = content::MAX_PRESENTATION_BYTES + 64 * 1024;
-/// A create can carry images, base64-encoded (4 bytes for every 3).
-pub const MAX_CREATE_REQUEST_BYTES: usize = MAX_AGENT_REQUEST_BYTES + images::MAX_TOTAL_IMAGE_BYTES / 3 * 4 + 64 * 1024;
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(30);
 
@@ -251,23 +249,73 @@ async fn page(State(state): State<AppState>, Path(id): Path<String>) -> Response
     let nonce = random_token(18);
     let csp = format!(
         "default-src 'none'; script-src 'self' 'nonce-{nonce}' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; \
-         connect-src 'self' http: https:; img-src 'self' data: http: https:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+         connect-src 'self' http: https:; img-src 'self' data: http: https:; media-src 'self' http: https:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     );
     html(assets::render(assets::PAGE_HTML, &nonce), csp)
 }
 
-/// An image uploaded with a briefing. Fetched by `<img>`, which sends no protocol header; the
-/// briefing id is the capability, as for the page itself.
-async fn image(State(state): State<AppState>, Path((id, name)): Path<(String, String)>) -> Result<Response, HubError> {
-    let bytes = state.hub.image(&id, &name).ok_or(HubError::NotFound)?;
-    let media_type = images::media_type(&bytes).ok_or(HubError::NotFound)?;
-    let mut response = Response::new(Body::from(bytes));
+/// A file attached to a briefing. Fetched by `<img>` and `<video>`, which send no protocol header;
+/// the briefing id is the capability, as for the page itself. Videos are fetched in byte ranges,
+/// which Safari needs to play them at all.
+async fn attachment(
+    State(state): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, HubError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let path = state.hub.attachment(&id, &name).ok_or(HubError::NotFound)?;
+    let mut file = tokio::fs::File::open(&path).await.map_err(|_| HubError::NotFound)?;
+    let len = file.metadata().await.map_err(|_| HubError::NotFound)?.len();
+    let mut head = Vec::with_capacity(attachments::SNIFF_BYTES);
+    (&mut file).take(attachments::SNIFF_BYTES as u64).read_to_end(&mut head).await.map_err(|_| HubError::NotFound)?;
+    let (media_type, _) = attachments::media_type(&head).ok_or(HubError::NotFound)?;
+    let range =
+        headers.get(header::RANGE).and_then(|value| value.to_str().ok()).and_then(|value| byte_range(value, len));
+    let (status, start, end) = match range {
+        None => (StatusCode::OK, 0, len),
+        Some(Some((start, end))) => (StatusCode::PARTIAL_CONTENT, start, end),
+        Some(None) => {
+            let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            response.headers_mut().insert(header::CONTENT_RANGE, header_value(format!("bytes */{len}")));
+            return Ok(response);
+        }
+    };
+    file.seek(std::io::SeekFrom::Start(start)).await.map_err(|_| HubError::NotFound)?;
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file.take(end - start)));
+    let mut response = (status, body).into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(media_type));
+    headers.insert(header::CONTENT_LENGTH, header_value((end - start).to_string()));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if status == StatusCode::PARTIAL_CONTENT {
+        headers.insert(header::CONTENT_RANGE, header_value(format!("bytes {start}-{}/{len}", end - 1)));
+    }
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=31536000, immutable"));
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'"));
     Ok(response)
+}
+
+fn header_value(value: String) -> HeaderValue {
+    HeaderValue::try_from(value).expect("digits and ASCII punctuation")
+}
+
+/// The half-open byte range a `Range` header asks for in a file of `len` bytes: `None` to send the
+/// whole file (no single byte range asked), `Some(None)` when the range is outside the file.
+fn byte_range(value: &str, len: u64) -> Option<Option<(u64, u64)>> {
+    let (first, last) = value.strip_prefix("bytes=")?.split_once('-')?;
+    let number = |text: &str| text.trim().parse::<u64>().ok();
+    let range = match (first.trim().is_empty(), last.trim().is_empty()) {
+        // The last `n` bytes.
+        (true, false) => {
+            let n = number(last)?.min(len);
+            Some((len - n, len))
+        }
+        (false, true) => Some((number(first)?, len)),
+        (false, false) => Some((number(first)?, number(last)?.saturating_add(1).min(len))),
+        (true, true) => return None,
+    };
+    Some(range.filter(|(start, end)| start < end))
 }
 
 async fn dashboard() -> Response {
@@ -363,29 +411,40 @@ async fn save_draft(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateRequest {
     pub presentation: Briefing,
-    /// Local images the presentation refers to as `briefing-image:<name>`. Left out when there
-    /// are none, so a hub that predates images still accepts the request.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub images: Vec<Image>,
     /// Who created it, e.g. `claude-code@laptop`; shown on the dashboard.
     #[serde(flatten)]
     pub origin: Origin,
 }
 
+/// The part of a multipart create that carries the [`CreateRequest`]. Every later part is an
+/// attachment, named as the presentation refers to it.
+pub const CREATE_PART: &str = "request";
+
+/// Create a briefing from a JSON [`CreateRequest`], or from `multipart/form-data` when it brings
+/// attachments: the request first, then each attachment, streamed to the hub's disk.
 async fn agent_create(
     State(site): State<AppState>,
     Extension(Protocol(protocol)): Extension<Protocol>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
+    request: Request<Body>,
 ) -> Response {
-    if !agent_origin_ok(&site, &headers) {
+    if !agent_origin_ok(&site, request.headers()) {
         return text(StatusCode::FORBIDDEN, "Forbidden");
     }
-    let body: CreateRequest = match serde_json::from_value(body) {
-        Ok(body) => body,
-        Err(error) => return json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()})),
+    let multipart = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("multipart/form-data"));
+    let received = if multipart {
+        receive_attachments(&site, request).await.map(|(body, staged)| (body, Some(staged)))
+    } else {
+        receive_json(request.into_body()).await.map(|body| (body, None))
     };
-    match site.create(body.presentation, body.images, body.origin).await {
+    let (body, staged) = match received {
+        Ok(received) => received,
+        Err(response) => return *response,
+    };
+    match site.create(body.presentation, staged, body.origin).await {
         Ok(created) => {
             let mut created = serde_json::to_value(created).unwrap_or_default();
             if protocol == 2 {
@@ -393,11 +452,98 @@ async fn agent_create(
             }
             json_response(StatusCode::CREATED, created)
         }
-        Err(error) if error.is::<content::ValidationError>() => {
-            json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()}))
-        }
+        Err(error) if error.is::<content::ValidationError>() => bad_request(error.to_string()),
         Err(error) => json_response(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": error.to_string()})),
     }
+}
+
+fn bad_request(error: impl std::fmt::Display) -> Response {
+    json_response(StatusCode::BAD_REQUEST, json!({"error": error.to_string()}))
+}
+
+async fn receive_json(body: Body) -> Result<CreateRequest, Box<Response>> {
+    let bytes = axum::body::to_bytes(body, MAX_AGENT_REQUEST_BYTES)
+        .await
+        .map_err(|_| Box::new(text(StatusCode::PAYLOAD_TOO_LARGE, "Request too large")))?;
+    Ok(serde_json::from_slice(&bytes).map_err(bad_request)?)
+}
+
+/// The request part, then each attachment written to a staging place on the hub's disk, within
+/// the hub's total.
+async fn receive_attachments(
+    site: &Site,
+    request: Request<Body>,
+) -> Result<(CreateRequest, crate::store::Staged), Box<Response>> {
+    use axum::extract::{FromRequest, Multipart};
+    use tokio::io::AsyncWriteExt;
+    let mut multipart = Multipart::from_request(request, &()).await.map_err(IntoResponse::into_response)?;
+    let bad_part = |error: axum::extract::multipart::MultipartError| bad_request(error.body_text());
+    // Each part must be dropped before the next is asked for.
+    let json = {
+        let mut field = multipart.next_field().await.map_err(bad_part)?.filter(|f| f.name() == Some(CREATE_PART));
+        let Some(field) = field.as_mut() else {
+            return Err(bad_request(format!("a multipart create starts with its `{CREATE_PART}` part")).into());
+        };
+        let mut json = Vec::new();
+        while let Some(chunk) = field.chunk().await.map_err(bad_part)? {
+            json.extend_from_slice(&chunk);
+            if json.len() > MAX_AGENT_REQUEST_BYTES {
+                return Err(text(StatusCode::PAYLOAD_TOO_LARGE, "Request too large").into());
+            }
+        }
+        json
+    };
+    let body: CreateRequest = serde_json::from_slice(&json).map_err(bad_request)?;
+    // Before taking what may be gigabytes for it.
+    content::validate(&body.presentation).map_err(bad_request)?;
+    let mut staged = site.hub.stage().map_err(IntoResponse::into_response)?;
+    let over_quota = || {
+        json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({"error": format!("the hub keeps at most {}GB of attachments; this briefing's would go over", MAX_HUB_BYTES / 1024 / 1024 / 1024)}),
+        )
+    };
+    // Measured again as it grows, since other uploads share the total.
+    const REMEASURE_EVERY: u64 = 64 * 1024 * 1024;
+    let mut used = site.hub.attachment_bytes();
+    while let Some(mut field) = multipart.next_field().await.map_err(bad_part)? {
+        let name = field.name().unwrap_or_default().to_owned();
+        if staged.attachments.len() == MAX_ATTACHMENTS {
+            return Err(bad_request(format!("a briefing can attach at most {MAX_ATTACHMENTS} files")).into());
+        }
+        let path = staged
+            .path(&name)
+            .filter(|_| staged.attachments.iter().all(|(seen, _)| *seen != name))
+            .ok_or_else(|| bad_request(format!("attachment name {name:?} is invalid or repeated")))?;
+        let storage = |error: std::io::Error| HubError::Storage(error.to_string()).into_response();
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&path).await.map_err(storage)?;
+        let mut head = Vec::with_capacity(attachments::SNIFF_BYTES);
+        let mut unmeasured = 0;
+        while let Some(chunk) = field.chunk().await.map_err(bad_part)? {
+            let wanted = attachments::SNIFF_BYTES.saturating_sub(head.len()).min(chunk.len());
+            head.extend_from_slice(&chunk[..wanted]);
+            used += chunk.len() as u64;
+            unmeasured += chunk.len() as u64;
+            if unmeasured >= REMEASURE_EVERY {
+                used = site.hub.attachment_bytes() + chunk.len() as u64;
+                unmeasured = 0;
+            }
+            if used > MAX_HUB_BYTES {
+                return Err(over_quota().into());
+            }
+            file.write_all(&chunk).await.map_err(storage)?;
+        }
+        file.sync_all().await.map_err(storage)?;
+        let Some((_, kind)) = attachments::media_type(&head) else {
+            return Err(bad_request(format!("attachment {name} is not {}", attachments::KINDS)).into());
+        };
+        staged.attachments.push((name, kind));
+    }
+    Ok((body, staged))
 }
 
 async fn agent_list(State(site): State<AppState>, Extension(Protocol(protocol)): Extension<Protocol>) -> Response {
@@ -464,7 +610,7 @@ pub fn router(site: Arc<Site>, mcp: Option<Router<Arc<Site>>>) -> Router {
         .route("/healthz", get(healthz))
         .route(&format!("{}{{name}}", assets::ASSET_PREFIX), get(asset))
         .route("/briefing/{id}", get(page))
-        .route("/briefing/{id}/images/{name}", get(image))
+        .route("/briefing/{id}/images/{name}", get(attachment))
         .route("/", get(dashboard))
         .route("/control/shutdown", post(control_shutdown));
     if let Some(mcp) = mcp {
@@ -479,7 +625,8 @@ pub fn router(site: Arc<Site>, mcp: Option<Router<Arc<Site>>>) -> Router {
     let agent_api = Router::new()
         .route(
             "/agent/briefings",
-            post(agent_create).layer(DefaultBodyLimit::max(MAX_CREATE_REQUEST_BYTES)).get(agent_list),
+            // Attachments are limited by the hub's total instead, as they arrive.
+            post(agent_create).layer(DefaultBodyLimit::disable()).get(agent_list),
         )
         .route("/agent/briefings/{id}", get(agent_info))
         .route("/agent/briefings/{id}/wait", get(agent_wait))
@@ -537,6 +684,17 @@ pub fn origin_for(public_host: IpAddr, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_ranges_are_clamped_to_the_file() {
+        assert_eq!(byte_range("bytes=0-", 10), Some(Some((0, 10))));
+        assert_eq!(byte_range("bytes=2-4", 10), Some(Some((2, 5))));
+        assert_eq!(byte_range("bytes=5-99", 10), Some(Some((5, 10))));
+        assert_eq!(byte_range("bytes=-3", 10), Some(Some((7, 10))));
+        assert_eq!(byte_range("bytes=10-", 10), Some(None));
+        assert_eq!(byte_range("bytes=0-1,4-5", 10), None, "several ranges get the whole file");
+        assert_eq!(byte_range("items=0-1", 10), None);
+    }
 
     fn config() -> HttpConfig {
         HttpConfig {

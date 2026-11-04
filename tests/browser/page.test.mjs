@@ -381,3 +381,23 @@ test("an attached local image shows within the column and enlarges on tap", asyn
   assert.equal(await page.locator("dialog[open]").count(), 0);
   await done(page);
 });
+
+test("an attached local video plays in place within the column", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 800 } });
+  const page = await context.newPage();
+  page.errors = [];
+  page.on("pageerror", error => page.errors.push(error.message));
+  await page.goto(await serveFile(join(dirname(FIXTURE), "image-fixture.json")));
+  const video = page.locator(".markdown video");
+  await video.waitFor();
+  await page.waitForFunction(() => document.querySelector(".markdown video").readyState >= 1);
+  const shown = await video.evaluate(v => ({ controls: v.controls, width: v.videoWidth, duration: v.duration, label: v.getAttribute("aria-label"), right: v.getBoundingClientRect().right, column: v.closest("main").getBoundingClientRect().right }));
+  assert.ok(shown.controls, "it has playback controls");
+  assert.equal(shown.width, 160, "the uploaded file loads");
+  assert.ok(shown.duration > 0.5, "its length is known before it plays");
+  assert.equal(shown.label, "A moving test pattern");
+  assert.ok(shown.right <= shown.column, "the video fits the column");
+  await video.evaluate(v => { v.muted = true; return v.play(); });
+  await page.waitForFunction(() => document.querySelector(".markdown video").currentTime > 0);
+  await done(page);
+});
