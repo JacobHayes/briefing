@@ -1,0 +1,102 @@
+{
+  "title": "Checkout latency regression",
+  "goal": "Decide how to fix the slow checkout before Thursday's release",
+  "chunks": [
+    {
+      "title": "Checkout got 3x slower on Monday",
+      "purpose": "Pin down what changed before looking at why.",
+      "mainPoint": "p95 latency for `POST /checkout` jumped from about 180 ms to 640 ms with Monday's deploy, and it grows with cart size.",
+      "keyPoints": [
+        "Only checkout is affected; every other endpoint is flat.",
+        "Carts with one item are as fast as before.",
+        "Database CPU rose 22% over the same period."
+      ],
+      "details": "```vega-lite\n{\n  \"$schema\": \"https://vega.github.io/schema/vega-lite/v5.json\",\n  \"width\": \"container\",\n  \"height\": 180,\n  \"data\": { \"values\": [\n    { \"day\": \"Thu\", \"p95\": 176 },\n    { \"day\": \"Fri\", \"p95\": 183 },\n    { \"day\": \"Sat\", \"p95\": 171 },\n    { \"day\": \"Sun\", \"p95\": 179 },\n    { \"day\": \"Mon\", \"p95\": 612 },\n    { \"day\": \"Tue\", \"p95\": 648 },\n    { \"day\": \"Wed\", \"p95\": 637 }\n  ] },\n  \"mark\": { \"type\": \"bar\", \"cornerRadiusEnd\": 3 },\n  \"encoding\": {\n    \"x\": { \"field\": \"day\", \"type\": \"nominal\", \"sort\": null, \"title\": null, \"axis\": { \"labelAngle\": 0 } },\n    \"y\": { \"field\": \"p95\", \"type\": \"quantitative\", \"title\": \"p95 latency (ms)\" }\n  }\n}\n```",
+      "remember": [
+        "The regression scales with the number of items in the cart."
+      ]
+    },
+    {
+      "title": "The cause is one query per cart item",
+      "purpose": "The fix depends on where the extra time goes.",
+      "mainPoint": "Monday's price-rules change made the cart serializer load each item's price rule separately, so a 12-item cart now runs 14 queries instead of 2.",
+      "keyPoints": [
+        "The loop is in `CartSerializer.line_items`.",
+        "Each lookup takes about 35 ms, and they run one after another.",
+        "Nothing is wrong with the query itself; it is just run once per item."
+      ],
+      "details": "```mermaid\nsequenceDiagram\n  participant API as Checkout API\n  participant DB as Postgres\n  API->>DB: load cart\n  API->>DB: load line items\n  loop for each line item\n    API->>DB: load price rule\n  end\n  API-->>API: serialize response\n```\n\n| Cart size | Queries before | Queries now | p95 now |\n|---|---|---|---|\n| 1 item | 2 | 3 | 190 ms |\n| 5 items | 2 | 7 | 350 ms |\n| 12 items | 2 | 14 | 640 ms |",
+      "remember": [
+        "Query count is 2 + one per line item."
+      ]
+    },
+    {
+      "title": "Three ways to fix it",
+      "purpose": "Each one removes the extra queries; they differ in risk and reach.",
+      "mainPoint": "Loading every price rule in one query is the smallest change that brings checkout back to two round trips.",
+      "details": "| Fix | Queries per checkout | Files touched | Risk |\n|---|---|---|---|\n| Load price rules in one query | 3 | 1 | Low |\n| Cache price rules in Redis | 2, once warm | 4 | Stale prices |\n| Copy the price onto each line item | 2 | 9 + migration | Schema change |",
+      "questions": [
+        {
+          "question": "Which fix should I implement?",
+          "context": "The release freeze starts Thursday, so whatever ships has to be reviewed by Wednesday night.",
+          "options": [
+            {
+              "label": "Load price rules in one query",
+              "description": "Fetch every rule for the cart up front and look them up in memory.",
+              "tradeoffs": [
+                "One-file change, easy to review before the freeze",
+                "Still one extra query per checkout"
+              ],
+              "recommended": true
+            },
+            {
+              "label": "Cache price rules in Redis",
+              "description": "Keep rules in Redis and invalidate them when a rule is edited.",
+              "tradeoffs": [
+                "Fastest once warm",
+                "A missed invalidation charges a stale price"
+              ]
+            },
+            {
+              "label": "Copy the price onto each line item",
+              "description": "Store the resolved price when an item is added to the cart.",
+              "tradeoffs": [
+                "Removes the lookup entirely",
+                "Needs a migration and a backfill of open carts"
+              ]
+            }
+          ]
+        },
+        {
+          "question": "Is there anything in the checkout path I should leave alone?"
+        }
+      ]
+    }
+  ],
+  "tray": {
+    "keyContext": [
+      "Release freeze starts Thursday at 09:00.",
+      "The average cart has 5 items; the largest this week had 41.",
+      "Price rules change a few times a day."
+    ],
+    "runningSummary": "Checkout is slow because of one extra query per cart item, introduced Monday. Three fixes are on the table.",
+    "openQuestions": [
+      "Do any other serializers use the same pattern?"
+    ]
+  },
+  "questions": [
+    {
+      "question": "Should I add a test that fails if checkout runs more than 3 queries?",
+      "options": [
+        {
+          "label": "Yes, in the same change",
+          "recommended": true
+        },
+        {
+          "label": "Not now"
+        }
+      ]
+    }
+  ],
+  "completionPrompt": "Ready to send this back?"
+}

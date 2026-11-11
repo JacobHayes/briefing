@@ -39,7 +39,7 @@ npm test
 """
 
 [tasks."docs:screenshots"]
-description = "recapture the README screenshots and walkthrough GIF from assets/demo.json"
+description = "recapture the README screenshots and walkthrough GIF from docs/screenshots/showcase.json"
 dir = "tests/browser"
 tools = { "conda:ffmpeg" = "9" }
 run = """

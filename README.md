@@ -1,51 +1,51 @@
 # briefing
 
-**Paced browser briefings for coding agents.** When Claude Code, Codex, Pi, or any agent
-that speaks MCP has something too long or too layered for a chat reply, it opens a briefing
-in your browser instead: one idea per screen, context one click away, inline comments on
-anything you select, optional questions right under the context they depend on (pick an
-option or answer in your own words), a free-standing Notes panel, and a review screen before
-you send it back.
-Only what you wrote returns to the agent.
+**Read your coding agent's long answers one idea at a time, and answer back in the margins.**
 
-![Walkthrough: read a chunk, comment on a passage, open the Context panel, answer a question, review what goes back](docs/screenshots/tour.gif)
+When an agent has more to say than fits in a chat reply (research findings, a plan, a
+decision that needs background), it opens a briefing in your browser instead of printing a
+wall of text. You step through it at your own pace, comment on any passage, answer its
+questions right where the context is, and send back only what you wrote.
 
-```mermaid
-flowchart LR
-    A[Agent finishes<br/>its research] --> B[Opens a briefing<br/>in your browser]
-    B --> C[You read it one idea at a time,<br/>comment, and answer]
-    C --> D[Your notes and answers<br/>go back to the agent]
-```
+![Walkthrough: read a section, comment on a sentence, answer two questions, review and submit](docs/screenshots/tour.gif)
+
+1. **The agent finishes its work** and opens a briefing: a handful of sections, each with one
+   main idea.
+2. **You read, comment and answer** in the browser, on whichever device is handy.
+3. **Your comments, answers and notes go back** to the agent as structured feedback, and it
+   carries on from there.
+
+It works with Claude Code, Codex, Pi, and any other agent that speaks MCP or can run a
+command. Try it without an agent: `briefing demo`.
 
 ## Why
 
-- **Long agent answers don't get read.** A wall of text in a terminal is skimmed, then
-  argued with from memory. A briefing paces the same content so each idea lands before the
-  next one.
-- **Feedback should be precise.** Select any sentence, table cell, diagram node, or chart and
-  comment on exactly that. The agent gets the quoted passage with your note, not a paraphrase.
-- **Questions need context first.** A chunk's questions sit at the bottom of the chunk that
-  justifies them (questions about the whole briefing go on the review screen), with the
-  recommended option first and its tradeoffs spelled out. Answers are optional: skip one and
-  it goes back as unresolved, never as a silent yes.
-- **It survives everything.** Drafts save as you type. If the agent's process dies, or you
-  switch from laptop to phone, the briefing picks up where you left off, and the agent can
-  fetch your answers later.
+- **Long answers get skimmed.** A wall of terminal text is hard to take in, and by the time
+  you reply you are arguing from memory. A briefing shows one idea per screen, with nothing
+  advancing until you say so.
+- **Feedback lands on the exact spot.** Select a sentence, a table cell, a diagram node or a
+  chart and comment on it. The agent receives the quoted passage with your note, so it never
+  has to guess what "the second option" meant.
+- **Questions come with their context.** Each question sits under the section that explains
+  it, with the recommended option first and its tradeoffs spelled out. Pick an option,
+  answer in your own words, or skip it: a skipped question goes back as unresolved, never as
+  a silent yes.
+- **Nothing gets lost.** Drafts save as you type. If the agent's process dies, or you move
+  from laptop to phone, the briefing picks up where you left off and the agent can fetch
+  your answers later.
 
 ## A tour
 
 | | |
 |---|---|
-| ![A comment pinned next to its highlighted passage](docs/screenshots/03-inline-comment.png) | ![The Context panel: goal, things to keep in mind, running summary, open questions](docs/screenshots/04-context.png) |
-| Select text, press **Comment**, and the note lives next to the passage. | The **Context** panel keeps the goal and stable facts one click away. |
-| ![A question with its recommended option chosen and room to answer in your own words](docs/screenshots/05-question.png) | ![The review screen listing answers, unresolved questions and comments before submit](docs/screenshots/06-review.png) |
-| Questions sit under the section they depend on, with a recommendation and honest tradeoffs. Answers are optional. | The review screen shows exactly what goes back; a skipped question goes back as unresolved. |
-| ![The Outline sidebar listing each section with its open questions](docs/screenshots/07-outline.png) | ![A Mermaid diagram rendered in dark mode](docs/screenshots/08-dark.png) |
-| The **Outline** jumps to any section and shows what's still open; **Notes** shares the sidebar. | Light and dark follow your system, diagrams included. |
-| ![A Mermaid diagram inside a chunk with its own Comment button](docs/screenshots/02-rich-content.png) | ![A Vega-Lite bar chart inside a chunk](docs/screenshots/02b-chart.png) |
-| Markdown, GFM tables, code, and Mermaid diagrams render inline; nodes and edges are commentable, and a diagram expands to fill the screen. | Vega-Lite charts too, all served from the binary with no CDN. Images and videos as well, from a URL or a local file. |
-
-Try it yourself: `briefing demo`.
+| ![A question with three options; the recommended one is chosen](docs/screenshots/question.png) | ![The review screen listing an answer and an unresolved question above Submit](docs/screenshots/review.png) |
+| **Questions** come with a recommendation and concrete tradeoffs, and room to answer in your own words. | **Review** shows exactly what goes back to the agent before you submit. |
+| ![A comment pinned in the margin beside its highlighted sentence](docs/screenshots/comment.png) | ![The Outline docked beside the page, listing each section and its open questions](docs/screenshots/outline.png) |
+| **Comments** stay pinned beside the passage they are about. | The **Outline** jumps to any section and shows what is still open; **Notes** shares the sidebar for thoughts that belong to no single passage. |
+| ![The Context panel: goal, things to keep in mind, running summary, open questions](docs/screenshots/context.png) | ![A bar chart inside a section, with its own Comment button](docs/screenshots/chart.png) |
+| **Context** keeps the goal and the facts worth remembering one click away. | **Charts** (Vega-Lite), tables, code, images and videos render inline. |
+| ![A sequence diagram inside a section, with Expand and Comment buttons](docs/screenshots/diagram.png) | ![The same diagram in dark mode](docs/screenshots/dark.png) |
+| **Diagrams** (Mermaid syntax) expand to fill the screen, and each node and edge takes comments. | Light and dark follow your system. Everything is served from the one binary, with no CDN. |
 
 ## Quick start
 
@@ -68,8 +68,8 @@ mise use -g github:JacobHayes/briefing@latest
 Optionally link `skills/briefing` into a harness's skills directory for raw CLI use if it does
 not use the MCP server or Pi extension; those integrations already carry their own guidance.
 
-**3. Ask for one.** Say "brief me on the options for X" or just let the agent decide: it is
-told to open a briefing whenever an answer crosses a complexity threshold and to stay in
+**3. Ask for one.** Say "brief me on the options for X", or let the agent decide: its
+instructions tell it to open a briefing when an answer is long or layered, and to stay in
 chat for anything short.
 
 ## How it works
@@ -316,7 +316,7 @@ mise install         # rust (+ clippy, rustfmt, release targets), zig, cargo-zig
 mise run check       # full project gate: format, generated skill, clippy -D warnings, tests, Pi extension
 mise run pi:check    # focused Pi extension typecheck/smoke
 mise run fix         # format, clippy --fix, regenerate skill
-mise run docs:screenshots  # recapture the README screenshots and tour.gif from assets/demo.json
+mise run docs:screenshots  # recapture the README screenshots and tour.gif from docs/screenshots/showcase.json
 mise use -g github:JacobHayes/briefing@latest   # or: cargo install --path . --locked
 mise run assets:update
 cargo zigbuild --release --target aarch64-apple-darwin   # any release target, from Linux
